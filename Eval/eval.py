@@ -1,8 +1,7 @@
 import json
 import re
-import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 
 # =========================
@@ -16,6 +15,7 @@ with open("prompts/time_judge.prompt.txt", "r", encoding="utf-8") as f:
 
 with open("prompts/utility_judge.prompt.txt", "r", encoding="utf-8") as f:
     UTILITY_JUDGE_PROMPT = f.read()
+
 
 # =========================
 # 2. Data Structures
@@ -53,6 +53,15 @@ class UtilityResult:
 class CaseRecommendationEvaluator:
     """
     输入完整对话，输出案例推荐是否准确。
+    full_dialogue 格式固定为：
+    [
+        "用户：对话内容",
+        "客服：对话内容",
+        "用户：对话内容",
+        "客服：对话内容",
+        ...
+    ]
+
     你只需要实现 _call_llm() 这个方法，就能接入你自己的模型服务。
     """
 
@@ -63,27 +72,29 @@ class CaseRecommendationEvaluator:
 
     def evaluate(
         self,
-        full_dialogue: str,
+        full_dialogue: List[str],
         retrieved_cases: str = "",
         strict: bool = True,
     ) -> Dict[str, Any]:
         """
         Args:
-            full_dialogue: 完整对话，建议格式如下：
-                第1轮用户：...
-                第1轮客服：...
-                第2轮用户：...
-                第2轮客服：...
-                ...
+            full_dialogue: 完整对话，格式示例：
+                [
+                    "用户：你好，我这边登录异常",
+                    "客服：您好，请问报什么错？",
+                    "用户：提示权限不足",
+                    "客服：建议您重新登录试试"
+                ]
             retrieved_cases: 返回案例内容，可为空
             strict: True 表示严格版准确率；False 表示宽松版
 
         Returns:
             一个结构化字典，包含 detector、timing、utility 和最终准确性结论
         """
+        self._validate_dialogue_list(full_dialogue)
+
         detector = self.detect_first_case_usage(full_dialogue)
 
-        # 没有首次案例知识使用轮，直接判失败
         if not detector.has_case_usage or detector.first_case_usage_turn is None:
             return {
                 "accurate": False,
@@ -99,8 +110,8 @@ class CaseRecommendationEvaluator:
             }
 
         truncated_dialogue, first_response = self._truncate_dialogue_to_turn(
-            full_dialogue,
-            detector.first_case_usage_turn
+            full_dialogue=full_dialogue,
+            turn_id=detector.first_case_usage_turn
         )
 
         timing = self.judge_timing(
@@ -136,8 +147,13 @@ class CaseRecommendationEvaluator:
             },
         }
 
-    def detect_first_case_usage(self, full_dialogue: str) -> DetectorResult:
-        prompt = DETECTOR_PROMPT.format(full_dialogue=full_dialogue)
+    def detect_first_case_usage(self, full_dialogue: List[str]) -> DetectorResult:
+        """
+        检测是否存在首次案例使用轮。
+        注意：这里约定 first_case_usage_turn 表示“第几轮客服回复”，从 1 开始计数。
+        """
+        dialogue_text = self._dialogue_list_to_text(full_dialogue)
+        prompt = DETECTOR_PROMPT.format(full_dialogue=dialogue_text)
         result = self._call_and_parse_json(prompt)
 
         return DetectorResult(
@@ -153,7 +169,7 @@ class CaseRecommendationEvaluator:
         first_case_usage_response: str,
         retrieved_cases: str = "",
     ) -> TimingResult:
-        prompt = TIMING_JUDGE_PROMPT.format(
+        prompt = TIME_JUDGE_PROMPT.format(
             dialogue_until_first_case_usage=dialogue_until_first_case_usage,
             first_case_usage_response=first_case_usage_response,
             retrieved_cases=retrieved_cases or "无"
@@ -190,26 +206,97 @@ class CaseRecommendationEvaluator:
 
     # ---------- Internal Helpers ----------
 
-    def _truncate_dialogue_to_turn(self, full_dialogue: str, turn_id: int) -> (str, str):
+    def _truncate_dialogue_to_turn(self, full_dialogue: List[str], turn_id: int) -> Tuple[str, str]:
         """
-        从完整对话中截断到指定客服轮，并返回：
-        1. 截断后的对话
-        2. 该轮客服原文
+        从完整对话中截断到指定“客服轮”，并返回：
+        1. 截断后的对话文本
+        2. 该轮客服原文（不带“客服：”前缀）
+
+        例如：
+        full_dialogue = [
+            "用户：A",
+            "客服：B",
+            "用户：C",
+            "客服：D"
+        ]
+
+        turn_id = 2
+        返回：
+        (
+            "用户：A\n客服：B\n用户：C\n客服：D",
+            "D"
+        )
         """
-        lines = [line.rstrip() for line in full_dialogue.splitlines() if line.strip()]
         kept_lines: List[str] = []
         first_case_usage_response = ""
+        agent_turn_count = 0
 
-        agent_pattern = re.compile(rf"^第{turn_id}轮客服[:：](.*)$")
+        for line in full_dialogue:
+            if not isinstance(line, str):
+                continue
 
-        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
             kept_lines.append(line)
-            match = agent_pattern.match(line)
-            if match:
-                first_case_usage_response = match.group(1).strip()
-                break
+
+            if self._is_agent_line(line):
+                agent_turn_count += 1
+                if agent_turn_count == turn_id:
+                    first_case_usage_response = self._strip_role_prefix(line)
+                    break
 
         return "\n".join(kept_lines), first_case_usage_response
+
+    def _dialogue_list_to_text(self, full_dialogue: List[str]) -> str:
+        """
+        将 List[str] 格式对话转为 prompt 使用的字符串。
+        """
+        cleaned_lines = []
+        for line in full_dialogue:
+            if not isinstance(line, str):
+                continue
+            line = line.strip()
+            if line:
+                cleaned_lines.append(line)
+        return "\n".join(cleaned_lines)
+
+    def _validate_dialogue_list(self, full_dialogue: List[str]) -> None:
+        """
+        对输入对话做基本校验。
+        """
+        if not isinstance(full_dialogue, list):
+            raise TypeError("full_dialogue 必须是 List[str] 格式。")
+
+        if len(full_dialogue) == 0:
+            raise ValueError("full_dialogue 不能为空。")
+
+        for i, line in enumerate(full_dialogue):
+            if not isinstance(line, str):
+                raise TypeError(f"full_dialogue[{i}] 不是字符串。")
+
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if not (
+                stripped.startswith("用户：") or stripped.startswith("用户:")
+                or stripped.startswith("客服：") or stripped.startswith("客服:")
+            ):
+                raise ValueError(
+                    f'full_dialogue[{i}] 格式不合法："{line}"。'
+                    '每一项应以 "用户：" 或 "客服：" 开头。'
+                )
+
+    def _is_agent_line(self, line: str) -> bool:
+        return line.startswith("客服：") or line.startswith("客服:")
+
+    def _strip_role_prefix(self, line: str) -> str:
+        """
+        去掉 '用户：' / '客服：' 这类前缀，只保留内容。
+        """
+        return re.sub(r"^(用户|客服)[:：]\s*", "", line).strip()
 
     def _call_and_parse_json(self, prompt: str) -> Dict[str, Any]:
         raw = self._call_llm(prompt)
@@ -221,13 +308,11 @@ class CaseRecommendationEvaluator:
         """
         text = text.strip()
 
-        # 先直接解析
         try:
             return json.loads(text)
         except Exception:
             pass
 
-        # 再尝试提取 ```json ... ```
         code_block_match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S)
         if code_block_match:
             try:
@@ -235,7 +320,6 @@ class CaseRecommendationEvaluator:
             except Exception:
                 pass
 
-        # 再尝试提取最外层 JSON 对象
         brace_match = re.search(r"(\{.*\})", text, flags=re.S)
         if brace_match:
             try:
@@ -277,7 +361,6 @@ class OpenAICompatibleCaseRecommendationEvaluator(CaseRecommendationEvaluator):
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # 延迟导入，避免没有装包时直接报错
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
@@ -307,7 +390,12 @@ def evaluate_dataset(
     dataset 中每个元素格式示例：
     {
         "id": "sample_001",
-        "full_dialogue": "...",
+        "full_dialogue": [
+            "用户：...",
+            "客服：...",
+            "用户：...",
+            "客服：..."
+        ],
         "retrieved_cases": "..."
     }
     """
@@ -347,7 +435,6 @@ def evaluate_dataset(
 # =========================
 
 if __name__ == "__main__":
-    # 你需要改成自己的配置
     evaluator = OpenAICompatibleCaseRecommendationEvaluator(
         api_key="your_api_key",
         base_url="https://api.openai.com/v1",
@@ -356,14 +443,14 @@ if __name__ == "__main__":
         max_tokens=1024,
     )
 
-    full_dialogue = """
-第1轮用户：你好，我这边welink登录后一直报权限异常。
-第1轮客服：您好，请问您当前使用的是电脑端还是手机端？
-第2轮用户：电脑端。
-第2轮客服：好的，收到。
-第3轮用户：而且昨天还能用，今天突然不行了。
-第3轮客服：这种情况一般是权限未同步导致的，建议您先退出账号后重新登录试试。
-""".strip()
+    full_dialogue = [
+        "用户：你好，我这边welink登录后一直报权限异常。",
+        "客服：您好，请问您当前使用的是电脑端还是手机端？",
+        "用户：电脑端。",
+        "客服：好的，收到。",
+        "用户：而且昨天还能用，今天突然不行了。",
+        "客服：这种情况一般是权限未同步导致的，建议您先退出账号后重新登录试试。"
+    ]
 
     retrieved_cases = """
 案例1：
