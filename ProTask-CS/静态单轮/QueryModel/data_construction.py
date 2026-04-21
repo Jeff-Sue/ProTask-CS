@@ -1,6 +1,6 @@
 import json
 import os
-from utils.multi_api import call_qwen_api
+from utils.multi_api import parallel_inference_dual_servers
 
 
 def summarize_query(dialogue):
@@ -20,12 +20,7 @@ def summarize_query(dialogue):
     prompt = prompt_template.replace("{p_dialogue}", query_text)
     messages = [{"role": "user", "content": prompt}]
 
-    try:
-        summary = call_qwen_api(messages)
-        return summary.strip()
-    except Exception as e:
-        print(f"总结查询失败: {e}")
-        return "总结失败"
+    return messages
 
 
 def process_dataset(input_path, output_dir):
@@ -35,14 +30,37 @@ def process_dataset(input_path, output_dir):
     with open(input_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    # 准备样本列表
+    samples = []
+    key_to_idx = {}
     processed_data = {}
-    for key, item in data.items():
+    for idx, (key, item) in enumerate(data.items()):
         dialogue = item.get("text", [])
-        summary = summarize_query(dialogue)
-        processed_data[key] = {
-            "original": item,
-            "summary_query": summary
-        }
+        messages = summarize_query(dialogue)
+        if isinstance(messages, str):  # 无用户查询
+            processed_data[key] = {
+                "original": item,
+                "summary_query": messages
+            }
+        else:  # 有消息，加入批量处理
+            samples.append({
+                "id": key,
+                "messages": messages
+            })
+            key_to_idx[key] = idx
+
+    # 批量并发推理
+    if samples:
+        results = parallel_inference_dual_servers(samples)
+
+        # 处理结果
+        for result in results:
+            key = result["id"]
+            summary = result["response"].strip() if result["success"] else "总结失败"
+            processed_data[key] = {
+                "original": data[key],
+                "summary_query": summary
+            }
 
     return processed_data
 
