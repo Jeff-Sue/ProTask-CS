@@ -14,28 +14,53 @@ def new_runtime():
     )
 
 
+def dataclass_to_dict(obj):
+    """
+    兼容 dataclass / dict / list 的简单转换。
+    """
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+    return obj
+
+
 def build_state_panel(result):
-    """把当前轮所有状态整理成右侧 JSON 面板。"""
+    """
+    把当前轮所有状态整理成右侧 JSON 面板。
+    注意：
+    - evidence_used_this_turn 是本轮实际传给 Policy / Response 的 evidence
+    - active_evidence 是系统状态中当前保留、可跨轮复用的 evidence
+    - last_retrieved_cases 是最近一次 RAG 返回的原始候选 evidence
+    """
     evidence_state = result.state_snapshot.get("evidence_state", {})
 
     return {
         "turn_id": result.turn_id,
-        "query_state": result.query_state.__dict__,
-        "trigger_state": result.trigger_state.__dict__,
-        "policy_state": result.policy_state.__dict__,
+        "query_state": dataclass_to_dict(result.query_state),
+        "trigger_state": dataclass_to_dict(result.trigger_state),
+        "policy_state": dataclass_to_dict(result.policy_state),
         "evidence_used_this_turn": [
-            case.__dict__ for case in result.retrieval_output
+            dataclass_to_dict(case) for case in result.retrieval_output
         ],
         "active_evidence": evidence_state.get("active_evidence", []),
         "last_retrieved_cases": evidence_state.get("last_retrieved_cases", []),
         "evidence_source_query": evidence_state.get("evidence_source_query", ""),
-        "latency": result.latency.__dict__,
+        "latency": dataclass_to_dict(result.latency),
     }
 
 
 def chat(user_input, chat_history, runtime):
+    """
+    Gradio 旧版 Chatbot 兼容格式：
+    chat_history = [
+        [用户消息, 客服回复],
+        ...
+    ]
+    """
     if runtime is None:
         runtime = new_runtime()
+
+    if chat_history is None:
+        chat_history = []
 
     if not user_input or not user_input.strip():
         return "", chat_history, runtime, {}
@@ -62,6 +87,7 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
     gr.Markdown("# 动态多轮 IT 客服系统")
 
     with gr.Row():
+        # 左侧：正常对话区
         with gr.Column(scale=2, min_width=520):
             chatbot = gr.Chatbot(
                 label="对话",
@@ -79,6 +105,7 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
 
             reset_btn = gr.Button("重置对话")
 
+        # 右侧：状态面板
         with gr.Column(scale=1, min_width=420):
             gr.Markdown("## 当前轮状态")
             state_json = gr.JSON(
@@ -103,6 +130,7 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
         inputs=[],
         outputs=[chatbot, runtime_state, state_json],
     )
+
 
 if __name__ == "__main__":
     demo.launch(
