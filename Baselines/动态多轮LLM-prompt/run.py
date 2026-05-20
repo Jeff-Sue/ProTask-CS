@@ -40,7 +40,7 @@ except Exception:
 # ==================== 日志配置 ====================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -469,11 +469,13 @@ class DynamicMultiTurnRuntime:
         retriever: Callable[[str, str], List[Dict[str, str]]] = default_retriever,
         retrieval_top_k: int = 5,
         save_history_path: Optional[str] = None,
+        verbose: bool = False,
     ) -> None:
         self.state = DialogueState(dialogue_id=dialogue_id)
         self.retriever = retriever
         self.retrieval_top_k = retrieval_top_k
         self.save_history_path = save_history_path
+        self.verbose = verbose
         self.turn_results: List[TurnResult] = []
 
     # ---------- 对外主入口 ----------
@@ -486,7 +488,8 @@ class DynamicMultiTurnRuntime:
         total_start = time.time()
         self.state.current_turn_id += 1
         turn_id = self.state.current_turn_id
-        logger.info("Processing dynamic turn %s", turn_id)
+        if self.verbose:
+            logger.info("Processing dynamic turn %s", turn_id)
 
         # 0. 追加用户输入
         self.state.turns.append(DialogueTurn(role="user", text=user_input))
@@ -797,23 +800,56 @@ def print_turn_result(result: TurnResult) -> None:
     print("=" * 80 + "\n")
 
 
+def print_chat_response(result: TurnResult) -> None:
+    """正常对话界面：只显示客服回复。"""
+    print(f"客服：{result.response}
+")
+
+
 def interactive_main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Dynamic multi-turn IT customer-service runtime")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="显示 Query/Trigger/Policy/Evidence/Latency 等完整中间状态。默认只显示对话内容。",
+    )
+    parser.add_argument(
+        "--save-path",
+        default="dynamic_runtime_output.json",
+        help="运行日志保存路径。默认 dynamic_runtime_output.json。",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="RAG 返回案例数量。默认 5。",
+    )
+    args = parser.parse_args()
+
+    logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
+
     runtime = DynamicMultiTurnRuntime(
         dialogue_id="interactive_dialogue",
-        retrieval_top_k=5,
-        save_history_path="dynamic_runtime_output.json",
+        retrieval_top_k=args.top_k,
+        save_history_path=args.save_path,
+        verbose=args.debug,
     )
 
     print("动态多轮 IT 客服 Runtime 已启动。")
-    print("输入用户消息后回车。输入 /exit 退出，/reset 重置对话，/state 查看状态。")
+    if args.debug:
+        print("当前模式：debug，中间状态会显示。输入 /exit 退出，/reset 重置对话，/state 查看状态，/debug 关闭调试显示。")
+    else:
+        print("当前模式：chat，只显示正常对话。输入 /exit 退出，/reset 重置对话，/state 查看状态，/debug 打开调试显示。")
 
     while True:
         user_input = input("用户：").strip()
         if not user_input:
             continue
         if user_input == "/exit":
-            runtime.save("dynamic_runtime_output.json")
-            print("已退出，并保存到 dynamic_runtime_output.json")
+            runtime.save(args.save_path)
+            print(f"已退出，并保存到 {args.save_path}")
             break
         if user_input == "/reset":
             runtime.reset(dialogue_id="interactive_dialogue")
@@ -822,10 +858,19 @@ def interactive_main() -> None:
         if user_input == "/state":
             print(json.dumps(runtime.snapshot_state(), ensure_ascii=False, indent=2))
             continue
+        if user_input == "/debug":
+            runtime.verbose = not runtime.verbose
+            args.debug = runtime.verbose
+            logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
+            print(f"已切换到 {'debug' if args.debug else 'chat'} 模式。")
+            continue
 
         try:
             result = runtime.step(user_input)
-            print_turn_result(result)
+            if args.debug:
+                print_turn_result(result)
+            else:
+                print_chat_response(result)
         except Exception as e:
             logger.exception("Turn failed")
             print(f"当前轮执行失败：{e}")
