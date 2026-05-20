@@ -43,8 +43,7 @@ def chat(user_input, chat_history, runtime):
     result = runtime.step(user_input.strip())
 
     chat_history = chat_history + [
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": result.response},
+        [user_input, result.response]
     ]
 
     state_panel = build_state_panel(result)
@@ -63,11 +62,9 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
     gr.Markdown("# 动态多轮 IT 客服系统")
 
     with gr.Row():
-        # 左侧：正常对话区
         with gr.Column(scale=2, min_width=520):
             chatbot = gr.Chatbot(
                 label="对话",
-                type="messages",
                 height=620,
             )
 
@@ -82,7 +79,6 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
 
             reset_btn = gr.Button("重置对话")
 
-        # 右侧：状态面板
         with gr.Column(scale=1, min_width=420):
             gr.Markdown("## 当前轮状态")
             state_json = gr.JSON(
@@ -107,7 +103,6 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
         inputs=[],
         outputs=[chatbot, runtime_state, state_json],
     )
-
 
 if __name__ == "__main__":
     demo.launch(
