@@ -1,7 +1,15 @@
 import uuid
+import inspect
 import gradio as gr
 
 from dynamic_multiturn_runtime import DynamicMultiTurnRuntime
+
+
+def chatbot_supports_type() -> bool:
+    return "type" in inspect.signature(gr.Chatbot).parameters
+
+
+USE_MESSAGES_FORMAT = chatbot_supports_type()
 
 
 def new_runtime():
@@ -15,22 +23,12 @@ def new_runtime():
 
 
 def dataclass_to_dict(obj):
-    """
-    兼容 dataclass / dict / list 的简单转换。
-    """
     if hasattr(obj, "__dict__"):
         return obj.__dict__
     return obj
 
 
 def build_state_panel(result):
-    """
-    把当前轮所有状态整理成右侧 JSON 面板。
-    注意：
-    - evidence_used_this_turn 是本轮实际传给 Policy / Response 的 evidence
-    - active_evidence 是系统状态中当前保留、可跨轮复用的 evidence
-    - last_retrieved_cases 是最近一次 RAG 返回的原始候选 evidence
-    """
     evidence_state = result.state_snapshot.get("evidence_state", {})
 
     return {
@@ -48,14 +46,22 @@ def build_state_panel(result):
     }
 
 
-def chat(user_input, chat_history, runtime):
-    """
-    Gradio 旧版 Chatbot 兼容格式：
-    chat_history = [
-        [用户消息, 客服回复],
-        ...
+def append_chat_history(chat_history, user_input, assistant_response):
+    if chat_history is None:
+        chat_history = []
+
+    if USE_MESSAGES_FORMAT:
+        return chat_history + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": assistant_response},
+        ]
+
+    return chat_history + [
+        [user_input, assistant_response]
     ]
-    """
+
+
+def chat(user_input, chat_history, runtime):
     if runtime is None:
         runtime = new_runtime()
 
@@ -67,9 +73,11 @@ def chat(user_input, chat_history, runtime):
 
     result = runtime.step(user_input.strip())
 
-    chat_history = chat_history + [
-        [user_input, result.response]
-    ]
+    chat_history = append_chat_history(
+        chat_history=chat_history,
+        user_input=user_input.strip(),
+        assistant_response=result.response,
+    )
 
     state_panel = build_state_panel(result)
 
@@ -87,12 +95,18 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
     gr.Markdown("# 动态多轮 IT 客服系统")
 
     with gr.Row():
-        # 左侧：正常对话区
         with gr.Column(scale=2, min_width=520):
-            chatbot = gr.Chatbot(
-                label="对话",
-                height=620,
-            )
+            if USE_MESSAGES_FORMAT:
+                chatbot = gr.Chatbot(
+                    label="对话",
+                    height=620,
+                    type="messages",
+                )
+            else:
+                chatbot = gr.Chatbot(
+                    label="对话",
+                    height=620,
+                )
 
             with gr.Row():
                 user_box = gr.Textbox(
@@ -105,7 +119,6 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
 
             reset_btn = gr.Button("重置对话")
 
-        # 右侧：状态面板
         with gr.Column(scale=1, min_width=420):
             gr.Markdown("## 当前轮状态")
             state_json = gr.JSON(
@@ -133,6 +146,7 @@ with gr.Blocks(title="动态多轮 IT 客服系统") as demo:
 
 
 if __name__ == "__main__":
+    print(f"Gradio Chatbot format: {'messages' if USE_MESSAGES_FORMAT else 'tuples'}")
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
