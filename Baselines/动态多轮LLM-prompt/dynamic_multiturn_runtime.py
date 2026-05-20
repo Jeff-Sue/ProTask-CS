@@ -8,8 +8,9 @@
    - active_evidence 为空：Query -> Retrieval -> Trigger -> Policy -> Response
    - active_evidence 非空：Query -> Trigger -> Retrieval/Reuse/NoEvidence -> Policy -> Response
 4. Query / Trigger / Policy / Response 均通过 prompt-based LLM 调用；
-5. Retrieval 可替换为你已有的 rag(query, dialogue_history, use_chat)；
-6. 每轮保存 query、trigger、retrieval、policy、response、latency 和 dialogue_state。
+5. prompt 文件必须放在当前脚本同级目录下的 prompts/ 文件夹中；
+6. Retrieval 可替换为你已有的 rag(query, dialogue_history, use_chat)；
+7. 每轮保存 query、trigger、retrieval、policy、response、latency 和 dialogue_state。
 
 注意：
 - 这是动态多轮 runtime，不再输出 1...N 的完整 trajectory；
@@ -22,9 +23,28 @@ from __future__ import annotations
 import json
 import time
 import logging
+import os
+import contextlib
 from pathlib import Path
 from dataclasses import dataclass, asdict, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+# ==================== 输出控制 ====================
+
+@contextlib.contextmanager
+def suppress_stdout_stderr(enabled: bool = True):
+    """
+    非 debug 模式下屏蔽底层 LLM/RAG 函数里的 print、tqdm、耗时输出等。
+    这类输出通常不是 logging，因此单纯设置 logging level 无法关闭。
+    """
+    if not enabled:
+        yield
+        return
+
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
 
 # ==================== 可选：接入你原工程里的 LLM / RAG ====================
 
@@ -144,9 +164,20 @@ class TurnResult:
     latency: Latency
     state_snapshot: Dict[str, Any]
 
+
 # ==================== Prompt 管理 ====================
 
-PROMPT_DIR = Path("prompts")
+# prompt 文件放在当前脚本同级目录下的 prompts/ 文件夹中。
+# 例如：
+# dynamic_multiturn_runtime.py
+# prompts/
+#   dynamic_query.prompt
+#   dynamic_trigger_use.prompt
+#   dynamic_trigger_retrieval.prompt
+#   dynamic_policy.prompt
+#   dynamic_response.prompt
+PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
+
 PROMPT_FILES = {
     "query": "dynamic_query.prompt",
     "trigger_use": "dynamic_trigger_use.prompt",
@@ -155,128 +186,33 @@ PROMPT_FILES = {
     "response": "dynamic_response.prompt",
 }
 
-DEFAULT_QUERY_PROMPT = """
-你是一个 IT 客服动态多轮系统中的 Query 更新模块。
-你的任务是根据当前完整对话历史、上一轮 query 状态和用户最新输入，输出当前轮 query 状态。
-
-你必须输出 JSON，不要输出额外文本。
-
-字段要求：
-{
-  "query_mode": "<none|reuse|refine|rewrite>",
-  "query_text": "",
-  "reason": ""
-}
-
-标签定义：
-- none：当前用户输入不形成业务检索意图，例如寒暄、确认、感谢。
-- reuse：当前用户只是补充信息或确认，核心问题不变，继续使用上一轮 query。
-- refine：当前用户补充了新的约束、报错、系统名称或场景，需要细化上一轮 query。
-- rewrite：当前用户提出了新问题或主题发生切换，需要重写 query。
-
-约束：
-- query_mode=none 时，query_text 必须为空字符串。
-- query_mode!=none 时，query_text 必须是可用于检索的简洁查询。
-""".strip()
-
-DEFAULT_TRIGGER_USE_PROMPT = """
-你是一个 IT 客服动态多轮系统中的 Knowledge-use Trigger 模块。
-当前 active_evidence 为空，系统已经根据当前 query 进行了检索。
-你的任务是判断 retrieved evidence 是否可用于当前轮回复。
-
-你必须输出 JSON，不要输出额外文本。
-
-字段要求：
-{
-  "trigger": true,
-  "evidence_mode": "<no_evidence_needed|retrieve_new_evidence>",
-  "reason": ""
-}
-
-判断规则：
-- 如果 retrieved evidence 与当前问题匹配，并且足以支持客服当前回复，则 trigger=true, evidence_mode=retrieve_new_evidence。
-- 如果 retrieved evidence 不匹配、过泛、证据不足，或者当前更应该追问澄清，则 trigger=false, evidence_mode=no_evidence_needed。
-
-注意：
-- 这里 Retrieval 已经发生，所以 evidence_mode=retrieve_new_evidence 表示“本轮新检索得到的 evidence 可被激活使用”。
-- 不要输出 reuse_existing_evidence，因为当前 active_evidence 为空。
-""".strip()
-
-DEFAULT_TRIGGER_RETRIEVAL_PROMPT = """
-你是一个 IT 客服动态多轮系统中的 Retrieval Trigger 模块。
-当前系统已经存在 active_evidence。
-你的任务是根据当前对话、当前 query 和已有 active_evidence，判断本轮是否需要知识，以及是否需要重新检索。
-
-你必须输出 JSON，不要输出额外文本。
-
-字段要求：
-{
-  "trigger": true,
-  "evidence_mode": "<no_evidence_needed|reuse_existing_evidence|retrieve_new_evidence>",
-  "reason": ""
-}
-
-判断规则：
-- no_evidence_needed：当前轮只是确认、接收信息、流程告知、寒暄等，不需要使用案例知识。
-- reuse_existing_evidence：当前问题仍被已有 active_evidence 覆盖，可以复用已有案例。
-- retrieve_new_evidence：用户问题发生主题切换，或当前 query 明显超出已有 evidence 覆盖范围，需要重新检索。
-
-约束：
-- trigger=false 时，evidence_mode 必须是 no_evidence_needed。
-- trigger=true 时，evidence_mode 只能是 reuse_existing_evidence 或 retrieve_new_evidence。
-""".strip()
-
-DEFAULT_POLICY_PROMPT = """
-你是一个 IT 客服动态多轮系统中的 Policy 模块。
-你的任务是根据当前对话历史、query 状态、trigger 状态和可用 evidence，判断当前客服回复应该采取哪一种服务动作。
-
-你必须输出 JSON，不要输出额外文本。
-
-字段要求：
-{
-  "label": "<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>",
-  "reason": ""
-}
-
-标签定义：
-- AskMissingSlot：缺少处理问题所需的关键客观信息，例如账号、系统名、报错截图、工号、设备环境。
-- AskClarification：用户描述含糊，需要澄清具体问题、现象或意图。
-- ExplainedResponse：可以直接解释原因、规则、概念或操作说明。
-- CaseRecommendation：已有可用案例，应该给出具体解决方案或处理步骤。
-- Handoff：当前问题需要人工、后台、工单或其他团队介入。
-- ProcessAcknowledgement：确认收到、告知已记录、说明后续流程或等待处理。
-""".strip()
-
-DEFAULT_RESPONSE_PROMPT = """
-你是一个 IT 客服回复生成模块。
-你的任务是根据当前对话历史、query 状态、trigger 状态、policy 动作和可用 evidence，生成当前轮客服回复。
-
-要求：
-1. 回复自然、简洁、可执行；
-2. 如果 policy 是 AskMissingSlot 或 AskClarification，优先提出必要问题，不要过早给方案；
-3. 如果 policy 是 CaseRecommendation，应结合 evidence 给出具体步骤；
-4. 如果 policy 是 ProcessAcknowledgement，应确认收到并说明后续处理；
-5. 不要编造 evidence 中不存在的具体制度、链接或流程；
-6. 只输出客服回复文本，不要输出 JSON。
-""".strip()
-
 
 def load_prompt(prompt_name: str, prompt_dir: Path = PROMPT_DIR) -> str:
+    """
+    从当前脚本同级 prompts/ 目录读取动态多轮 prompt。
+    不再使用内置 DEFAULT_PROMPT；如果文件不存在，直接报错，避免误用旧 prompt。
+    """
+    if prompt_name not in PROMPT_FILES:
+        raise KeyError(f"Unknown prompt name: {prompt_name}")
+
     file_name = PROMPT_FILES[prompt_name]
     path = prompt_dir / file_name
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
 
-    defaults = {
-        "query": DEFAULT_QUERY_PROMPT,
-        "trigger_use": DEFAULT_TRIGGER_USE_PROMPT,
-        "trigger_retrieval": DEFAULT_TRIGGER_RETRIEVAL_PROMPT,
-        "policy": DEFAULT_POLICY_PROMPT,
-        "response": DEFAULT_RESPONSE_PROMPT,
-    }
-    logger.warning("Prompt file %s not found. Using built-in default prompt.", path)
-    return defaults[prompt_name]
+    if not path.exists():
+        required = "\n".join(f"- {name}" for name in PROMPT_FILES.values())
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}\n"
+            f"Please put the following prompt files under: {prompt_dir}\n"
+            f"{required}"
+        )
+
+    with open(path, "r", encoding="utf-8") as f:
+        prompt = f.read().strip()
+
+    if not prompt:
+        raise ValueError(f"Prompt file is empty: {path}")
+
+    return prompt
 
 
 QUERY_PROMPT = load_prompt("query")
@@ -285,8 +221,8 @@ TRIGGER_RETRIEVAL_PROMPT = load_prompt("trigger_retrieval")
 POLICY_PROMPT = load_prompt("policy")
 RESPONSE_PROMPT = load_prompt("response")
 
-# ==================== 文本格式化 ====================
 
+# ==================== 文本格式化 ====================
 
 def format_dialogue_history(turns: Sequence[DialogueTurn]) -> str:
     if not turns:
@@ -327,8 +263,8 @@ def format_trigger_state(trigger_state: TriggerState) -> str:
 def format_policy_state(policy_state: PolicyState) -> str:
     return f"label: {policy_state.label}\nreason: {policy_state.reason}"
 
-# ==================== LLM 调用层 ====================
 
+# ==================== LLM 调用层 ====================
 
 def _extract_text_from_parallel_result(result: Any) -> str:
     if isinstance(result, str):
@@ -348,10 +284,13 @@ def _extract_text_from_parallel_result(result: Any) -> str:
     raise ValueError(f"Unrecognized LLM result format: {type(result)} -> {result}")
 
 
-def call_llm_text(messages: List[Dict[str, str]]) -> str:
+def call_llm_text(messages: List[Dict[str, str]], quiet: bool = True) -> str:
     """
     默认接入原工程 parallel_inference。
     如果你本地没有 parallel_inference，请替换这里。
+
+    quiet=True 时会屏蔽 parallel_inference 内部的 tqdm/print/耗时输出，
+    只保留当前脚本控制的对话显示。
     """
     if parallel_inference is None:
         raise RuntimeError(
@@ -360,7 +299,8 @@ def call_llm_text(messages: List[Dict[str, str]]) -> str:
         )
 
     item = {"messages": messages}
-    result = parallel_inference([item])
+    with suppress_stdout_stderr(enabled=quiet):
+        result = parallel_inference([item])
     return _extract_text_from_parallel_result(result).strip()
 
 
@@ -375,13 +315,13 @@ def strip_code_fence(text: str) -> str:
     return text
 
 
-def call_llm_json(messages: List[Dict[str, str]]) -> Dict[str, Any]:
-    text = call_llm_text(messages)
+def call_llm_json(messages: List[Dict[str, str]], quiet: bool = True) -> Dict[str, Any]:
+    text = call_llm_text(messages, quiet=quiet)
     text = strip_code_fence(text)
     return json.loads(text)
 
-# ==================== Retriever ====================
 
+# ==================== Retriever ====================
 
 def default_retriever(query_text: str, dialogue_history: str) -> List[Dict[str, str]]:
     """
@@ -410,8 +350,8 @@ def normalize_cases(raw_cases: Sequence[Dict[str, Any]], top_k: int = 5) -> List
         )
     return cases
 
-# ==================== 输出解析与校验 ====================
 
+# ==================== 输出解析与校验 ====================
 
 def parse_query_state(raw: Dict[str, Any]) -> QueryState:
     state = QueryState(
@@ -459,6 +399,7 @@ def parse_policy_state(raw: Dict[str, Any]) -> PolicyState:
     if state.label not in ALLOWED_POLICY_LABELS:
         raise ValueError(f"Invalid policy label: {state.label}")
     return state
+
 
 # ==================== 动态 Runtime ====================
 
@@ -515,18 +456,23 @@ class DynamicMultiTurnRuntime:
             # 2. 根据 active_evidence 是否为空决定链路
             if not self.state.evidence_state.active_evidence:
                 # Cold-start: Query -> Retrieval -> Trigger(use)
-                response_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
-                self.state.evidence_state.last_retrieved_cases = response_cases
+                # retrieved_cases 先只作为 Trigger 的判断输入；只有 Trigger=true 时才进入 Policy/Response。
+                retrieved_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
+                self.state.evidence_state.last_retrieved_cases = retrieved_cases
 
                 trigger_state, trigger_ms = self.run_trigger_use(
-                    retrieved_cases=response_cases,
+                    retrieved_cases=retrieved_cases,
                 )
                 self.state.trigger_state = trigger_state
 
-                # Trigger 判断新检索 evidence 可用，则写入 active_evidence
+                # Trigger 判断新检索 evidence 可用，则写入 active_evidence，并作为本轮可用 evidence。
                 if trigger_state.trigger and trigger_state.evidence_mode == "retrieve_new_evidence":
-                    self.state.evidence_state.active_evidence = response_cases
+                    self.state.evidence_state.active_evidence = retrieved_cases
                     self.state.evidence_state.evidence_source_query = query_state.query_text
+                    response_cases = retrieved_cases
+                else:
+                    # 和 dynamic_trigger_use.prompt 对齐：trigger=false 时，本轮不使用 retrieved evidence。
+                    response_cases = []
 
             else:
                 # Stateful: Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence
@@ -610,7 +556,7 @@ class DynamicMultiTurnRuntime:
             {"role": "system", "content": QUERY_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = call_llm_json(messages)
+        raw = call_llm_json(messages, quiet=not self.verbose)
         output = parse_query_state(raw)
         elapsed_ms = int((time.time() - start) * 1000)
         return output, elapsed_ms
@@ -618,7 +564,8 @@ class DynamicMultiTurnRuntime:
     def run_retrieval(self, query_text: str) -> Tuple[List[RetrievalCase], int]:
         start = time.time()
         dialogue_history = format_dialogue_history(self.state.turns)
-        raw_cases = self.retriever(query_text, dialogue_history)
+        with suppress_stdout_stderr(enabled=not self.verbose):
+            raw_cases = self.retriever(query_text, dialogue_history)
         cases = normalize_cases(raw_cases, top_k=self.retrieval_top_k)
         elapsed_ms = int((time.time() - start) * 1000)
         return cases, elapsed_ms
@@ -651,7 +598,7 @@ class DynamicMultiTurnRuntime:
             {"role": "system", "content": TRIGGER_USE_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = call_llm_json(messages)
+        raw = call_llm_json(messages, quiet=not self.verbose)
         output = parse_trigger_state(raw, active_evidence_empty=True)
         elapsed_ms = int((time.time() - start) * 1000)
         return output, elapsed_ms
@@ -684,7 +631,7 @@ class DynamicMultiTurnRuntime:
             {"role": "system", "content": TRIGGER_RETRIEVAL_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = call_llm_json(messages)
+        raw = call_llm_json(messages, quiet=not self.verbose)
         output = parse_trigger_state(raw, active_evidence_empty=False)
         elapsed_ms = int((time.time() - start) * 1000)
         return output, elapsed_ms
@@ -713,7 +660,7 @@ class DynamicMultiTurnRuntime:
             {"role": "system", "content": POLICY_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        raw = call_llm_json(messages)
+        raw = call_llm_json(messages, quiet=not self.verbose)
         output = parse_policy_state(raw)
         elapsed_ms = int((time.time() - start) * 1000)
         return output, elapsed_ms
@@ -745,7 +692,7 @@ class DynamicMultiTurnRuntime:
             {"role": "system", "content": RESPONSE_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        response = call_llm_text(messages).strip()
+        response = call_llm_text(messages, quiet=not self.verbose).strip()
         elapsed_ms = int((time.time() - start) * 1000)
         return response, elapsed_ms
 
@@ -777,8 +724,8 @@ class DynamicMultiTurnRuntime:
         if self.save_history_path:
             self.save(self.save_history_path)
 
-# ==================== 命令行交互环境 ====================
 
+# ==================== 命令行交互环境 ====================
 
 def print_turn_result(result: TurnResult) -> None:
     print("\n" + "=" * 80)
@@ -802,8 +749,7 @@ def print_turn_result(result: TurnResult) -> None:
 
 def print_chat_response(result: TurnResult) -> None:
     """正常对话界面：只显示客服回复。"""
-    print(f"客服：{result.response}
-")
+    print(f"客服：{result.response}\n")
 
 
 def interactive_main() -> None:
