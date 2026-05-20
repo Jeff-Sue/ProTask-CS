@@ -36,6 +36,14 @@ class DialogueInput:
 
 
 @dataclass
+class Case:
+    """案例数据结构"""
+    id: str  # 案例ID
+    title: str  # 案例标题
+    content: str  # 案例内容
+
+
+@dataclass
 class QueryResult:
     """查询结果"""
     query: str  # 生成的查询
@@ -44,7 +52,7 @@ class QueryResult:
 @dataclass
 class RetrieverResult:
     """检索结果"""
-    evidence: List[str]  # 检索到的证据列表
+    evidence: List[Case]  # 检索到的证据列表（包含id, title, content）
 
 
 @dataclass
@@ -58,6 +66,7 @@ class TriggerResult:
 class PolicyResult:
     """策略结果"""
     dialogue_action: str  # 对话动作
+    case_id: Optional[str] = None  # 选定的案例ID（如果适用）
 
 
 @dataclass
@@ -123,13 +132,13 @@ def call_retriever_model(
     logger.info("Step 2: Calling Retriever Model...")
     
     # TODO: 构造prompt并调用API
-    evidence: List[str] = []
+    evidence: List[Case] = []
     
     return RetrieverResult(evidence=evidence)
 
 
 def call_trigger_model(
-    evidence: List[str],
+    evidence: List[Case],
     dialogue_history: List[str]
 ) -> TriggerResult:
     """
@@ -154,7 +163,7 @@ def call_trigger_model(
 
 def call_policy_model(
     dialogue_history: List[str],
-    evidence: Optional[List[str]] = None
+    evidence: Optional[List[Case]] = None
 ) -> PolicyResult:
     """
     调用Policy Model判断对话动作
@@ -172,14 +181,15 @@ def call_policy_model(
     # 情况1: 有evidence -> 把evidence和历史对话输入
     # 情况2: 无evidence -> 只把历史对话输入
     dialogue_action = ""
+    case_id = None  # 如果有evidence，选择一个case_id
     
-    return PolicyResult(dialogue_action=dialogue_action)
+    return PolicyResult(dialogue_action=dialogue_action, case_id=case_id)
 
 
 def call_response_model(
     dialogue_history: List[str],
     dialogue_action: str,
-    evidence: Optional[List[str]] = None
+    evidence: Optional[List[Case]] = None
 ) -> ResponseResult:
     """
     调用Response Model生成回复
@@ -187,7 +197,7 @@ def call_response_model(
     Args:
         dialogue_history: 对话历史
         dialogue_action: 对话动作
-        evidence: 可选的检索证据
+        evidence: 可选的检索证据（只包含选定的case_id对应的id, title, content）
     
     Returns:
         ResponseResult: 回复结果
@@ -267,7 +277,10 @@ def process_dialogues(dialogue_inputs: List[DialogueInput], golden_responses: Li
             
             # Step 5: 调用Response Model
             start_time = time.time()
-            evidence_for_response = retriever_result.evidence if trigger_result.should_trigger else None
+            evidence_for_response = None
+            if trigger_result.should_trigger and policy_result.case_id:
+                # 只传入case_id对应的case（包含id, title, content）
+                evidence_for_response = [case for case in retriever_result.evidence if case.id == policy_result.case_id]
             response_result = call_response_model(
                 dialogue_input.dialogue_history,
                 policy_result.dialogue_action,
