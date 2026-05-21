@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 import gradio as gr
 
-from run import DynamicMultiTurnRuntime
+from dynamic_multiturn_runtime_v3 import DynamicMultiTurnRuntime
 
 
 # ==================== Runtime ====================
@@ -355,6 +355,84 @@ def reset_chat():
         render_state_cards(state),
         render_full_json(state),
     )
+
+
+def runtime_turns_to_chat_history(runtime: DynamicMultiTurnRuntime) -> List[Dict[str, str]]:
+    """
+    将 runtime.state.turns 转换为前端 HTML 渲染使用的 chat_history。
+    """
+    return [
+        {"role": turn.role, "content": turn.text}
+        for turn in runtime.state.turns
+    ]
+
+
+def load_prefix_from_text(
+    prefix_text: str,
+    runtime: DynamicMultiTurnRuntime,
+):
+    """
+    从网页文本框加载历史 prefix。
+
+    输入格式示例：
+    用户: 我的 VPN 登录不了
+    客服: 请问有什么具体报错？
+    用户: 提示账号无权限
+    """
+    if runtime is None:
+        runtime = new_runtime()
+
+    if not prefix_text or not prefix_text.strip():
+        status_html = """
+        <div class="prefix-status prefix-error">
+            请输入历史对话。格式示例：用户: ... / 客服: ...
+        </div>
+        """
+        return (
+            render_chat([]),
+            runtime,
+            [],
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
+    try:
+        runtime.load_dialogue_prefix_text(prefix_text, reset_state=True)
+        chat_history = runtime_turns_to_chat_history(runtime)
+
+        status_html = f"""
+        <div class="prefix-status prefix-success">
+            已加载历史对话：共 {len(runtime.state.turns)} 条消息，
+            已完成客服轮数 {runtime.state.current_turn_id}。
+            现在可以在左侧输入下一轮用户问题，观察系统回复。
+        </div>
+        """
+
+        return (
+            render_chat(chat_history),
+            runtime,
+            chat_history,
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
+    except Exception as e:
+        status_html = f"""
+        <div class="prefix-status prefix-error">
+            加载失败：{html.escape(str(e))}
+        </div>
+        """
+        return (
+            render_chat([]),
+            runtime,
+            [],
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
 
 
 # ==================== CSS ====================
@@ -952,6 +1030,35 @@ button[variant="primary"] {
     border-radius: 14px !important;
 }
 
+
+.prefix-status {
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.7;
+    margin-top: 10px;
+}
+
+.prefix-success {
+    background: #effdf3;
+    border: 1px solid #abefc6;
+    color: #027a48;
+}
+
+.prefix-error {
+    background: #fff1f3;
+    border: 1px solid #fecdd6;
+    color: #be123c;
+}
+
+.prefix-help {
+    color: var(--text-3);
+    font-size: 13px;
+    line-height: 1.7;
+    margin-bottom: 10px;
+}
+
+
 footer {
     display: none !important;
 }
@@ -1045,6 +1152,28 @@ with gr.Blocks(
 
                     reset_btn = gr.Button("清空并重新开始")
 
+                    with gr.Accordion("加载历史对话 Prefix", open=False):
+                        gr.HTML("""
+                        <div class="prefix-help">
+                            输入已有历史对话，系统会将其作为 dialogue history 加载。
+                            格式示例：<br>
+                            用户: 我的 VPN 登录不了<br>
+                            客服: 请问有什么具体报错？<br>
+                            用户: 提示账号无权限
+                        </div>
+                        """)
+                        prefix_box = gr.Textbox(
+                            placeholder=(
+                                "用户: 我的 VPN 登录不了\n"
+                                "客服: 请问有什么具体报错？\n"
+                                "用户: 提示账号无权限"
+                            ),
+                            show_label=False,
+                            lines=8,
+                        )
+                        load_prefix_btn = gr.Button("加载为历史对话", variant="secondary")
+                        prefix_status = gr.HTML(value="")
+
         with gr.Column(scale=5, min_width=520):
             with gr.Group(elem_classes=["state-shell"]):
                 gr.HTML("""
@@ -1099,6 +1228,19 @@ with gr.Blocks(
             chat_history_state,
             state_cards,
             state_json,
+        ],
+    )
+
+    load_prefix_btn.click(
+        fn=load_prefix_from_text,
+        inputs=[prefix_box, runtime_state],
+        outputs=[
+            chat_display,
+            runtime_state,
+            chat_history_state,
+            state_cards,
+            state_json,
+            prefix_status,
         ],
     )
 
