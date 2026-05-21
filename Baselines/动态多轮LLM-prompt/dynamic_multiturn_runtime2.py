@@ -1,33 +1,35 @@
 """
 动态多轮 LLM-prompt Runtime 环境
 
-设计目标：
-1. 将静态 prefix pipeline 改造成动态多轮交互环境；
-2. 系统持续维护 dialogue_state，而不是每轮重新构造 gold prefix；
-3. 使用 active_evidence 是否为空决定 retrieval 链路：
-   - active_evidence 为空：Query -> Retrieval -> Trigger -> Policy -> Response
-   - active_evidence 非空：Query -> Trigger -> Retrieval/Reuse/NoEvidence -> Policy -> Response
-4. Query / Trigger / Policy / Response 均通过 prompt-based LLM 调用；
-5. prompt 文件必须放在当前脚本同级目录下的 prompts/ 文件夹中；
-6. Retrieval 可替换为你已有的 rag(query, dialogue_history, use_chat)；
-7. 每轮保存 query、trigger、retrieval、policy、response、latency 和 dialogue_state。
-
-注意：
-- 这是动态多轮 runtime，不再输出 1...N 的完整 trajectory；
-- 每轮只输出当前 turn 的状态；
-- 完整 trajectory 由多轮运行日志自然累积形成。
+核心机制：
+1. 动态维护 dialogue_state，而不是每轮重新构造 gold prefix；
+2. 使用 active_evidence 是否为空决定链路：
+   - active_evidence 为空：Query -> Retrieval -> Trigger(use) -> Policy -> Guard -> Response
+   - active_evidence 非空：Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence -> Policy -> Guard -> Response
+3. prompt 文件必须放在当前脚本同级目录下的 prompts/ 文件夹中；
+4. 支持 json_repair 修复 LLM 输出 JSON；
+5. 支持非 debug 模式屏蔽底层 tqdm / print / 全部耗时输出；
+6. 支持连续澄清保护机制，避免无限 AskClarification / AskMissingSlot。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
-import time
 import logging
 import os
-import contextlib
+import re
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from dataclasses import dataclass, asdict, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+# ==================== 可选依赖：json_repair ====================
+
+try:
+    from json_repair import repair_json  # type: ignore
+except Exception:
+    repair_json = None
 
 # ==================== 输出控制 ====================
 
@@ -84,6 +86,8 @@ ALLOWED_POLICY_LABELS = {
     "ProcessAcknowledgement",
 }
 
+CLARIFICATION_POLICIES = {"AskClarification", "AskMissingSlot"}
+
 # ==================== 数据结构 ====================
 
 @dataclass
@@ -139,6 +143,7 @@ class DialogueState:
     trigger_state: TriggerState = field(default_factory=TriggerState)
     policy_state: PolicyState = field(default_factory=PolicyState)
     evidence_state: EvidenceState = field(default_factory=EvidenceState)
+    clarification_streak: int = 0
 
 
 @dataclass
@@ -152,17 +157,38 @@ class Latency:
 
 
 @dataclass
+class ClarificationGuardInfo:
+    enabled: bool
+    limit: int
+    before_streak: int
+    after_streak: int
+    applied: bool
+    original_label: str
+    final_label: str
+    reason: str = ""
+
+
+@dataclass
 class TurnResult:
     dialogue_id: str
     turn_id: int
     user_input: str
     query_state: QueryState
-    retrieval_output: List[RetrievalCase]
+    evidence_used_this_turn: List[RetrievalCase]
     trigger_state: TriggerState
     policy_state: PolicyState
     response: str
     latency: Latency
+    clarification_guard: ClarificationGuardInfo
     state_snapshot: Dict[str, Any]
+
+    @property
+    def retrieval_output(self) -> List[RetrievalCase]:
+        """
+        向后兼容旧版 web_gradio.py。
+        语义上这里更准确叫 evidence_used_this_turn。
+        """
+        return self.evidence_used_this_turn
 
 
 # ==================== Prompt 管理 ====================
@@ -220,7 +246,6 @@ TRIGGER_USE_PROMPT = load_prompt("trigger_use")
 TRIGGER_RETRIEVAL_PROMPT = load_prompt("trigger_retrieval")
 POLICY_PROMPT = load_prompt("policy")
 RESPONSE_PROMPT = load_prompt("response")
-
 
 # ==================== 文本格式化 ====================
 
@@ -289,8 +314,7 @@ def call_llm_text(messages: List[Dict[str, str]], quiet: bool = True) -> str:
     默认接入原工程 parallel_inference。
     如果你本地没有 parallel_inference，请替换这里。
 
-    quiet=True 时会屏蔽 parallel_inference 内部的 tqdm/print/耗时输出，
-    只保留当前脚本控制的对话显示。
+    quiet=True 时会屏蔽 parallel_inference 内部的 tqdm/print/耗时输出。
     """
     if parallel_inference is None:
         raise RuntimeError(
@@ -310,15 +334,67 @@ def strip_code_fence(text: str) -> str:
         lines = text.splitlines()
         if len(lines) >= 2 and lines[-1].strip() == "```":
             first = lines[0].strip().lower()
-            if first in {"```", "```json"}:
+            if first in {"```", "```json", "```javascript", "```js"}:
                 return "\n".join(lines[1:-1]).strip()
     return text
 
 
+def extract_json_object(text: str) -> str:
+    """
+    尽量从 LLM 输出中抽取最外层 JSON object。
+    可处理：
+    - 前后夹杂说明文字
+    - ```json fenced block
+    - 多余空白
+    """
+    text = strip_code_fence(text).strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1].strip()
+
+    return text
+
+
+def save_json_decode_error(raw_text: str, cleaned_text: str, error: Exception) -> None:
+    error_dir = Path("json_decode_errors")
+    error_dir.mkdir(exist_ok=True)
+    timestamp = int(time.time() * 1000)
+    path = error_dir / f"json_error_{timestamp}.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("==== JSON DECODE ERROR ====\n")
+        f.write(str(error))
+        f.write("\n\n==== RAW TEXT ====\n")
+        f.write(raw_text)
+        f.write("\n\n==== CLEANED TEXT ====\n")
+        f.write(cleaned_text)
+    logger.error("Bad JSON saved to %s", path)
+
+
 def call_llm_json(messages: List[Dict[str, str]], quiet: bool = True) -> Dict[str, Any]:
-    text = call_llm_text(messages, quiet=quiet)
-    text = strip_code_fence(text)
-    return json.loads(text)
+    raw_text = call_llm_text(messages, quiet=quiet)
+    cleaned = extract_json_object(raw_text)
+
+    try:
+        return json.loads(cleaned)
+    except Exception as first_error:
+        if repair_json is not None:
+            try:
+                repaired = repair_json(cleaned)
+                if isinstance(repaired, str):
+                    return json.loads(repaired)
+                if isinstance(repaired, dict):
+                    return repaired
+            except Exception as repair_error:
+                save_json_decode_error(raw_text, cleaned, repair_error)
+                raise repair_error
+
+        save_json_decode_error(raw_text, cleaned, first_error)
+        raise first_error
 
 
 # ==================== Retriever ====================
@@ -411,12 +487,16 @@ class DynamicMultiTurnRuntime:
         retrieval_top_k: int = 5,
         save_history_path: Optional[str] = None,
         verbose: bool = False,
+        clarification_limit: int = 3,
+        enable_clarification_guard: bool = True,
     ) -> None:
         self.state = DialogueState(dialogue_id=dialogue_id)
         self.retriever = retriever
         self.retrieval_top_k = retrieval_top_k
         self.save_history_path = save_history_path
         self.verbose = verbose
+        self.clarification_limit = clarification_limit
+        self.enable_clarification_guard = enable_clarification_guard
         self.turn_results: List[TurnResult] = []
 
     # ---------- 对外主入口 ----------
@@ -498,12 +578,18 @@ class DynamicMultiTurnRuntime:
 
         # 3. Policy
         policy_state, policy_ms = self.run_policy(response_cases=response_cases)
+
+        # 4. Clarification Guard：Policy 后、Response 前
+        policy_state, response_cases, guard_info = self.apply_clarification_guard(
+            policy_state=policy_state,
+            response_cases=response_cases,
+        )
         self.state.policy_state = policy_state
 
-        # 4. Response
+        # 5. Response
         response, response_ms = self.run_response(response_cases=response_cases)
 
-        # 5. 追加客服回复
+        # 6. 追加客服回复
         self.state.turns.append(DialogueTurn(role="assistant", text=response))
 
         total_ms = int((time.time() - total_start) * 1000)
@@ -521,17 +607,112 @@ class DynamicMultiTurnRuntime:
             turn_id=turn_id,
             user_input=user_input,
             query_state=query_state,
-            retrieval_output=response_cases,
+            evidence_used_this_turn=response_cases,
             trigger_state=self.state.trigger_state,
             policy_state=policy_state,
             response=response,
             latency=latency,
+            clarification_guard=guard_info,
             state_snapshot=self.snapshot_state(),
         )
 
         self.turn_results.append(result)
         self._autosave()
         return result
+
+    # ---------- Clarification Guard ----------
+
+    def apply_clarification_guard(
+        self,
+        policy_state: PolicyState,
+        response_cases: List[RetrievalCase],
+    ) -> Tuple[PolicyState, List[RetrievalCase], ClarificationGuardInfo]:
+        """
+        连续澄清保护机制：
+        - 统计连续 AskClarification / AskMissingSlot；
+        - 达到 clarification_limit 时，不允许继续追问；
+        - 强制进入 ExplainedResponse 或 Handoff；
+        - 如果已有 active_evidence 但本轮 response_cases 为空，可复用 active_evidence 推进解释。
+        """
+        before = self.state.clarification_streak
+        original_label = policy_state.label
+
+        if not self.enable_clarification_guard:
+            # guard 关闭时，仍正常维护 streak，方便观测
+            after = before + 1 if policy_state.label in CLARIFICATION_POLICIES else 0
+            self.state.clarification_streak = after
+            return policy_state, response_cases, ClarificationGuardInfo(
+                enabled=False,
+                limit=self.clarification_limit,
+                before_streak=before,
+                after_streak=after,
+                applied=False,
+                original_label=original_label,
+                final_label=policy_state.label,
+                reason="连续澄清保护机制已关闭。",
+            )
+
+        if policy_state.label in CLARIFICATION_POLICIES:
+            candidate_streak = before + 1
+        else:
+            candidate_streak = 0
+
+        if candidate_streak < self.clarification_limit:
+            self.state.clarification_streak = candidate_streak
+            return policy_state, response_cases, ClarificationGuardInfo(
+                enabled=True,
+                limit=self.clarification_limit,
+                before_streak=before,
+                after_streak=candidate_streak,
+                applied=False,
+                original_label=original_label,
+                final_label=policy_state.label,
+                reason="未达到连续澄清保护阈值。",
+            )
+
+        # 达到阈值：不允许继续 AskClarification / AskMissingSlot
+        applied = True
+        forced_cases = response_cases
+
+        if response_cases:
+            forced_policy = PolicyState(
+                label="ExplainedResponse",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
+                    "需基于本轮可用 evidence 给出阶段性解释或处理建议。"
+                ),
+            )
+        elif self.state.evidence_state.active_evidence:
+            forced_cases = list(self.state.evidence_state.active_evidence)
+            forced_policy = PolicyState(
+                label="ExplainedResponse",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
+                    "需复用已有 active_evidence 推进处理。"
+                ),
+            )
+        else:
+            forced_policy = PolicyState(
+                label="Handoff",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽仍无法形成可用处理方案，"
+                    "需转交人工或后台进一步处理。"
+                ),
+            )
+
+        # 强制推进后，重置 streak
+        self.state.clarification_streak = 0
+
+        return forced_policy, forced_cases, ClarificationGuardInfo(
+            enabled=True,
+            limit=self.clarification_limit,
+            before_streak=before,
+            after_streak=0,
+            applied=applied,
+            original_label=original_label,
+            final_label=forced_policy.label,
+            reason=forced_policy.reason,
+        )
 
     # ---------- 各模块 ----------
 
@@ -707,6 +888,11 @@ class DynamicMultiTurnRuntime:
             "trigger_state": asdict(self.state.trigger_state),
             "policy_state": asdict(self.state.policy_state),
             "evidence_state": asdict(self.state.evidence_state),
+            "clarification_streak": self.state.clarification_streak,
+            "clarification_guard": {
+                "enabled": self.enable_clarification_guard,
+                "limit": self.clarification_limit,
+            },
         }
 
     def reset(self, dialogue_id: Optional[str] = None) -> None:
@@ -738,8 +924,13 @@ def print_turn_result(result: TurnResult) -> None:
     print(json.dumps(asdict(result.trigger_state), ensure_ascii=False, indent=2))
     print("\n[Policy]")
     print(json.dumps(asdict(result.policy_state), ensure_ascii=False, indent=2))
+    print("\n[Clarification Guard]")
+    print(json.dumps(asdict(result.clarification_guard), ensure_ascii=False, indent=2))
     print("\n[Evidence Used This Turn]")
-    print(json.dumps([asdict(c) for c in result.retrieval_output], ensure_ascii=False, indent=2))
+    print(json.dumps([asdict(c) for c in result.evidence_used_this_turn], ensure_ascii=False, indent=2))
+    print("\n[Active Evidence]")
+    active_evidence = result.state_snapshot["evidence_state"]["active_evidence"]
+    print(json.dumps(active_evidence, ensure_ascii=False, indent=2))
     print("\n[Response]")
     print(result.response)
     print("\n[Latency]")
@@ -772,6 +963,17 @@ def interactive_main() -> None:
         default=5,
         help="RAG 返回案例数量。默认 5。",
     )
+    parser.add_argument(
+        "--clarification-limit",
+        type=int,
+        default=3,
+        help="连续澄清保护阈值。默认 3，即第 3 次连续 AskClarification/AskMissingSlot 时强制推进。",
+    )
+    parser.add_argument(
+        "--disable-clarification-guard",
+        action="store_true",
+        help="关闭连续澄清保护机制。",
+    )
     args = parser.parse_args()
 
     logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
@@ -781,6 +983,8 @@ def interactive_main() -> None:
         retrieval_top_k=args.top_k,
         save_history_path=args.save_path,
         verbose=args.debug,
+        clarification_limit=args.clarification_limit,
+        enable_clarification_guard=not args.disable_clarification_guard,
     )
 
     print("动态多轮 IT 客服 Runtime 已启动。")
@@ -788,6 +992,11 @@ def interactive_main() -> None:
         print("当前模式：debug，中间状态会显示。输入 /exit 退出，/reset 重置对话，/state 查看状态，/debug 关闭调试显示。")
     else:
         print("当前模式：chat，只显示正常对话。输入 /exit 退出，/reset 重置对话，/state 查看状态，/debug 打开调试显示。")
+
+    print(
+        f"连续澄清保护：{'开启' if runtime.enable_clarification_guard else '关闭'}，"
+        f"阈值={runtime.clarification_limit}"
+    )
 
     while True:
         user_input = input("用户：").strip()
