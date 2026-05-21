@@ -1,7 +1,7 @@
 import html
 import json
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import gradio as gr
 
@@ -15,7 +15,7 @@ def new_runtime() -> DynamicMultiTurnRuntime:
     return DynamicMultiTurnRuntime(
         dialogue_id=session_id,
         retrieval_top_k=5,
-        save_history_path=f"gradio_runtime_{session_id}.json",
+        save_history_path=f"saves/gradio_runtime_{session_id}.json",
         verbose=False,
     )
 
@@ -30,15 +30,6 @@ def dataclass_to_dict(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return {k: dataclass_to_dict(v) for k, v in obj.__dict__.items()}
     return obj
-
-
-def safe_get(d: Dict[str, Any], path: List[str], default: Any = "") -> Any:
-    cur = d
-    for key in path:
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
 
 
 def short_case_list(cases: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, str]]:
@@ -58,7 +49,7 @@ def build_state_sections(result) -> Dict[str, Any]:
     active_evidence = dataclass_to_dict(evidence_state.get("active_evidence", []))
     last_retrieved = dataclass_to_dict(evidence_state.get("last_retrieved_cases", []))
 
-    state = {
+    return {
         "turn_id": result.turn_id,
         "query": dataclass_to_dict(result.query_state),
         "trigger": dataclass_to_dict(result.trigger_state),
@@ -72,17 +63,18 @@ def build_state_sections(result) -> Dict[str, Any]:
         "latency": dataclass_to_dict(result.latency),
     }
 
-    return state
 
-
-# ==================== HTML Render ====================
+# ==================== Render ====================
 
 def render_chat(chat_history: List[Dict[str, str]]) -> str:
     if not chat_history:
         return """
         <div class="empty-chat">
-            <div class="empty-title">欢迎使用动态多轮 IT 客服系统</div>
-            <div class="empty-subtitle">请输入一个 IT 问题开始对话，例如：VPN 登录提示账号无权限</div>
+            <div class="empty-chat-icon">✦</div>
+            <div class="empty-chat-title">欢迎使用华为 IT 动态多轮客服助手</div>
+            <div class="empty-chat-subtitle">
+                请输入一个 IT 问题开始对话，例如：VPN 登录提示账号无权限
+            </div>
         </div>
         """
 
@@ -94,17 +86,19 @@ def render_chat(chat_history: List[Dict[str, str]]) -> str:
         if role == "user":
             bubbles.append(f"""
             <div class="msg-row user-row">
+                <div class="msg-avatar user-avatar">U</div>
                 <div class="bubble user-bubble">
-                    <div class="role-label">用户</div>
+                    <div class="msg-meta">用户</div>
                     <div class="msg-content">{content}</div>
                 </div>
             </div>
             """)
         else:
             bubbles.append(f"""
-            <div class="msg-row bot-row">
-                <div class="bubble bot-bubble">
-                    <div class="role-label">客服</div>
+            <div class="msg-row assistant-row">
+                <div class="msg-avatar assistant-avatar">AI</div>
+                <div class="bubble assistant-bubble">
+                    <div class="msg-meta">客服助手</div>
                     <div class="msg-content">{content}</div>
                 </div>
             </div>
@@ -122,11 +116,31 @@ def badge(text: Any, kind: str = "default") -> str:
     return f'<span class="badge badge-{kind}">{text}</span>'
 
 
+def render_list_block(items: List[Dict[str, Any]], empty_text: str = "无") -> str:
+    if not items:
+        return f'<div class="mini-empty">{html.escape(empty_text)}</div>'
+
+    cards = []
+    for item in items[:3]:
+        case_id = html.escape(str(item.get("case_id", "")))
+        title = html.escape(str(item.get("title", "")))
+        cards.append(f"""
+        <div class="mini-item">
+            <div class="mini-id">{case_id or "未命名案例"}</div>
+            <div class="mini-title">{title or "无标题"}</div>
+        </div>
+        """)
+    return "".join(cards)
+
+
 def render_state_cards(state: Dict[str, Any]) -> str:
     if not state:
         return """
         <div class="state-empty">
-            当前还没有状态。发送一条用户消息后，将在这里显示 Query、Trigger、Policy、Evidence 和耗时。
+            <div class="state-empty-title">当前暂无状态</div>
+            <div class="state-empty-desc">
+                当你发送第一条消息后，这里会展示当前轮的 Query、Trigger、Policy、Evidence 和 Latency。
+            </div>
         </div>
         """
 
@@ -170,53 +184,115 @@ def render_state_cards(state: Dict[str, Any]) -> str:
     return f"""
     <div class="state-panel">
 
-        <div class="state-card">
-            <div class="card-title">1. Query Update</div>
-            <div class="card-line">Mode: {badge(query_mode, "info")}</div>
-            <div class="card-line"><b>Query:</b> {html.escape(str(query.get("query_text", ""))) or "无"}</div>
-            <div class="reason">{html.escape(str(query.get("reason", "")))}</div>
-        </div>
-
-        <div class="state-card">
-            <div class="card-title">2. Trigger Decision</div>
-            <div class="card-line">Trigger: {badge(trigger_flag, trigger_kind)}</div>
-            <div class="card-line">Evidence Mode: {badge(evidence_mode, evidence_kind)}</div>
-            <div class="reason">{html.escape(str(trigger.get("reason", "")))}</div>
-        </div>
-
-        <div class="state-card">
-            <div class="card-title">3. Policy Decision</div>
-            <div class="card-line">Policy: {badge(policy_label, "success")}</div>
-            <div class="card-line"><b>中文动作:</b> {html.escape(str(policy_zh))}</div>
-            <div class="reason">{html.escape(str(policy.get("reason", "")))}</div>
-        </div>
-
-        <div class="state-card">
-            <div class="card-title">4. Evidence State</div>
-            <div class="card-line"><b>Source Query:</b> {html.escape(str(evidence.get("evidence_source_query", ""))) or "无"}</div>
-            <div class="evidence-block">
-                <div class="evidence-title">本轮使用 evidence</div>
-                <pre>{html.escape(json.dumps(used_short, ensure_ascii=False, indent=2))}</pre>
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">01</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Query Update</div>
+                    <div class="section-subtitle">本轮 query 改写与状态更新</div>
+                </div>
             </div>
-            <div class="evidence-block">
-                <div class="evidence-title">Active Evidence</div>
-                <pre>{html.escape(json.dumps(active_short, ensure_ascii=False, indent=2))}</pre>
+            <div class="kv-line">
+                <span class="kv-key">Mode</span>
+                <span class="kv-value">{badge(query_mode or "unknown", "info")}</span>
             </div>
-            <div class="evidence-block">
-                <div class="evidence-title">Last Retrieved Cases</div>
-                <pre>{html.escape(json.dumps(last_short, ensure_ascii=False, indent=2))}</pre>
+            <div class="text-block">
+                <div class="text-label">Query</div>
+                <div class="text-value">{html.escape(str(query.get("query_text", ""))) or "无"}</div>
+            </div>
+            <div class="reason-box">{html.escape(str(query.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">02</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Trigger Decision</div>
+                    <div class="section-subtitle">是否需要触发 retrieval 与 evidence 策略</div>
+                </div>
+            </div>
+            <div class="dual-grid">
+                <div class="info-chip">
+                    <div class="info-chip-label">Trigger</div>
+                    <div class="info-chip-value">{badge(trigger_flag, trigger_kind)}</div>
+                </div>
+                <div class="info-chip">
+                    <div class="info-chip-label">Evidence Mode</div>
+                    <div class="info-chip-value">{badge(evidence_mode or "unknown", evidence_kind)}</div>
+                </div>
+            </div>
+            <div class="reason-box">{html.escape(str(trigger.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">03</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Policy Decision</div>
+                    <div class="section-subtitle">本轮策略动作与决策原因</div>
+                </div>
+            </div>
+            <div class="kv-line">
+                <span class="kv-key">Policy</span>
+                <span class="kv-value">{badge(policy_label or "unknown", "success")}</span>
+            </div>
+            <div class="text-block">
+                <div class="text-label">中文动作</div>
+                <div class="text-value">{html.escape(str(policy_zh or "无"))}</div>
+            </div>
+            <div class="reason-box">{html.escape(str(policy.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">04</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Evidence State</div>
+                    <div class="section-subtitle">本轮使用、缓存中保留、最近检索到的 evidence</div>
+                </div>
+            </div>
+
+            <div class="text-block">
+                <div class="text-label">Source Query</div>
+                <div class="text-value">{html.escape(str(evidence.get("evidence_source_query", ""))) or "无"}</div>
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">本轮使用 Evidence</div>
+                {render_list_block(used_short, "本轮未使用 evidence")}
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">Active Evidence</div>
+                {render_list_block(active_short, "当前没有 active evidence")}
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">Last Retrieved Cases</div>
+                {render_list_block(last_short, "最近没有检索结果")}
             </div>
         </div>
 
-        <div class="state-card">
-            <div class="card-title">5. Latency</div>
-            <div class="latency-total">{total_ms} ms</div>
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">05</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Latency</div>
+                    <div class="section-subtitle">本轮链路耗时拆解</div>
+                </div>
+            </div>
+
+            <div class="latency-total">
+                <span class="latency-total-num">{total_ms}</span>
+                <span class="latency-total-unit">ms</span>
+            </div>
+
             <div class="latency-grid">
-                <span>Query</span><b>{latency.get("query_ms", 0)} ms</b>
-                <span>Retrieval</span><b>{latency.get("retrieval_ms", 0)} ms</b>
-                <span>Trigger</span><b>{latency.get("trigger_ms", 0)} ms</b>
-                <span>Policy</span><b>{latency.get("policy_ms", 0)} ms</b>
-                <span>Response</span><b>{latency.get("response_ms", 0)} ms</b>
+                <div class="latency-item"><span>Query</span><b>{latency.get("query_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Retrieval</span><b>{latency.get("retrieval_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Trigger</span><b>{latency.get("trigger_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Policy</span><b>{latency.get("policy_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Response</span><b>{latency.get("response_ms", 0)} ms</b></div>
             </div>
         </div>
 
@@ -230,11 +306,7 @@ def render_full_json(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # ==================== Main Interaction ====================
 
-def chat(
-    user_input: str,
-    chat_history: List[Dict[str, str]],
-    runtime: DynamicMultiTurnRuntime,
-):
+def chat(user_input: str, chat_history: List[Dict[str, str]], runtime: DynamicMultiTurnRuntime):
     if runtime is None:
         runtime = new_runtime()
 
@@ -252,7 +324,6 @@ def chat(
         )
 
     user_input = user_input.strip()
-
     result = runtime.step(user_input)
 
     chat_history = chat_history + [
@@ -286,80 +357,223 @@ def reset_chat():
     )
 
 
-def fill_example(example_text: str):
-    return example_text
-
-
 # ==================== CSS ====================
 
 CUSTOM_CSS = """
+:root {
+    --bg: #f5f7fb;
+    --panel: #ffffff;
+    --panel-soft: #fafbfc;
+    --line: #e6eaf0;
+    --line-soft: #eef2f6;
+    --text: #0f1728;
+    --text-2: #344054;
+    --text-3: #667085;
+    --blue: #2563eb;
+    --blue-soft: #eff6ff;
+    --green: #16a34a;
+    --green-soft: #effdf3;
+    --amber: #d97706;
+    --amber-soft: #fffbeb;
+    --shadow: 0 10px 30px rgba(15, 23, 40, 0.06);
+    --radius-xl: 24px;
+    --radius-lg: 18px;
+    --radius-md: 14px;
+    --radius-sm: 12px;
+}
+
+html, body {
+    background: var(--bg) !important;
+}
+
 body {
-    background: #f6f7fb;
+    color: var(--text);
 }
 
 .gradio-container {
-    max-width: 1600px !important;
+    max-width: 1320px !important;
+    margin: 0 auto !important;
+    padding-top: 20px !important;
+    padding-bottom: 28px !important;
 }
 
-#main-title {
-    padding: 18px 24px;
-    border-radius: 18px;
-    background: linear-gradient(135deg, #182848 0%, #4b6cb7 100%);
-    color: white;
-    margin-bottom: 16px;
+#hero {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    border: 1px solid var(--line);
+    border-radius: 28px;
+    padding: 26px 30px;
+    box-shadow: var(--shadow);
+    margin-bottom: 18px;
 }
 
-#main-title h1 {
-    margin: 0;
-    font-size: 28px;
+.hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.hero-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.hero-badge {
+    width: fit-content;
+    padding: 6px 10px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    border-radius: 999px;
+    font-size: 12px;
     font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
-#main-title p {
-    margin: 6px 0 0 0;
-    opacity: 0.9;
+.hero-title {
+    font-size: 30px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.2;
+}
+
+.hero-desc {
     font-size: 14px;
+    color: var(--text-3);
+    line-height: 1.7;
+    max-width: 780px;
+}
+
+.hero-side {
+    min-width: 220px;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.hero-metrics {
+    background: #f8fafc;
+    border: 1px solid var(--line-soft);
+    border-radius: 18px;
+    padding: 12px 14px;
+    min-width: 200px;
+}
+
+.hero-metrics-title {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 8px;
+}
+
+.hero-metrics-item {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-top: 4px;
+}
+
+.main-card {
+    background: transparent;
+}
+
+.chat-shell, .state-shell {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--line-soft);
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+}
+
+.panel-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.panel-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.panel-subtitle {
+    font-size: 13px;
+    color: var(--text-3);
+}
+
+.panel-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: #22c55e;
+    box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.12);
+    margin-right: 6px;
 }
 
 .chat-box {
-    height: 650px;
+    height: 640px;
     overflow-y: auto;
-    background: #ffffff;
-    border: 1px solid #e8eaf0;
-    border-radius: 18px;
-    padding: 18px;
-    box-shadow: 0 8px 24px rgba(20, 30, 60, 0.06);
+    background: linear-gradient(180deg, #fcfdff 0%, #f8fbff 100%);
+    padding: 22px;
 }
 
 .chat-scroll {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 16px;
 }
 
 .empty-chat {
-    height: 610px;
+    height: 580px;
     display: flex;
     flex-direction: column;
-    justify-content: center;
     align-items: center;
-    color: #667085;
+    justify-content: center;
+    color: var(--text-3);
     text-align: center;
+    padding: 0 40px;
 }
 
-.empty-title {
+.empty-chat-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 16px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-size: 22px;
+    margin-bottom: 16px;
     font-weight: 700;
-    color: #344054;
+}
+
+.empty-chat-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--text);
     margin-bottom: 10px;
 }
 
-.empty-subtitle {
+.empty-chat-subtitle {
     font-size: 14px;
+    line-height: 1.8;
+    max-width: 520px;
 }
 
 .msg-row {
     display: flex;
+    align-items: flex-start;
+    gap: 10px;
     width: 100%;
 }
 
@@ -367,168 +581,400 @@ body {
     justify-content: flex-end;
 }
 
-.bot-row {
+.assistant-row {
     justify-content: flex-start;
 }
 
+.user-row .bubble {
+    order: 1;
+}
+
+.user-row .msg-avatar {
+    order: 2;
+}
+
+.assistant-row .bubble {
+    order: 2;
+}
+
+.assistant-row .msg-avatar {
+    order: 1;
+}
+
+.msg-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 800;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.user-avatar {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.assistant-avatar {
+    background: #e8ecf3;
+    color: #334155;
+}
+
 .bubble {
-    max-width: 78%;
+    max-width: 76%;
     border-radius: 18px;
     padding: 12px 14px;
-    line-height: 1.55;
-    font-size: 15px;
+    line-height: 1.7;
+    font-size: 14px;
     word-break: break-word;
 }
 
 .user-bubble {
-    background: #3867ff;
+    background: linear-gradient(180deg, #2b6ef3 0%, #2563eb 100%);
     color: white;
-    border-bottom-right-radius: 6px;
+    border-bottom-right-radius: 8px;
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.18);
 }
 
-.bot-bubble {
-    background: #f2f4f7;
-    color: #1d2939;
-    border-bottom-left-radius: 6px;
+.assistant-bubble {
+    background: #ffffff;
+    color: var(--text);
+    border: 1px solid var(--line-soft);
+    border-bottom-left-radius: 8px;
 }
 
-.role-label {
+.msg-meta {
     font-size: 12px;
-    opacity: 0.75;
+    opacity: 0.78;
     margin-bottom: 4px;
+    font-weight: 600;
 }
 
 .msg-content {
     white-space: pre-wrap;
 }
 
-.state-html {
-    height: 650px;
-    overflow-y: auto;
+.input-area {
+    padding: 16px 18px 18px 18px;
+    border-top: 1px solid var(--line-soft);
     background: #ffffff;
-    border: 1px solid #e8eaf0;
-    border-radius: 18px;
-    padding: 14px;
-    box-shadow: 0 8px 24px rgba(20, 30, 60, 0.06);
+}
+
+.state-html {
+    height: 640px;
+    overflow-y: auto;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+    padding: 18px;
 }
 
 .state-empty {
-    color: #667085;
-    padding: 18px;
-    line-height: 1.6;
+    min-height: 560px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+    color: var(--text-3);
+    padding: 0 24px;
+}
+
+.state-empty-title {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 10px;
+}
+
+.state-empty-desc {
+    font-size: 14px;
+    line-height: 1.8;
 }
 
 .state-panel {
     display: flex;
     flex-direction: column;
+    gap: 14px;
+}
+
+.section-card {
+    border: 1px solid var(--line-soft);
+    border: 18px;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+    padding: 16px;
+}
+
+.section-head {
+    display: flex;
+    align-items: center;
     gap: 12px;
+    margin: 14px;
 }
 
-.state-card {
-    border: 1px solid #eaecf0;
-    border-radius: 14px;
-    padding: 12px;
-    background: #fcfcfd;
-}
-
-.card-title {
-    font-weight: 700;
-    color: #101828;
-    margin-bottom: 8px;
-    font-size: 15px;
-}
-
-.card-line {
+.section-index {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    background: #f2f6ff;
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
     font-size: 13px;
-    color: #344054;
-    margin: 6px 0;
+    flex-shrink: 0;
 }
 
-.reason {
-    margin-top: 8px;
-    padding: 8px;
-    border-radius: 10px;
+.section-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.section-title {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text);
+}
+
+.section-subtitle {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.kv-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin: 10px 0;
+}
+
+.kv-key {
+    font-size: 13px;
+    color: var(--text-3);
+}
+
+.kv-value {
+    color: var(--text);
+}
+
+.text-block {
+    margin-top: 12px;
+    padding: 12px 13px;
+    border-radius: 14px;
     background: #f8fafc;
+    border: 1px solid var(--line-soft);
+}
+
+.text-label {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 6px;
+}
+
+.text-value {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.6;
+    word-break: break-word;
+}
+
+.reason-box {
+    margin-top: 12px;
+    padding: 12px 13px;
+    border-radius: 14px;
+    background: #fcfcfd;
+    border: 1px dashed #d8e0ea;
     color: #475467;
     font-size: 13px;
-    line-height: 1.45;
+    line-height: 1.7;
+    word-break: break-word;
+}
+
+.dual-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.info-chip {
+    padding: 12px;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid var(--line-soft);
+}
+
+.info-chip-label {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 8px;
+}
+
+.info-chip-value {
+    font-size: 14px;
+    color: var(--text);
 }
 
 .badge {
-    display: inline-block;
-    padding: 2px 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
     border-radius: 999px;
     font-size: 12px;
-    font-weight: 600;
-    border: 1px solid transparent;
+    font-weight: 700;
+    border 1px solid transparent;
 }
 
 .badge-default {
-    background: #f2f4f7;
-    color: #344054;
+    background: #f3f4f6;
+    color: #475467;
 }
 
 .badge-info {
-    background: #eef4ff;
-    color: #3538cd;
-    border-color: #c7d7fe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-color: #dbeafe;
 }
 
 .badge-success {
-    background: #ecfdf3;
-    color: #027a48;
-    border-color: #abefc6;
+    background: #effdf3;
+    color: #15803d;
+    border-color: #c7f0d5;
 }
 
 .badge-warning {
-    background: #fffaeb;
-    color: #b54708;
-    border-color: #fedf89;
+    background: #fff7ed;
+    color: #c2410c;
+    border-color: #fed7aa;
 }
 
 .badge-muted {
-    background: #f2f4f7;
+    background: #f3f4f6;
     color: #667085;
-    border-color: #eaecf0;
+    border-color: #e5e7eb;
 }
 
-.evidence-block {
-    margin-top: 8px;
+.mini-section {
+    margin-top: 14px;
 }
 
-.evidence-title {
+.mini-section-title {
     font-size: 12px;
-    color: #667085;
+    color: var(--text-3);
+    margin-bottom: 8px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.mini-item {
+    padding: 10px 12px;
+    border: 1px solid var(--line-soft);
+    background: #fbfcfe;
+    border-radius: 12px;
+    margin-bottom: 8px;
+}
+
+.mini-id {
+    font-size: 12px;
+    color: var(--blue);
+    font-weight: 700;
     margin-bottom: 4px;
 }
 
-pre {
-    background: #0b1020;
-    color: #d1e7ff;
-    padding: 8px;
-    border-radius: 10px;
-    font-size: 12px;
-    overflow-x: auto;
-    white-space: pre-wrap;
+.mini-title {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.5;
+}
+
+.mini-empty {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #f8fafc;
+    color: var(--text-3);
+    font-size: 13px;
+    border: 1px dashed #d8e0ea;
 }
 
 .latency-total {
-    font-size: 24px;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 4px 0 14px 0;
+}
+
+.latency-total-num {
+    font-size: 34px;
     font-weight: 800;
-    color: #175cd3;
-    margin-bottom: 10px;
+    color: var(--blue);
+    line-height: 1;
+}
+
+.latency-total-unit {
+    font-size: 14px;
+    color: var(--text-3);
+    font-weight: 700;
 }
 
 .latency-grid {
     display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 6px 12px;
-    font-size: 13px;
-    color: #475467;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
 }
 
-.example-row button {
-    font-size: 13px !important;
+.latency-item {
+    border: 1px solid var(--line-soft);
+    border-radius: 14px;
+    padding: 12px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.latency-item span {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.latency-item b {
+    font-size: 14px;
+    color: var(--text);
+}
+
+button.primary,
+button[variant="primary"] {
+    border-radius: 14px !important;
+}
+
+footer {
+    display: none !important;
+}
+
+@media (max-width: 1100px) {
+    .hero-top {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .hero-side {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .bubble {
+        max-width: 88%;
+    }
+
+    .dual-grid,
+    .latency-grid {
+        grid-template-columns: 1fr;
+    }
 }
 """
 
@@ -538,51 +984,85 @@ pre {
 with gr.Blocks(
     title="华为 IT 动态多轮客服助手",
     css=CUSTOM_CSS,
+    theme=gr.themes.Soft(
+        primary_hue="blue",
+        neutral_hue="slate",
+        radius_size="lg",
+    ),
 ) as demo:
     runtime_state = gr.State(value=new_runtime())
     chat_history_state = gr.State(value=[])
 
     gr.HTML("""
-    <div id="main-title">
-        <h1>华为 IT 动态多轮客服助手</h1>
-        <p>Query Update · Evidence Trigger · Policy Decision · Response Generation 可解释闭环</p>
+    <div id="hero">
+        <div class="hero-top">
+            <div class="hero-title-wrap">
+                <div class="hero-badge">Huawei IT Support Assistant</div>
+                <div class="hero-title">华为 IT 动态多轮客服助手</div>
+                <div class="hero-desc">
+                    面向多轮 IT 支持场景的动态客服系统，支持 Query Update、Evidence Trigger、Policy Decision 与 Response Generation 的可解释闭环。
+                </div>
+            </div>
+            <div class="hero-side">
+                <div class="hero-metrics">
+                    <div class="hero-metrics-title">系统能力</div>
+                    <div class="hero-metrics-item"><span>多轮状态跟踪</span><b>Enabled</b></div>
+                    <div class="hero-metrics-item"><span>动态证据复用</span><b>Enabled</b></div>
+                    <div class="hero-metrics-item"><span>策略可解释性</span><b>Enabled</b></div>
+                </div>
+            </div>
+        </div>
     </div>
     """)
 
-    with gr.Row():
-        with gr.Column(scale=3, min_width=620):
-            chat_display = gr.HTML(
-                value=render_chat([]),
-                elem_classes=["chat-box"],
-            )
+    with gr.Row(elem_classes=["main-card"]):
+        with gr.Column(scale=7, min_width=680):
+            with gr.Group(elem_classes=["chat-shell"]):
+                gr.HTML("""
+                <div class="panel-header">
+                    <div class="panel-title-wrap">
+                        <div class="panel-title">对话面板</div>
+                        <div class="panel-subtitle">与系统进行多轮交互，左侧展示完整对话过程</div>
+                    </div>
+                    <div class="panel-dot"></div>
+                </div>
+                """)
 
-            with gr.Row():
-                user_box = gr.Textbox(
-                    placeholder="请输入用户问题，例如：VPN 登录提示账号无权限",
-                    label="用户输入",
-                    scale=6,
-                    lines=2,
+                chat_display = gr.HTML(
+                    value=render_chat([]),
+                    elem_classes=["chat-box"],
                 )
-                send_btn = gr.Button("发送", scale=1, variant="primary")
 
-            with gr.Row(elem_classes=["example-row"]):
-                ex1 = gr.Button("VPN 登录不了")
-                ex2 = gr.Button("提示账号无权限")
-                ex3 = gr.Button("我已经申请过权限了")
-                ex4 = gr.Button("工号是 12345，申请单号是 REQ888")
-                ex5 = gr.Button("另外我手机邮箱也收不到验证码")
+                with gr.Group(elem_classes=["input-area"]):
+                    with gr.Row():
+                        user_box = gr.Textbox(
+                            placeholder="请输入用户问题，例如：VPN 登录提示账号无权限",
+                            show_label=False,
+                            scale=6,
+                            lines=3,
+                        )
+                        send_btn = gr.Button("发送", scale=1, variant="primary")
 
-            reset_btn = gr.Button("清空并重新开始")
+                    reset_btn = gr.Button("清空并重新开始")
 
-        with gr.Column(scale=2, min_width=520):
-            gr.Markdown("## 当前轮状态")
-            state_cards = gr.HTML(
-                value=render_state_cards({}),
-                elem_classes=["state-html"],
-            )
+        with gr.Column(scale=5, min_width=520):
+            with gr.Group(elem_classes=["state-shell"]):
+                gr.HTML("""
+                <div class="panel-header">
+                    <div class="panel-title-wrap">
+                        <div class="panel-title">当前轮状态</div>
+                        <div class="panel-subtitle">系统内部决策链路与证据状态展示</div>
+                    </div>
+                </div>
+                """)
 
-            with gr.Accordion("完整 JSON 状态", open=False):
-                state_json = gr.JSON(value={}, label="Full State")
+                state_cards = gr.HTML(
+                    value=render_state_cards({}),
+                    elem_classes=["state-html"],
+                )
+
+                with gr.Accordion("查看完整 JSON 状态", open=False):
+                    state_json = gr.JSON(value={}, label=None)
 
     send_btn.click(
         fn=chat,
@@ -622,16 +1102,9 @@ with gr.Blocks(
         ],
     )
 
-    ex1.click(fn=lambda: "VPN 登录不了", inputs=[], outputs=[user_box])
-    ex2.click(fn=lambda: "提示账号无权限", inputs=[], outputs=[user_box])
-    ex3.click(fn=lambda: "我已经申请过权限了", inputs=[], outputs=[user_box])
-    ex4.click(fn=lambda: "工号是 12345，申请单号是 REQ888", inputs=[], outputs=[user_box])
-    ex5.click(fn=lambda: "另外我手机邮箱也收不到验证码", inputs=[], outputs=[user_box])
-
-
 if __name__ == "__main__":
     demo.launch(
-        server_name="0.0.0.0",
+        server_name="10.67.43.9",
         server_port=7860,
         share=False,
     )
