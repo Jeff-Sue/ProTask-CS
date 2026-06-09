@@ -1,27 +1,13 @@
-cd QueryGenerator
-
-python 数据处理.py
-
-cd ..
-
-cd RAG
-
-python 数据构造.py
-
-cd ..
-
-cd RAGTrigger
-
-python 数据构造.py
-
-cd ..
-
-cd PolicyPredictor
-
-python 数据构造.py
-
-cd ..
-
-cd ResponseGenerator
-
-python 数据构造.py
+def batch_zefeng_rag(dialog_history_list, query_list, max_doc_num=16):
+    results = [None] * len(dialog_history_list)
+    with ThreadPoolExecutor(max_workers=max_doc_num) as executor:
+        future_to_index = {
+            executor.submit(zefeng_rag, dialog): i
+            for i, dialog in enumerate(dialog_history_list)
+        }
+        with tqdm(total=len(dialog_history_list), desc="Processing") as pbar:
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future]
+                results[idx] = future.result()
+                pbar.update(1)
+    return results
