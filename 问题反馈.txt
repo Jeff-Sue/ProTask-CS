@@ -1,0 +1,49 @@
+import os
+import json
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_json(data, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_resume_index(retrieval_path):
+    if os.path.exists(retrieval_path):
+        existing_data = load_json(retrieval_path)
+        print(f"{retrieval_path} already exists, {len(existing_data)} items have been annotated.")
+        return len(existing_data), existing_data
+    else:
+        return 0, []
+
+if __name__ == "__main__":
+    query_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/QueryGenerator/query.json"
+    retrieval_cases_path = "retrieval_cases.json"
+    
+    query_data = load_json(query_path)
+    
+    resume_idx, existing_retrieval = get_resume_index(retrieval_cases_path)
+    
+    # 如果之前已经有标注，就从上次标注后的数据继续
+    remaining_queries = query_data[resume_idx:]
+    dialogue_history_list = [messages_to_string(i['dialogue_history']) for i in remaining_queries]
+    
+    if dialogue_history_list:
+        new_retrieval_cases = batch_zefeng_rag(dialogue_history_list)
+        retrieval_cases = existing_retrieval + new_retrieval_cases
+        save_json(retrieval_cases, retrieval_cases_path)
+    else:
+        print("No new queries to process.")
+    
+    # 同步到 rag.json
+    rag_save_path = "rag.json"
+    rag_data = []
+    for i, sample in enumerate(query_data):
+        # 取对应的 retrieval cases
+        sample_cases = retrieval_cases[i]
+        sample['retrieval_cases'] = sample_cases
+        rag_data.append(sample)
+    
+    save_json(rag_data, rag_save_path)
+    print(f"Saved {len(rag_data)} samples to {rag_save_path}.")
