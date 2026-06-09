@@ -1,0 +1,28 @@
+if __name__ == "__main__":
+    query_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/QueryGenerator/query.json"
+    query_data = load_json(query_path)
+
+    query_data = query_data[:16]
+    dialogue_history_list = []
+    for i in query_data:
+        dialogue_history = i['dialogue_history']
+        dialogue_history_str = messages_to_string(dialogue_history)
+        dialogue_history_list.append(dialogue_history_str)
+    
+    retrieval_cases = batch_zefeng_rag(dialogue_history_list)
+    
+    retrieval_cases_path = "retrieval_cases.json"
+    save_json(retrieval_cases, retrieval_cases_path)
+    
+    rag_data = []
+    for i in query_data:
+        sample = i
+
+        sample['retrieval_cases'] = retrieval_cases
+        rag_data.append(sample)
+
+    rag_save_path = "rag.json"
+    save_json(rag_data, rag_save_path)
+
+
+现在我希望加一个检查函数，如果retrieval_cases_path已经存在，而且读取这个文件，统计并显示已经标注了多少个（len（文件数据））了，然后后面的标注就从现在的标注后继续标注
