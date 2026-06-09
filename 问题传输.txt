@@ -1,14 +1,27 @@
-Traceback (most recent call last):
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/RAGTrigger/数据构造.py", line 47, in <module>
-    response_str = json.loads(repair_json(results[idx])).get("response")
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/selfrag/lib/python3.10/site-packages/json_repair/json_repair.py", line 179, in repair_json
-    parsed_json = parser.parse()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/selfrag/lib/python3.10/site-packages/json_repair/json_parser.py", line 95, in parse
-    return self._parse_top_level(self.parse_json)
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/selfrag/lib/python3.10/site-packages/json_repair/json_parser.py", line 109, in _parse_top_level
-    json = parse_element()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/selfrag/lib/python3.10/site-packages/json_repair/json_parser.py", line 157, in parse_json
-    char = self.get_char_at()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/selfrag/lib/python3.10/site-packages/json_repair/json_parser.py", line 223, in get_char_at
-    return self.json_str[self.index + count]
-KeyError: 0
+cd QueryGenerator
+
+python 数据处理.py
+
+cd ..
+
+cd RAG
+
+python 数据构造.py
+
+cd ..
+
+cd RAGTrigger
+
+python 数据构造.py
+
+cd ..
+
+cd PolicyPredictor
+
+python 数据构造.py
+
+cd ..
+
+cd ResponseGenerator
+
+python 数据构造.py
