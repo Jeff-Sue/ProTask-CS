@@ -26,7 +26,7 @@ if __name__ == "__main__":
     prompt_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/prompts/response.prompt"
     prompt = get_prompt(prompt_path)
 
-    policy_path = "reponse.json"
+    response_path = "response.json"
 
     resume_idx, existing_data = get_resume_index(policy_path)
     print(f"已经有{resume_idx}条数据被标注过了")
@@ -75,6 +75,6 @@ if __name__ == "__main__":
 
         new_data.append(sample)
 
-    policy_data = existing_data + new_data
+    response_data = existing_data + new_data
 
-    save_json(policy_data, policy_path)
+    save_json(response_data, response_path)
