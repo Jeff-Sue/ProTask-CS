@@ -1,19 +1,116 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
+import json
+from json_repair import repair_json
+import sys
+from pathlib import Path
 
-def batch_zefeng_rag(dialog_history_list, query_list, max_doc_num=16):
-    if len(dialog_history_list) != len(query_list):
-        raise ValueError("dialog_history_list and query_list must have the same length.")
+sys.path.append(str(Path(__file__).parent.parent.parent))
 
-    results = [None] * len(dialog_history_list)
-    with ThreadPoolExecutor(max_workers=max_doc_num) as executor:
-        future_to_index = {
-            executor.submit(zefeng_rag, dialog, query): i
-            for i, (dialog, query) in enumerate(zip(dialog_history_list, query_list))
+from src.rag import batch_zefeng_rag
+from src.api import parallel_inference
+from src.io import load_json, save_json, messages_to_string, get_resume_index, get_prompt
+
+
+def parse_rag_trigger_result(result):
+    """
+    统一解析 parallel_inference 的输出。
+    如果格式错误，则返回默认错误标注。
+    """
+    try:
+        if isinstance(result, dict):
+            response_str = result.get("response")
+        elif isinstance(result, str):
+            response_str = json.loads(repair_json(result)).get("response")
+        else:
+            print("Error Result Type: ", type(result), result)
+            response_str = None
+
+        if response_str:
+            return json.loads(repair_json(response_str))
+        else:
+            return {
+                "knowledge_support": "仅常识",
+                "reason": "输出格式错误"
+            }
+
+    except Exception as e:
+        print("Parse Error:", e)
+        print("Raw Result:", result)
+        return {
+            "knowledge_support": "仅常识",
+            "reason": "输出格式错误"
         }
-        with tqdm(total=len(dialog_history_list), desc="Processing") as pbar:
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
-                results[idx] = future.result()
-                pbar.update(1)
-    return results
+
+
+if __name__ == "__main__":
+    rag_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/RAG/rag.json"
+    rag_data = load_json(rag_path)
+
+    prompt_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/prompts/trigger.prompt"
+    prompt = get_prompt(prompt_path)
+
+    rag_trigger_path = "rag_trigger.json"
+
+    resume_idx, existing_data = get_resume_index(rag_trigger_path)
+    print(f"已经有 {resume_idx} 条数据被标注过了")
+
+    # 如果之前已经有标注，就从上次标注后的数据继续
+    remaining_data = rag_data[resume_idx:2000]
+
+    batch_size = 100
+    rag_trigger_data = existing_data
+
+    for start in range(0, len(remaining_data), batch_size):
+        end = min(start + batch_size, len(remaining_data))
+        batch_data = remaining_data[start:end]
+
+        print(f"正在处理第 {resume_idx + start} 到 {resume_idx + end} 条数据...")
+
+        sample_list = []
+
+        for i in batch_data:
+            sample = {}
+            sample["id"] = f"{i['dialogue_id']}-{i['turn_id']}"
+
+            dialogue_history_str = messages_to_string(i["dialogue_history"])
+            retrieval_cases_str = str(i["retrieval_cases"])
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": prompt
+                    .replace("{messages}", dialogue_history_str)
+                    .replace("{retrieved_cases}", retrieval_cases_str)
+                }
+            ]
+
+            sample["messages"] = messages
+            sample_list.append(sample)
+
+        results = parallel_inference(sample_list)
+
+        new_data = []
+
+        for idx, i in enumerate(batch_data):
+            sample = {}
+
+            sample["dialogue_id"] = i["dialogue_id"]
+            sample["turn_id"] = i["turn_id"]
+            sample["dialogue_history"] = i["dialogue_history"]
+            sample["query"] = i["query"]
+            sample["retrieval_cases"] = i["retrieval_cases"]
+
+            response = parse_rag_trigger_result(results[idx])
+
+            sample["rag_trigger"] = response
+            sample["current_response"] = i["current_response"]
+
+            new_data.append(sample)
+
+        rag_trigger_data.extend(new_data)
+
+        # 每处理完 100 条就保存一次
+        save_json(rag_trigger_data, rag_trigger_path)
+
+        print(f"已保存到 {rag_trigger_path}，当前总数：{len(rag_trigger_data)}")
+
+    print("全部处理完成")
