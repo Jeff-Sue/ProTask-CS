@@ -1,80 +1,17 @@
-import json
-from json_repair import repair_json
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent.parent))
+你是一个专业的客服问题分析助手。请阅读以下对话历史，提取用户咨询的具体核心问题。
 
-from src.rag import batch_zefeng_rag
-from src.api import parallel_inference
-from src.io import load_json, save_json, messages_to_string, get_resume_index, get_prompt
+要求：
+1. 仅输出1行文本，不得输出解释、分析、前后缀、引号或多余换行。
+2. 输出长度：<=15个汉字（英文/数字按原样计入）。
+3. 输出形式：名词短语/术语短语，不能是完整陈述句。
+4. 必须聚焦“具体故障或具体诉求”，去掉客套话、背景铺垫、情绪表达。
+5. 删除无关信息：如“您好/谢谢/请问/麻烦”“需要协助”等。
+6. 禁止输出提问句式词：如“怎么/如何/是否/能否/吗/呢/？”。
+7. 多个相关子问题时：合并为一个最小可处理核心问题（对象+动作+事项）。
+8. 多个不相关问题时：保留对处理优先级最高、最具体的一个。
+9. 报错码仅在“能定位问题”时保留；否则省略。
 
+对话历史：
+{p_dialogue}
 
-def select_case_from_id(id: str, retrieval_cases: list):
-    selected_case = ""
-    for case in retrieval_cases:
-        if id == case['case_id']:
-            selected_case = case
-
-    return selected_case 
-
-
-
-if __name__ == "__main__":
-    policy_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/PolicyPredictor/policy.json"
-    policy_data = load_json(policy_path)
-
-    prompt_path = "/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/静态单轮SFT/大模型能力蒸馏/prompts/response.prompt"
-    prompt = get_prompt(prompt_path)
-
-    response_path = "response.json"
-
-    resume_idx, existing_data = get_resume_index(policy_path)
-    print(f"已经有{resume_idx}条数据被标注过了")
-
-    # 如果之前已经有标注，就从上次标注后的数据继续
-    remaining_data = policy_data[resume_idx:]
-
-    sample_list = []
-    for i in remaining_data:
-        sample = {}
-        sample['id'] = f"{i['dialogue_id']}-{i['turn_id']}"
-        dialogue_history_str = messages_to_string(i['dialogue_history'])
-        if i['policy']['case_id']:
-            retrieval_cases_str = str(select_case_from_id(i['policy']['case_id'], i['retrieval_cases']))
-        else:
-            retrieval_cases_str = str(i['retrieval_cases'])
-       
-        messages = [{"role": "user", "content": prompt.replace("{dialog_history}", dialogue_history_str).replace("{retrieved_cases}", retrieval_cases_str).replace("{dialogue_act}", i['policy']['label'])}]
-        sample['messages'] = messages
-        sample_list.append(sample)
-
-    results = parallel_inference(sample_list)
-    new_data = []
-    for idx, i in enumerate(remaining_data):
-        sample ={}
-        sample['dialogue_id'] = i['dialogue_id'] 
-        sample['turn_id'] = i['turn_id']
-        sample['dialogue_history'] = i['dialogue_history']
-        sample['query'] = i['query']
-
-        sample['retrieval_cases'] = i['retrieval_cases']
-        
-        sample['rag_trigger'] = i['rag_trigger']
-        sample['policy'] = i['policy']
-
-        if isinstance(results[idx], dict):
-            response_str = results[idx].get("response")
-        elif isinstance(results[idx], str):
-            response_str = json.loads(repair_json(results[idx])).get("response")
-        else:
-            print("Error Result Type: ", type(results[idx]), results[idx])
-        # response = json.loads(repair_json(response_str))
-        sample['response'] = response_str
-
-        sample['current_response'] = i['current_response']
-
-        new_data.append(sample)
-
-    response_data = existing_data + new_data
-
-    save_json(response_data, response_path)
+用户问题：
