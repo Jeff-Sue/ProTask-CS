@@ -1,59 +1,97 @@
+from prompts.prompt_templates import PromptTemplates
 from models.sft_model import SFTModel
-
-MODEL_REGISTRY = {
-    "query": SFTModel("/data/models/query_sft"),
-    "trigger": SFTModel("/data/models/trigger_sft"),
-    "policy": SFTModel("/data/models/policy_sft"),
-    "response": SFTModel("/data/models/response_sft"),
-}
-
-
-
-
-from models.registry import MODEL_REGISTRY
-from modules.query import run_query
-from modules.trigger import run_trigger
-from modules.policy import run_policy
-from modules.response import run_response
 from rag.retriever import retrieve_cases
 from postprocess.case_filter import postprocess_cases
 
 
 class Pipeline:
 
-    def __init__(self, rag_fn):
-        self.models = MODEL_REGISTRY
-        self.rag_fn = rag_fn
+    def __init__(self):
 
+        # 4个SFT模型
+        self.query_model = SFTModel("query_sft")
+        self.trigger_model = SFTModel("trigger_sft")
+        self.policy_model = SFTModel("policy_sft")
+        self.response_model = SFTModel("response_sft")
+
+    # --------------------------
+    # 1. Query
+    # --------------------------
+    def run_query(self, dialogue):
+
+        prompt = PromptTemplates.QUERY.format(
+            dialogue=dialogue
+        )
+
+        return self.query_model(prompt)
+
+    # --------------------------
+    # 2. Trigger（路由器）
+    # --------------------------
+    def run_trigger(self, dialogue, query):
+
+        prompt = PromptTemplates.TRIGGER.format(
+            dialogue=dialogue,
+            query=query
+        )
+
+        return self.trigger_model(prompt)
+
+    # --------------------------
+    # 3. Policy
+    # --------------------------
+    def run_policy(self, dialogue, cases):
+
+        prompt = PromptTemplates.POLICY.format(
+            dialogue=dialogue,
+            cases=cases
+        )
+
+        return self.policy_model(prompt)
+
+    # --------------------------
+    # 4. Response
+    # --------------------------
+    def run_response(self, dialogue, policy, cases):
+
+        prompt = PromptTemplates.RESPONSE.format(
+            dialogue=dialogue,
+            policy=policy,
+            cases=cases
+        )
+
+        return self.response_model(prompt)
+
+    # --------------------------
+    # 主流程（关键）
+    # --------------------------
     def run(self, dialogue):
 
         # 1. Query
-        query = run_query(self.models["query"], dialogue)
+        query = self.run_query(dialogue)
 
-        # 2. RAG
-        cases = retrieve_cases(query, self.rag_fn)
+        # 2. Trigger（routing）
+        trigger = self.run_trigger(dialogue, query)
 
-        # 3. Postprocess
-        cases = postprocess_cases(cases)
+        # 3. conditional RAG
+        if trigger.strip() == "检索+常识":
 
-        # 4. Trigger
-        trigger = run_trigger(self.models["trigger"], dialogue, cases)
+            cases = retrieve_cases(query)
+            cases = postprocess_cases(cases)
 
-        # 5. Policy
-        policy = run_policy(self.models["policy"], dialogue, cases)
+        else:
+            cases = []
 
-        # 6. Response
-        response = run_response(
-            self.models["response"],
-            dialogue,
-            policy,
-            cases
-        )
+        # 4. Policy
+        policy = self.run_policy(dialogue, cases)
+
+        # 5. Response
+        response = self.run_response(dialogue, policy, cases)
 
         return {
             "query": query,
-            "cases": cases,
             "trigger": trigger,
+            "cases": cases,
             "policy": policy,
             "response": response
         }
