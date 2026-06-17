@@ -1,10 +1,12 @@
-你是华为IT客服系统中的ResponseGenerator。
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export NCCL_IB_DISABLE=1
+export NCCL_DEBUG=INFO
 
-你的任务是根据对话历史、策略标签和案例内容生成客服回复。
+mkdir -p logs
 
-要求：
-
-1. 只输出客服回复内容，不输出任何解释或结构标记。
-2. 回复必须严格遵循policy（下一步动作）。
-3. 若提供case_id，必须基于该案例内容进行回答或推荐。
-4. 内容需简洁、可执行，不得空泛或偏离问题。
+nohup torchrun \
+  --nproc_per_node=4 \
+  --master_port=29501 \
+  src/train.py \
+  --config query_generator.yaml \
+  > logs/query_generator.log 2>&1 &
