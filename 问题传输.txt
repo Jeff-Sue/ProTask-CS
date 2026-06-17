@@ -1,56 +1,34 @@
-### model
-model_name_or_path: /data/MODEL_ZOO/Qwen/Qwen3.5-4B
-trust_remote_code: true
-
-### method
-stage: sft
-do_train: true
-finetuning_type: lora
-lora_rank: 16
-lora_target: q_proj,v_proj,k_proj,o_proj
-
-### dataset
-dataset: query_generator_static_single
-template: qwen3_nothink
-cutoff_len: 2048
-max_samples: 100000
-preprocessing_num_workers: 16
-dataloader_num_workers: 4
-
-### output
-output_dir: saves/static_single/query_generator
-logging_steps: 10
-save_steps: 500
-plot_loss: true
-overwrite_output_dir: true
-save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-
-### train
-per_device_train_batch_size: 4
-gradient_accumulation_steps: 8
-learning_rate: 5.0e-5
-num_train_epochs: 3.0
-lr_scheduler_type: cosine
-warmup_ratio: 0.1
-bf16: flase
-fp16: true
-ddp_timeout: 180000000
-resume_from_checkpoint: null
-
-### eval
-# eval_dataset: alpaca_en_demo
-# val_size: 0.1
-# per_device_eval_batch_size: 1
-# eval_strategy: steps
-# eval_steps: 500
-
-
-  File "<string>", line 138, in __init__
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/hparams/training_args.py", line 153, in __post_init__
-    BaseTrainingArguments.__post_init__(self)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/training_args.py", line 1576, in __post_init__
-    self._validate_args()
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/training_args.py", line 1741, in _validate_args
-    raise ValueError("At most one of fp16 and bf16 can be True, but not both")
-ValueError: At most one of fp16 and bf16 can be True, but not both
+.116732377 ProcessGroupNCCL.cpp:1479] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+Running tokenizer on dataset (num_proc=16):  75%|██████████████████████████████████████████████████████████████████████████████████████████████████▎                                | 7500/10000 [00:02<?, ? examples/s]
+[rank1]: multiprocess.pool.RemoteTraceback: 
+[rank1]: """
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/multiprocess/pool.py", line 125, in worker
+[rank1]:     result = (True, func(*args, **kwds))
+[rank1]:                     ^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 586, in _write_generator_to_queue
+[rank1]:     for i, result in enumerate(func(**kwargs)):
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3674, in _map_single
+[rank1]:     for i, batch in iter_outputs(shard_iterable):
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3624, in iter_outputs
+[rank1]:     yield i, apply_function(example, i, offset=offset)
+[rank1]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3547, in apply_function
+[rank1]:     processed_inputs = function(*fn_args, *additional_args, **fn_kwargs)
+[rank1]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/processor/supervised.py", line 119, in preprocess_dataset
+[rank1]:     input_ids, labels = self._encode_data_example(
+[rank1]:                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/processor/supervised.py", line 67, in _encode_data_example
+[rank1]:     encoded_pairs = self.template.encode_multiturn(self.tokenizer, messages, system, tools, discarding_history_cot)
+[rank1]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/template.py", line 85, in encode_multiturn
+[rank1]:     encoded_messages = self._encode(tokenizer, messages, system, tools)
+[rank1]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/template.py", line 158, in _encode
+[rank1]:     elements += self.format_assistant.apply(content=message["content"])
+[rank1]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/formatter.py", line 78, in apply
+[rank1]:     raise RuntimeError(f"Expected a string, got {value}")
+[rank1]: RuntimeError: Expected a string, got None
+[rank1]: """
