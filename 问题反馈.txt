@@ -1,15 +1,21 @@
-import re
+def __call__(self, prompt, max_new_tokens=256):
 
-def extract_case_id(turn):
-    pattern2 = r'\[案例链接:\s*(KT\d+)\]'
-    match = re.search(pattern2, turn)
+    inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
 
-    if not match:
-        print("current wrong turn:", turn)
-        return None
+    input_len = inputs["input_ids"].shape[1]
 
-    return match.group(1)
+    outputs = self.model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=False
+    )
 
+    # =========================
+    # ⭐关键：只取新生成部分
+    # =========================
+    generated_tokens = outputs[0][input_len:]
 
-turn = "[案例链接: KT00370519]。\n您好目前还不支持的。"
-print(extract_case_id(turn))
+    return self.tokenizer.decode(
+        generated_tokens,
+        skip_special_tokens=True
+    ).strip()
