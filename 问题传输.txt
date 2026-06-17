@@ -1,111 +1,18 @@
-from prompts.prompt_templates import PromptTemplates
-from models.sft_model import SFTModel
-from rag.retriever import zefeng_rag
+current wrong turn:  [案例链接: KT00370519]。
+您好目前还不支持的。
+
+import re
+
+def extract_case_id(turn):
+    pattern2 = r'\$\$案例链接:\s*(KT\d+)\$\$'
+    match = re.search(pattern2, turn)
+    if not match:
+        print("current wrong turn: ", turn)
+        return None
+    case_id = match.group(1)
+
+    return case_id
 
 
-class Pipeline:
-
-    def __init__(self):
-
-        # 4个SFT模型
-        self.query_model = SFTModel("query_sft")
-        self.trigger_model = SFTModel("trigger_sft")
-        self.policy_model = SFTModel("policy_sft")
-        self.response_model = SFTModel("response_sft")
-
-    # =========================
-    # 1. Query
-    # =========================
-    def run_query(self, dialogue):
-
-        prompt = PromptTemplates.query(dialogue)
-
-        full_prompt = self._merge(prompt)
-
-        return self.query_model(full_prompt)
-
-    # =========================
-    # 2. Trigger（路由器）
-    # =========================
-    def run_trigger(self, dialogue, query):
-
-        prompt = PromptTemplates.trigger(dialogue, query)
-
-        full_prompt = self._merge(prompt)
-
-        return self.trigger_model(full_prompt)
-
-    # =========================
-    # 3. Policy
-    # =========================
-    def run_policy(self, dialogue, cases):
-
-        prompt = PromptTemplates.policy(dialogue, cases)
-
-        full_prompt = self._merge(prompt)
-
-        return self.policy_model(full_prompt)
-
-    # =========================
-    # 4. Response
-    # =========================
-    def run_response(self, dialogue, policy, cases):
-
-        prompt = PromptTemplates.response(dialogue, policy, cases)
-
-        full_prompt = self._merge(prompt)
-
-        return self.response_model(full_prompt)
-
-    # =========================
-    # system + user 拼接（关键）
-    # =========================
-    def _merge(self, prompt_dict):
-
-        system = prompt_dict["system"]
-        user = prompt_dict["user"]
-
-        # ⚠️ 必须和 LLaMA-Factory qwen3_nothink 对齐格式
-        return f"""<|im_start|>system
-{system}
-<|im_end|>
-<|im_start|>user
-{user}
-<|im_end|>
-<|im_start|>assistant
-"""
-
-    # =========================
-    # 主 pipeline
-    # =========================
-    def run(self, dialogue):
-
-        # 1. Query
-        query = self.run_query(dialogue)
-
-        # 2. Trigger
-        trigger = self.run_trigger(dialogue, query)
-
-        trigger = trigger.strip()
-
-        # 3. conditional RAG（关键逻辑）
-        if "检索+常识" in trigger:
-            cases = str(retrieve_cases(dialogue, query))
-        elif "仅常识" in trigger:
-            cases = "无，目前用户需求仅需要常识解决"
-        else:
-            cases = "无，目前知识不足以解决用户需求"
-
-        # 4. Policy
-        policy = self.run_policy(dialogue, cases)
-        
-        # 5. Response
-        response = self.run_response(dialogue, policy, cases)
-    
-        return {
-            "query": query,
-            "trigger": trigger,
-            "cases": cases,
-            "policy": policy,
-            "response": response
-        }
+turn = "[案例链接: KT00370519]。\n您好目前还不支持的。"
+print(extract_case_id(turn))
