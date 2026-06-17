@@ -1,12 +1,1 @@
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export NCCL_IB_DISABLE=1
-export NCCL_DEBUG=INFO
-
-mkdir -p logs
-
-nohup torchrun \
-  --nproc_per_node=4 \
-  --master_port=29501 \
-  src/train.py \
-  --config query_generator.yaml \
-  > logs/query_generator.log 2>&1 &
+CUDA_VISIBLE_DEVICES=0,1,2,3 nohup llamafactory-cli train query_generator.yaml > logs/query_generator.log 2>&1 &
