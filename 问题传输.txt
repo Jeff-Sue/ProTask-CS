@@ -1,45 +1,146 @@
-### model
-model_name_or_path: /data/MODEL_ZOO/Qwen/Qwen3.5-9B
-trust_remote_code: true
-
-### method
-stage: sft
-do_train: true
-finetuning_type: lora
-lora_rank: 8
-lora_target: all
-
-### dataset
-dataset: query_generator_static_single
-template: qwen3_nothink
-cutoff_len: 2048
-max_samples: 100000
-preprocessing_num_workers: 16
-dataloader_num_workers: 4
-
-### output
-output_dir: saves/static_single/query_generator
-logging_steps: 10
-save_steps: 500
-plot_loss: true
-overwrite_output_dir: true
-save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-
-### train
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 1.0e-4
-num_train_epochs: 3.0
-lr_scheduler_type: cosine
-warmup_ratio: 0.1
-bf16: true
-ddp_timeout: 180000000
-resume_from_checkpoint: null
-
-### eval
-# eval_dataset: alpaca_en_demo
-# val_size: 0.1
-# per_device_eval_batch_size: 1
-# eval_strategy: steps
-# eval_steps: 500
+[WARNING|trainer_utils.py:1238] 2026-06-17 12:39:58,703 >> The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 248046, 'pad_token_id': 248044}.
+[INFO|trainer.py:1469] 2026-06-17 12:39:59,278 >> ***** Running training *****
+[INFO|trainer.py:1470] 2026-06-17 12:39:59,278 >>   Num examples = 10,000
+[INFO|trainer.py:1471] 2026-06-17 12:39:59,278 >>   Num Epochs = 3
+[INFO|trainer.py:1472] 2026-06-17 12:39:59,279 >>   Num update steps per epoch = 157
+[INFO|trainer.py:1473] 2026-06-17 12:39:59,279 >>   Instantaneous batch size per device = 4
+[INFO|trainer.py:1476] 2026-06-17 12:39:59,279 >>   Total train batch size (w. parallel, distributed & accumulation) = 64
+[INFO|trainer.py:1477] 2026-06-17 12:39:59,279 >>   Gradient Accumulation steps = 4
+[INFO|trainer.py:1478] 2026-06-17 12:39:59,279 >>   Total optimization steps = 471
+[INFO|trainer.py:1479] 2026-06-17 12:39:59,282 >>   Number of trainable parameters = 3,145,728
+  0%|                                                                                                                                                                                                      | 0/471 [00:00<?, ?it/s][rank2]: Traceback (most recent call last):
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/launcher.py", line 185, in <module>
+[rank2]:     run_exp()
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/tuner.py", line 149, in run_exp
+[rank2]:     _training_function(config={"args": args, "callbacks": callbacks})
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/tuner.py", line 117, in _training_function
+[rank2]:     run_sft(model_args, data_args, training_args, finetuning_args, generating_args, callbacks)
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/sft/workflow.py", line 121, in run_sft
+[rank2]:     train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+[rank2]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 1427, in train
+[rank2]:     return inner_training_loop(
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 1509, in _inner_training_loop
+[rank2]:     self._run_epoch(
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 1737, in _run_epoch
+[rank2]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank2]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 1909, in training_step
+[rank2]:     loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/sft/trainer.py", line 162, in compute_loss
+[rank2]:     return super().compute_loss(model, inputs, *args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 1981, in compute_loss
+[rank2]:     outputs = model(**inputs)
+[rank2]:               ^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1637, in forward
+[rank2]:     else self._run_ddp_forward(*inputs, **kwargs)
+[rank2]:          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1464, in _run_ddp_forward
+[rank2]:     return self.module(*inputs, **kwargs)  # type: ignore[index]
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/accelerate/utils/operations.py", line 819, in forward
+[rank2]:     return model_forward(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/accelerate/utils/operations.py", line 807, in __call__
+[rank2]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank2]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank2]:     return func(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/peft/peft_model.py", line 1923, in forward
+[rank2]:     return self.base_model(
+[rank2]:            ^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/peft/tuners/tuners_utils.py", line 311, in forward
+[rank2]:     return self.model.forward(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/utils/generic.py", line 887, in wrapper
+[rank2]:     output = func(self, *args, **kwargs)
+[rank2]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1918, in forward
+[rank2]:     outputs = self.model(
+[rank2]:               ^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/utils/generic.py", line 887, in wrapper
+[rank2]:     output = func(self, *args, **kwargs)
+[rank2]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1674, in forward
+[rank2]:     outputs = self.language_model(
+[rank2]:               ^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/utils/generic.py", line 963, in wrapper
+[rank2]:     output = func(self, *args, **kwargs)
+[rank2]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/utils/output_capturing.py", line 248, in wrapper
+[rank2]:     outputs = func(self, *args, **kwargs)
+[rank2]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 1275, in forward
+[rank2]:     hidden_states = decoder_layer(
+[rank2]:                     ^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/modeling_layers.py", line 92, in __call__
+[rank2]:     return self._gradient_checkpointing_func(partial(super().__call__, **kwargs), *args)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/model/model_utils/checkpointing.py", line 101, in custom_gradient_checkpointing_func
+[rank2]:     return func(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 780, in forward
+[rank2]:     hidden_states = self.mlp(hidden_states)
+[rank2]:                     ^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3_5/modeling_qwen3_5.py", line 707, in forward
+[rank2]:     down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+[rank2]:                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank2]:     return self._call_impl(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank2]:     return forward_call(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/activations.py", line 103, in forward
+[rank2]:     return nn.functional.silu(input)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/functional.py", line 2380, in silu
+[rank2]:     return torch._C._nn.silu(input)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank2]: RuntimeError: CUDA driver error: invalid argument
