@@ -1,18 +1,54 @@
-current wrong turn:  [案例链接: KT00370519]。
-您好目前还不支持的。
+from fastapi import FastAPI
+from pydantic import BaseModel
 
-import re
+from pipeline import Pipeline
 
-def extract_case_id(turn):
-    pattern2 = r'\$\$案例链接:\s*(KT\d+)\$\$'
-    match = re.search(pattern2, turn)
-    if not match:
-        print("current wrong turn: ", turn)
-        return None
-    case_id = match.group(1)
+# =========================
+# 1. 初始化服务（模型常驻）
+# =========================
+app = FastAPI(title="Huawei IT LLM Service")
 
-    return case_id
+pipeline = Pipeline()   # ⭐只加载一次（关键）
 
 
-turn = "[案例链接: KT00370519]。\n您好目前还不支持的。"
-print(extract_case_id(turn))
+# =========================
+# 2. 请求格式
+# =========================
+class Request(BaseModel):
+    dialogue: str
+
+
+# =========================
+# 3. 返回格式
+# =========================
+class Response(BaseModel):
+    query: str
+    trigger: str
+    cases: str
+    policy: str
+    response: str
+
+
+# =========================
+# 4. 推理接口
+# =========================
+@app.post("/chat", response_model=Response)
+def chat(req: Request):
+
+    result = pipeline.run(req.dialogue)
+
+    return {
+        "query": result["query"],
+        "trigger": result["trigger"],
+        "cases": result["cases"],
+        "policy": result["policy"],
+        "response": result["response"]
+    }
+
+
+# =========================
+# 5. health check
+# =========================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
