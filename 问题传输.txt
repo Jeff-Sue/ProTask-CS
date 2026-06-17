@@ -1,34 +1,122 @@
-.116732377 ProcessGroupNCCL.cpp:1479] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
-Running tokenizer on dataset (num_proc=16):  75%|██████████████████████████████████████████████████████████████████████████████████████████████████▎                                | 7500/10000 [00:02<?, ? examples/s]
-[rank1]: multiprocess.pool.RemoteTraceback: 
-[rank1]: """
-[rank1]: Traceback (most recent call last):
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/multiprocess/pool.py", line 125, in worker
-[rank1]:     result = (True, func(*args, **kwds))
-[rank1]:                     ^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 586, in _write_generator_to_queue
-[rank1]:     for i, result in enumerate(func(**kwargs)):
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3674, in _map_single
-[rank1]:     for i, batch in iter_outputs(shard_iterable):
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3624, in iter_outputs
-[rank1]:     yield i, apply_function(example, i, offset=offset)
-[rank1]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 3547, in apply_function
-[rank1]:     processed_inputs = function(*fn_args, *additional_args, **fn_kwargs)
-[rank1]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/processor/supervised.py", line 119, in preprocess_dataset
-[rank1]:     input_ids, labels = self._encode_data_example(
-[rank1]:                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/processor/supervised.py", line 67, in _encode_data_example
-[rank1]:     encoded_pairs = self.template.encode_multiturn(self.tokenizer, messages, system, tools, discarding_history_cot)
-[rank1]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/template.py", line 85, in encode_multiturn
-[rank1]:     encoded_messages = self._encode(tokenizer, messages, system, tools)
-[rank1]:                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/template.py", line 158, in _encode
-[rank1]:     elements += self.format_assistant.apply(content=message["content"])
-[rank1]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/data/formatter.py", line 78, in apply
-[rank1]:     raise RuntimeError(f"Expected a string, got {value}")
-[rank1]: RuntimeError: Expected a string, got None
-[rank1]: """
+rank0]: Traceback (most recent call last):
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/launcher.py", line 185, in <module>
+[rank0]:     run_exp()
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/tuner.py", line 149, in run_exp
+[rank0]:     _training_function(config={"args": args, "callbacks": callbacks})
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/tuner.py", line 117, in _training_function
+[rank0]:     run_sft(model_args, data_args, training_args, finetuning_args, generating_args, callbacks)
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/sft/workflow.py", line 121, in run_sft
+[rank0]:     train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 2325, in train
+[rank0]:     return inner_training_loop(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 2674, in _inner_training_loop
+[rank0]:     tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 4020, in training_step
+[rank0]:     loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/train/sft/trainer.py", line 162, in compute_loss
+[rank0]:     return super().compute_loss(model, inputs, *args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/trainer.py", line 4110, in compute_loss
+[rank0]:     outputs = model(**inputs)
+[rank0]:               ^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1637, in forward
+[rank0]:     else self._run_ddp_forward(*inputs, **kwargs)
+[rank0]:          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1464, in _run_ddp_forward
+[rank0]:     return self.module(*inputs, **kwargs)  # type: ignore[index]
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/accelerate/utils/operations.py", line 819, in forward
+[rank0]:     return model_forward(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/accelerate/utils/operations.py", line 807, in __call__
+[rank0]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/peft/peft_model.py", line 1923, in forward
+[rank0]:     return self.base_model(
+[rank0]:            ^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/peft/tuners/tuners_utils.py", line 311, in forward
+[rank0]:     return self.model.forward(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/utils/generic.py", line 918, in wrapper
+[rank0]:     output = func(self, *args, **kwargs)
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/models/qwen3/modeling_qwen3.py", line 498, in forward
+[rank0]:     loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/transformers/loss/loss_utils.py", line 55, in ForCausalLMLoss
+[rank0]:     logits = logits.float()
+[rank0]:              ^^^^^^^^^^^^^^
+[rank0]: RuntimeError: CUDA driver error: invalid argument
+
+
+### model
+model_name_or_path: /data/MODEL_ZOO/Qwen/Qwen3-8B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 16
+lora_target: q_proj,v_proj,k_proj,o_proj
+
+### dataset
+dataset: policy_predictor_static_single
+template: qwen3_nothink
+cutoff_len: 8192
+max_samples: 100000
+preprocessing_num_workers: 16
+dataloader_num_workers: 0
+
+### output
+output_dir: saves/static_single/policy_predictor
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: false
+fp16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+# eval_dataset: alpaca_en_demo
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# eval_strategy: steps
+# eval_steps: 500
