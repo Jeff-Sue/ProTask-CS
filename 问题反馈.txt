@@ -1,21 +1,87 @@
-def __call__(self, prompt, max_new_tokens=256):
+from fastapi import FastAPI
+from models.model_manager import ModelManager
+from pipeline import Pipeline
 
-    inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+app = FastAPI()
 
-    input_len = inputs["input_ids"].shape[1]
+mm = ModelManager()
+pipeline = None
 
-    outputs = self.model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=False
-    )
 
-    # =========================
-    # ⭐关键：只取新生成部分
-    # =========================
-    generated_tokens = outputs[0][input_len:]
+@app.post("/load_models")
+def load_models():
 
-    return self.tokenizer.decode(
-        generated_tokens,
-        skip_special_tokens=True
-    ).strip()
+    global pipeline
+
+    mm.load_all()
+    pipeline = Pipeline(mm)
+
+    return {"status": "models loaded"}
+
+
+
+
+
+
+
+
+
+
+
+class Pipeline:
+
+    def __init__(self, model_manager):
+
+        self.mm = model_manager
+
+    def run_query(self, dialogue):
+
+        model = self.mm.get("query")
+        prompt = PromptTemplates.query(dialogue)
+        return model(self._merge(prompt))
+
+    def run_trigger(self, dialogue, query):
+
+        model = self.mm.get("trigger")
+        prompt = PromptTemplates.trigger(dialogue, query)
+        return model(self._merge(prompt))
+
+    def run_policy(self, dialogue, cases):
+
+        model = self.mm.get("policy")
+        prompt = PromptTemplates.policy(dialogue, cases)
+        return model(self._merge(prompt))
+
+    def run_response(self, dialogue, policy, cases):
+
+        model = self.mm.get("response")
+        prompt = PromptTemplates.response(dialogue, policy, cases)
+        return model(self._merge(prompt))
+
+
+
+
+
+
+
+
+
+class ModelManager:
+
+    def __init__(self):
+        self.models = {}
+
+    def load_all(self):
+        from models.sft_model import SFTModel
+
+        print("Loading models...")
+
+        self.models["query"] = SFTModel("query_sft", device="cuda:0")
+        self.models["trigger"] = SFTModel("trigger_sft", device="cuda:1")
+        self.models["policy"] = SFTModel("policy_sft", device="cuda:2")
+        self.models["response"] = SFTModel("response_sft", device="cuda:3")
+
+        print("All models loaded ✔")
+
+    def get(self, name):
+        return self.models[name]
