@@ -1,22 +1,59 @@
 from fastapi import FastAPI
+
 from models.model_manager import ModelManager
 from pipeline import Pipeline
 
-app = FastAPI()
+app = FastAPI(title="Huawei IT SFT System")
 
-mm = ModelManager()
+# =========================
+# 全局状态（关键）
+# =========================
+model_manager = ModelManager()
 pipeline = None
 
 
+# =========================
+# 1. 启动模型（只做一次）
+# =========================
 @app.post("/load_models")
 def load_models():
 
     global pipeline
 
-    mm.load_all()
-    pipeline = Pipeline(mm)
+    print(">>> Loading models...")
+
+    model_manager.load_all()
+    pipeline = Pipeline(model_manager)
+
+    print(">>> All models loaded ✔")
 
     return {"status": "models loaded"}
+
+
+# =========================
+# 2. 推理接口（只负责调用）
+# =========================
+@app.post("/chat")
+def chat(req: dict):
+
+    global pipeline
+
+    if pipeline is None:
+        return {"error": "models not loaded. call /load_models first"}
+
+    dialogue = req["dialogue"]
+
+    result = pipeline.run(dialogue)
+
+    return result
+
+
+# =========================
+# 3. health check
+# =========================
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 
