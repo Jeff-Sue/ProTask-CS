@@ -1,14 +1,13 @@
+import time
 from prompts.prompt_templates import PromptTemplates
 from models.sft_model import SFTModel
 from rag.retriever import retrieve_cases
-from postprocess.case_filter import postprocess_cases
 
 
 class Pipeline:
 
     def __init__(self):
 
-        # 4个SFT模型
         self.query_model = SFTModel("query_sft")
         self.trigger_model = SFTModel("trigger_sft")
         self.policy_model = SFTModel("policy_sft")
@@ -19,54 +18,73 @@ class Pipeline:
     # =========================
     def run_query(self, dialogue):
 
-        prompt = PromptTemplates.query(dialogue)
+        t0 = time.time()
 
+        prompt = PromptTemplates.query(dialogue)
         full_prompt = self._merge(prompt)
 
-        return self.query_model(full_prompt)
+        output = self.query_model(full_prompt)
+
+        t1 = time.time()
+
+        return output, t1 - t0
 
     # =========================
-    # 2. Trigger（路由器）
+    # 2. Trigger
     # =========================
     def run_trigger(self, dialogue, query):
 
-        prompt = PromptTemplates.trigger(dialogue, query)
+        t0 = time.time()
 
+        prompt = PromptTemplates.trigger(dialogue, query)
         full_prompt = self._merge(prompt)
 
-        return self.trigger_model(full_prompt)
+        output = self.trigger_model(full_prompt)
+
+        t1 = time.time()
+
+        return output, t1 - t0
 
     # =========================
     # 3. Policy
     # =========================
     def run_policy(self, dialogue, cases):
 
-        prompt = PromptTemplates.policy(dialogue, cases)
+        t0 = time.time()
 
+        prompt = PromptTemplates.policy(dialogue, cases)
         full_prompt = self._merge(prompt)
 
-        return self.policy_model(full_prompt)
+        output = self.policy_model(full_prompt)
+
+        t1 = time.time()
+
+        return output, t1 - t0
 
     # =========================
     # 4. Response
     # =========================
     def run_response(self, dialogue, policy, cases):
 
-        prompt = PromptTemplates.response(dialogue, policy, cases)
+        t0 = time.time()
 
+        prompt = PromptTemplates.response(dialogue, policy, cases)
         full_prompt = self._merge(prompt)
 
-        return self.response_model(full_prompt)
+        output = self.response_model(full_prompt)
+
+        t1 = time.time()
+
+        return output, t1 - t0
 
     # =========================
-    # system + user 拼接（关键）
+    # merge prompt
     # =========================
     def _merge(self, prompt_dict):
 
         system = prompt_dict["system"]
         user = prompt_dict["user"]
 
-        # ⚠️ 必须和 LLaMA-Factory qwen3_nothink 对齐格式
         return f"""<|im_start|>system
 {system}
 <|im_end|>
@@ -77,37 +95,57 @@ class Pipeline:
 """
 
     # =========================
-    # 主 pipeline
+    # 主 pipeline（带 profiling）
     # =========================
     def run(self, dialogue):
 
+        total_t0 = time.time()
+
         # 1. Query
-        query = self.run_query(dialogue)
+        query, t_query = self.run_query(dialogue)
 
         # 2. Trigger
-        trigger = self.run_trigger(dialogue, query)
+        trigger, t_trigger = self.run_trigger(dialogue, query)
 
         trigger = trigger.strip()
 
-        # 3. conditional RAG（关键逻辑）
+        # 3. RAG gating
+        t_rag = 0.0
+        rag_start = time.time()
+
         if "检索+常识" in trigger:
-
-            cases = retrieve_cases(query)
-            cases = postprocess_cases(cases)
-
+            cases = str(retrieve_cases(dialogue, query))
+        elif "仅常识" in trigger:
+            cases = "无，目前用户需求仅需要常识解决"
         else:
-            cases = "无"
+            cases = "无，目前知识不足以解决用户需求"
+
+        t_rag = time.time() - rag_start
 
         # 4. Policy
-        policy = self.run_policy(dialogue, cases)
+        policy, t_policy = self.run_policy(dialogue, cases)
 
         # 5. Response
-        response = self.run_response(dialogue, policy, cases)
+        response, t_response = self.run_response(dialogue, policy, cases)
+
+        total_t1 = time.time()
 
         return {
             "query": query,
             "trigger": trigger,
             "cases": cases,
             "policy": policy,
-            "response": response
+            "response": response,
+
+            # =========================
+            # latency breakdown
+            # =========================
+            "timing": {
+                "query_time": t_query,
+                "trigger_time": t_trigger,
+                "rag_time": t_rag,
+                "policy_time": t_policy,
+                "response_time": t_response,
+                "total_time": total_t1 - total_t0
+            }
         }
