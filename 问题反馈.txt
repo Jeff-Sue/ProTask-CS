@@ -1,97 +1,124 @@
-from prompts.prompt_templates import PromptTemplates
-from models.sft_model import SFTModel
-from rag.retriever import retrieve_cases
-from postprocess.case_filter import postprocess_cases
+# prompt_templates.py
+
+class PromptTemplates:
+    """
+    统一训练 / 推理 prompt（必须完全一致）
+    """
+
+    # =========================
+    # 1. QueryGenerator
+    # =========================
+    QUERY_SYSTEM = """你是华为IT客服中的QueryGenerator，负责从对话历史中提取用户的核心问题，用于后续检索。
+
+要求：
+1. 只输出一行短语（≤15个汉字），不得有解释或标点
+2. 必须是具体问题实体（故障/报错/诉求）
+3. 去掉客套与背景信息
+4. 多问题只保留最关键一个
+"""
+
+    QUERY_USER = """对话历史：
+{dialogue}
+
+请抽取用户核心问题："""
 
 
-class Pipeline:
+    # =========================
+    # 2. RAGTrigger
+    # =========================
+    TRIGGER_SYSTEM = """你是华为IT客服系统中的RAGTrigger模块。
 
-    def __init__(self):
+你的任务是判断当前问题对知识支持的需求程度。
 
-        # 4个SFT模型
-        self.query_model = SFTModel("query_sft")
-        self.trigger_model = SFTModel("trigger_sft")
-        self.policy_model = SFTModel("policy_sft")
-        self.response_model = SFTModel("response_sft")
+只输出JSON：
+{
+  "knowledge_support": "仅常识" 或 "检索+常识" 或 "知识不足"
+}
+"""
 
-    # --------------------------
-    # 1. Query
-    # --------------------------
-    def run_query(self, dialogue):
+    TRIGGER_USER = """对话历史：
+{dialogue}
 
-        prompt = PromptTemplates.QUERY.format(
-            dialogue=dialogue
-        )
+Query：
+{query}
 
-        return self.query_model(prompt)
+请判断知识需求："""
 
-    # --------------------------
-    # 2. Trigger（路由器）
-    # --------------------------
-    def run_trigger(self, dialogue, query):
 
-        prompt = PromptTemplates.TRIGGER.format(
-            dialogue=dialogue,
-            query=query
-        )
+    # =========================
+    # 3. PolicyPredictor
+    # =========================
+    POLICY_SYSTEM = """你是华为IT客服系统中的PolicyPredictor。
 
-        return self.trigger_model(prompt)
+你的任务是预测下一步客服动作，只能输出一个标签。
+"""
 
-    # --------------------------
-    # 3. Policy
-    # --------------------------
-    def run_policy(self, dialogue, cases):
+    POLICY_USER = """对话历史：
+{dialogue}
 
-        prompt = PromptTemplates.POLICY.format(
-            dialogue=dialogue,
-            cases=cases
-        )
+案例：
+{cases}
 
-        return self.policy_model(prompt)
+请预测下一步动作："""
 
-    # --------------------------
-    # 4. Response
-    # --------------------------
-    def run_response(self, dialogue, policy, cases):
 
-        prompt = PromptTemplates.RESPONSE.format(
-            dialogue=dialogue,
-            policy=policy,
-            cases=cases
-        )
+    # =========================
+    # 4. ResponseGenerator
+    # =========================
+    RESPONSE_SYSTEM = """你是华为IT客服系统中的ResponseGenerator。
 
-        return self.response_model(prompt)
+你的任务是根据policy和案例生成最终客服回复。
+"""
 
-    # --------------------------
-    # 主流程（关键）
-    # --------------------------
-    def run(self, dialogue):
+    RESPONSE_USER = """对话历史：
+{dialogue}
 
-        # 1. Query
-        query = self.run_query(dialogue)
+Policy：
+{policy}
 
-        # 2. Trigger（routing）
-        trigger = self.run_trigger(dialogue, query)
+案例：
+{cases}
 
-        # 3. conditional RAG
-        if trigger.strip() == "检索+常识":
+请生成客服回复："""
 
-            cases = retrieve_cases(query)
-            cases = postprocess_cases(cases)
 
-        else:
-            cases = []
-
-        # 4. Policy
-        policy = self.run_policy(dialogue, cases)
-
-        # 5. Response
-        response = self.run_response(dialogue, policy, cases)
-
+    # =========================
+    # 工具函数（训练 & 推理统一入口）
+    # =========================
+    @staticmethod
+    def query(dialogue: str):
         return {
-            "query": query,
-            "trigger": trigger,
-            "cases": cases,
-            "policy": policy,
-            "response": response
+            "system": PromptTemplates.QUERY_SYSTEM,
+            "user": PromptTemplates.QUERY_USER.format(dialogue=dialogue)
+        }
+
+    @staticmethod
+    def trigger(dialogue: str, query: str):
+        return {
+            "system": PromptTemplates.TRIGGER_SYSTEM,
+            "user": PromptTemplates.TRIGGER_USER.format(
+                dialogue=dialogue,
+                query=query
+            )
+        }
+
+    @staticmethod
+    def policy(dialogue: str, cases: str):
+        return {
+            "system": PromptTemplates.POLICY_SYSTEM,
+            "user": PromptTemplates.POLICY_USER.format(
+                dialogue=dialogue,
+                cases=cases
+            )
+        }
+
+    @staticmethod
+    def response(dialogue: str, policy: str, cases: str):
+        return {
+            "system": PromptTemplates.RESPONSE_SYSTEM,
+            "user": PromptTemplates.RESPONSE_USER.format(
+                dialogue=dialogue,
+                policy=policy,
+                cases=cases
+            )
         }
