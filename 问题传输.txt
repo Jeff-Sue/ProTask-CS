@@ -1,54 +1,35 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+import json
 
-from pipeline import Pipeline
+data_path = "/home/aarc/CuhkszTeam/nas1/zefeng/RAG_agent/后处理_selected_compress_keywords/results/jieli_20to5_select_keywords.json"
 
-# =========================
-# 1. 初始化服务（模型常驻）
-# =========================
-app = FastAPI(title="Huawei IT LLM Service")
-
-pipeline = Pipeline()   # ⭐只加载一次（关键）
-
-
-# =========================
-# 2. 请求格式
-# =========================
-class Request(BaseModel):
-    dialogue: str
+top5_case_list = []
+top3_case_list = []
+top1_case_list = []
+with open(data_path, "r") as f:
+    data = json.load(f)
+    for i in data:
+        top5_case_list.append(i['retriever']['selected_case_ids'][:5])
+        top3_case_list.append(i['retriever']['selected_case_ids'][:3])
+        top1_case_list.append(i['retriever']['selected_case_ids'][:1])
+    
+golden_path = 'golden.json'
 
 
-# =========================
-# 3. 返回格式
-# =========================
-class Response(BaseModel):
-    query: str
-    trigger: str
-    cases: str
-    policy: str
-    response: str
+top1 = 0
+top3 = 0
+top5 = 0
+with open(golden_path, "r") as f:
+    golden_ids = json.load(f)
 
-
-# =========================
-# 4. 推理接口
-# =========================
-@app.post("/chat", response_model=Response)
-def chat(req: Request):
-
-    result = pipeline.run(req.dialogue)
-
-    return {
-        "query": result["query"],
-        "trigger": result["trigger"],
-        "cases": result["cases"],
-        "policy": result["policy"],
-        "response": result["response"]
-    }
-
-
-# =========================
-# 5. health check
-# =========================
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    for idx, gold_id in enumerate(golden_ids):
+        if gold_id in top5_case_list[idx]:
+            top5 += 1
+        if gold_id in top3_case_list[idx]:
+            top3 += 1        
+        if gold_id in top1_case_list[idx]:
+            top1 += 1
+print(len(golden_ids))
+print(len(top5_case_list))
+print(top5/len(top5_case_list))
+print(top3/len(top3_case_list))
+print(top1/len(top1_case_list))
