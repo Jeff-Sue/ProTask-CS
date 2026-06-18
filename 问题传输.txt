@@ -33,3 +33,5 @@ print(len(top5_case_list))
 print(top5/len(top5_case_list))
 print(top3/len(top3_case_list))
 print(top1/len(top1_case_list))
+
+针对三个top，也加一个功能，就是画一张柱状图，显示top1，top2-3，top4-5中存在golden的数量，和pred选中了top1，top2-3，top4-5中golden的数量
