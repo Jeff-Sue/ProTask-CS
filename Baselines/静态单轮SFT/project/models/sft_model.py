@@ -1,0 +1,64 @@
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+import torch
+
+
+class SFTModel:
+
+    def __init__(self, base_path, lora_path=None, device="cuda:0"):
+
+        self.device = device
+
+        # ======================
+        # 1. tokenizer
+        # ======================
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            base_path,
+            trust_remote_code=True
+        )
+
+        # ======================
+        # 2. base model load
+        # ======================
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_path,
+            torch_dtype=torch.float16,
+            device_map={"": device},
+            trust_remote_code=True
+        )
+
+        # ======================
+        # 3. load LoRA (if exists)
+        # ======================
+        if lora_path is not None:
+            self.model = PeftModel.from_pretrained(
+                base_model,
+                lora_path
+            )
+        else:
+            self.model = base_model
+
+        self.model.eval()
+
+    @torch.no_grad()
+    def __call__(self, prompt, max_new_tokens=256):
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+
+        input_len = inputs["input_ids"].shape[1]
+
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False
+        )
+
+        # =========================
+        # ⭐关键：只取新生成部分
+        # =========================
+        generated_tokens = outputs[0][input_len:]
+
+        return self.tokenizer.decode(
+            generated_tokens,
+            skip_special_tokens=True
+        ).strip()

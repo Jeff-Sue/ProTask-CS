@@ -1,0 +1,228 @@
+import json
+import re
+import matplotlib.pyplot as plt
+from typing import List, Dict, Any
+
+
+class RAGEvaluator:
+
+    def __init__(self, predictions_file: str, ground_truth_file: str):
+        self.predictions = self._load_json(predictions_file)
+        self.ground_truth = self._load_json(ground_truth_file)
+
+    # =========================
+    # load json
+    # =========================
+    def _load_json(self, file_path: str) -> List[Dict]:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return [json.loads(line) for line in content.strip().split('\n') if line]
+
+    # =========================
+    # extract case ids
+    # =========================
+    def _extract_case_ids(self, cases_str: str) -> List[str]:
+        pattern = r"'case_id':\s*'([^']+)'"
+        return re.findall(pattern, cases_str)
+
+    # =========================
+    # main evaluate
+    # =========================
+    def evaluate(self) -> Dict[str, float]:
+
+        total_samples = len(self.predictions)
+
+        trigger_count = 0
+        top5_recall_count = 0
+        top3_recall_count = 0
+        top1_recall_count = 0
+        strategy_accurate_count = 0
+        case_accurate_count = 0
+
+        # =========================
+        # NEW: rank distribution
+        # =========================
+        gold_top1 = 0
+        gold_top2_3 = 0
+        gold_top4_5 = 0
+
+        pred_top1 = 0
+        pred_top2_3 = 0
+        pred_top4_5 = 0
+
+        for idx, pred in enumerate(self.predictions):
+
+            correct_case_id = self.ground_truth[idx]
+            if not correct_case_id:
+                continue
+
+            trigger = pred.get('trigger', '')
+            is_triggered = '检索+常识' in trigger
+
+            if is_triggered:
+                trigger_count += 1
+
+                cases_str = pred.get('cases', '')
+                case_ids = self._extract_case_ids(cases_str)
+
+                top5_cases = case_ids[:5]
+
+                # =========================
+                # recall metrics
+                # =========================
+                if correct_case_id in top5_cases:
+                    top5_recall_count += 1
+
+                if correct_case_id in case_ids[:3]:
+                    top3_recall_count += 1
+
+                if correct_case_id in case_ids[:1]:
+                    top1_recall_count += 1
+
+                # =========================
+                # rank distribution
+                # =========================
+                if correct_case_id in case_ids:
+                    rank = case_ids.index(correct_case_id)
+
+                    if rank == 0:
+                        gold_top1 += 1
+                        if eval(pred.get('policy', {})).get('case_id') == correct_case_id:
+                            pred_top1 += 1
+
+                    elif 1 <= rank <= 2:
+                        gold_top2_3 += 1
+                        if eval(pred.get('policy', {})).get('case_id') == correct_case_id:
+                            pred_top2_3 += 1
+
+                    elif 3 <= rank <= 4:
+                        gold_top4_5 += 1
+                        if eval(pred.get('policy', {})).get('case_id') == correct_case_id:
+                            pred_top4_5 += 1
+
+                # =========================
+                # policy + case accuracy
+                # =========================
+                policy = pred.get('policy', {})
+                if isinstance(policy, str):
+                    try:
+                        policy = eval(policy)
+                    except:
+                        policy = {}
+
+                if policy.get('label') == 'CaseRecommendation':
+                    strategy_accurate_count += 1
+
+                    if policy.get('case_id') == correct_case_id:
+                        case_accurate_count += 1
+
+        results = {
+            "trigger_rate": trigger_count / total_samples if total_samples else 0,
+            "recall_top5": top5_recall_count / trigger_count if trigger_count else 0,
+            "recall_top3": top3_recall_count / trigger_count if trigger_count else 0,
+            "recall_top1": top1_recall_count / trigger_count if trigger_count else 0,
+            "strategy_accuracy": strategy_accurate_count / top5_recall_count if top5_recall_count else 0,
+            "case_accuracy": case_accurate_count / strategy_accurate_count if strategy_accurate_count else 0,
+        }
+
+        # =========================
+        # save rank stats
+        # =========================
+        rank_stats = {
+            "gold_top1": gold_top1,
+            "gold_top2_3": gold_top2_3,
+            "gold_top4_5": gold_top4_5,
+            "pred_top1": pred_top1,
+            "pred_top2_3": pred_top2_3,
+            "pred_top4_5": pred_top4_5,
+        }
+
+        results["rank_stats"] = rank_stats
+
+        return results
+
+    # =========================
+    # print + plot
+    # =========================
+    def print_and_plot(self):
+
+        results = self.evaluate()
+
+        print(json.dumps(results, indent=4))
+
+        stats = results["rank_stats"]
+
+        labels = ["Top1", "Top2-3", "Top4-5"]
+
+        gold = [
+            stats["gold_top1"],
+            stats["gold_top2_3"],
+            stats["gold_top4_5"]
+        ]
+
+        pred = [
+            stats["pred_top1"],
+            stats["pred_top2_3"],
+            stats["pred_top4_5"]
+        ]
+
+        x = range(len(labels))
+
+        plt.figure(figsize=(8, 5))
+
+        bars1 = plt.bar([i - 0.2 for i in x], gold, width=0.4, label="Golden")
+        bars2 = plt.bar([i + 0.2 for i in x], pred, width=0.4, label="Predicted Correct")
+
+        # =========================
+        # ⭐ add value labels
+        # =========================
+        for bar in bars1:
+            height = bar.get_height()
+            plt.text(
+                bar.get_x() + bar.get_width() / 2,
+                height,
+                str(int(height)),
+                ha='center',
+                va='bottom'
+            )
+
+        for bar in bars2:
+            height = bar.get_height()
+            plt.text(
+                bar.get_x() + bar.get_width() / 2,
+                height,
+                str(int(height)),
+                ha='center',
+                va='bottom'
+            )
+
+        plt.xticks(list(x), labels)
+        plt.xlabel("Rank Bucket")
+        plt.ylabel("Count")
+        plt.title("SFT: Golden vs Predicted Rank Distribution (Top-5)")
+        plt.legend()
+
+        plt.tight_layout()
+
+        plt.savefig(
+            "figures/rag_rank_distribution.png",
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.show()
+
+# =========================
+# run
+# =========================
+if __name__ == "__main__":
+
+    evaluator = RAGEvaluator(
+        predictions_file="result.json",
+        ground_truth_file="golden.json"
+    )
+
+    evaluator.print_and_plot()

@@ -1,0 +1,143 @@
+# prompt_templates.py
+
+class PromptTemplates:
+    """
+    统一训练 / 推理 prompt（必须完全一致）
+    """
+
+    # =========================
+    # 1. QueryGenerator
+    # =========================
+    QUERY_SYSTEM = """你是华为IT客服中的QueryGenerator，负责从对话历史中提取用户的核心问题，用于后续检索。
+
+要求：
+
+1. 只输出一行短语（≤15个汉字），不得有解释或标点。
+2. 必须是具体问题实体（如故障/报错/诉求），去掉客套和背景信息。
+3. 多个问题只保留最关键、最具体的一个。
+"""
+
+    QUERY_USER = """对话历史：
+{dialogue}
+
+请抽取问题："""
+
+
+    # =========================
+    # 2. RAGTrigger
+    # =========================
+    TRIGGER_SYSTEM = """你是华为IT客服系统中的RAGTrigger模块。
+
+你的任务是判断当前问题对知识支持的需求程度。
+
+只输出一个JSON，不要解释：
+
+{
+"knowledge_support": "仅常识" 或 "检索+常识" 或 "知识不足"
+}
+
+判断原则：
+
+* 仅常识：不依赖案例库或专有知识，仅凭通用常识即可处理
+* 检索+常识：需要案例库或内部知识辅助才能更可靠处理
+* 知识不足：案例库也难以提供有效支持或无法推进问题"""
+
+    TRIGGER_USER = """对话历史：
+{dialogue}
+query：
+{query}
+
+请判断："""
+
+
+    # =========================
+    # 3. PolicyPredictor
+    # =========================
+    POLICY_SYSTEM = """你是华为IT客服系统中的RAGTrigger模块。
+
+你的任务是判断当前问题对知识支持的需求程度。
+
+只输出一个JSON，不要解释：
+
+{
+"knowledge_support": "仅常识" 或 "检索+常识" 或 "知识不足"
+}
+
+判断原则：
+
+* 仅常识：不依赖案例库或专有知识，仅凭通用常识即可处理
+* 检索+常识：需要案例库或内部知识辅助才能更可靠处理
+* 知识不足：案例库也难以提供有效支持或无法推进问题"""
+
+    POLICY_USER = """对话历史：
+{dialogue}
+案例：
+{cases}
+
+请预测下一步动作："""
+
+
+    # =========================
+    # 4. ResponseGenerator
+    # =========================
+    RESPONSE_SYSTEM = """你是华为IT客服系统中的ResponseGenerator。
+
+你的任务是根据对话历史、策略标签和案例内容生成客服回复。
+
+要求：
+
+1. 只输出客服回复内容，不输出任何解释或结构标记。
+2. 回复必须严格遵循policy（下一步动作）。
+3. 若提供case_id，必须基于该案例内容进行回答或推荐。
+4. 内容需简洁、可执行，不得空泛或偏离问题。"""
+
+    RESPONSE_USER = """对话历史：
+{dialogue}
+policy：
+{policy}
+case：
+{cases}
+
+请生成回复："""
+
+
+    # =========================
+    # 工具函数（训练 & 推理统一入口）
+    # =========================
+    @staticmethod
+    def query(dialogue: str):
+        return {
+            "system": PromptTemplates.QUERY_SYSTEM,
+            "user": PromptTemplates.QUERY_USER.format(dialogue=dialogue)
+        }
+
+    @staticmethod
+    def trigger(dialogue: str, query: str):
+        return {
+            "system": PromptTemplates.TRIGGER_SYSTEM,
+            "user": PromptTemplates.TRIGGER_USER.format(
+                dialogue=dialogue,
+                query=query
+            )
+        }
+
+    @staticmethod
+    def policy(dialogue: str, cases: str):
+        return {
+            "system": PromptTemplates.POLICY_SYSTEM,
+            "user": PromptTemplates.POLICY_USER.format(
+                dialogue=dialogue,
+                cases=cases
+            )
+        }
+
+    @staticmethod
+    def response(dialogue: str, policy: str, cases: str):
+        return {
+            "system": PromptTemplates.RESPONSE_SYSTEM,
+            "user": PromptTemplates.RESPONSE_USER.format(
+                dialogue=dialogue,
+                policy=policy,
+                cases=cases
+            )
+        }

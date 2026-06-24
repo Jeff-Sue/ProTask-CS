@@ -1,0 +1,166 @@
+import time
+from prompts.prompt_templates import PromptTemplates
+from models.sft_model import SFTModel
+from rag.retrieval import zefeng_rag
+
+
+class Pipeline:
+
+    # def __init__(self):
+
+    #     self.query_model = SFTModel(
+    #         base_path="/data/MODEL_ZOO/Qwen/Qwen3-8B",
+    #         lora_path="/data/jiahui/data/LlamaFactory/saves/static_single/query_generator",
+    #         device="cuda:0"
+    #     )
+    #     self.trigger_model = SFTModel(
+    #         base_path="/data/MODEL_ZOO/Qwen/Qwen3-8B",
+    #         lora_path="/data/jiahui/data/LlamaFactory/saves/static_single/rag_trigger",
+    #         device="cuda:1"
+    #     )
+    #     self.policy_model = SFTModel(
+    #         base_path="/data/MODEL_ZOO/Qwen/Qwen3-8B",
+    #         lora_path="/data/jiahui/data/LlamaFactory/saves/static_single/policy_predictor",
+    #         device="cuda:2"
+    #     )
+    #     self.response_model = SFTModel(
+    #         base_path="/data/MODEL_ZOO/Qwen/Qwen3-8B",
+    #         lora_path="/data/jiahui/data/LlamaFactory/saves/static_single/response_generator",
+    #         device="cuda:3"
+    #     )
+    def __init__(self, model_manager):
+
+        self.mm = model_manager
+
+    # =========================
+    # 1. Query
+    # =========================
+    def run_query(self, dialogue):
+
+        t0 = time.time()
+
+        model = self.mm.get("query")
+        prompt = PromptTemplates.query(dialogue)
+        output = model(self._merge(prompt))
+
+        t1 = time.time()
+
+        return output, t1 - t0
+
+    # =========================
+    # 2. Trigger
+    # =========================
+    def run_trigger(self, dialogue, query):
+
+        t0 = time.time()
+
+        model = self.mm.get("trigger")
+        prompt = PromptTemplates.trigger(dialogue, query)
+        output = model(self._merge(prompt))
+
+        t1 = time.time()
+
+        return output, t1 - t0
+
+    # =========================
+    # 3. Policy
+    # =========================
+    def run_policy(self, dialogue, cases):
+
+        t0 = time.time()
+
+        model = self.mm.get("policy")
+        prompt = PromptTemplates.policy(dialogue, cases)
+        output = model(self._merge(prompt))
+
+        t1 = time.time()
+
+        return output, t1 - t0
+
+    # =========================
+    # 4. Response
+    # =========================
+    def run_response(self, dialogue, policy, cases):
+
+        t0 = time.time()
+
+        model = self.mm.get("response")
+        prompt = PromptTemplates.response(dialogue, policy, cases)
+        output = model(self._merge(prompt))
+
+        t1 = time.time()
+
+        return output, t1 - t0
+
+    # =========================
+    # merge prompt
+    # =========================
+    def _merge(self, prompt_dict):
+
+        system = prompt_dict["system"]
+        user = prompt_dict["user"]
+
+        return f"""<|im_start|>system
+{system}
+<|im_end|>
+<|im_start|>user
+{user}
+<|im_end|>
+<|im_start|>assistant
+"""
+
+    # =========================
+    # 主 pipeline（带 profiling）
+    # =========================
+    def run(self, dialogue):
+
+        total_t0 = time.time()
+
+        # 1. Query
+        query, t_query = self.run_query(dialogue)
+        print("query: ", query)
+        # 2. Trigger
+        trigger, t_trigger = self.run_trigger(dialogue, query)
+
+        trigger = trigger.strip()
+        print("trigger: ", trigger)
+        # 3. RAG gating
+        t_rag = 0.0
+        rag_start = time.time()
+
+        if "检索+常识" in trigger:
+            cases = str(zefeng_rag(dialogue, query))
+        elif "仅常识" in trigger:
+            cases = "无，目前用户需求仅需要常识解决"
+        else:
+            cases = "无，目前知识不足以解决用户需求"
+        print("cases: ", cases)
+        t_rag = time.time() - rag_start
+
+        # 4. Policy
+        policy, t_policy = self.run_policy(dialogue, cases)
+        print("policy: ", policy)
+        # 5. Response
+        response, t_response = self.run_response(dialogue, policy, cases)
+        print("response: ", response)
+        total_t1 = time.time()
+
+        return {
+            "query": query,
+            "trigger": trigger,
+            "cases": cases,
+            "policy": policy,
+            "response": response,
+
+            # =========================
+            # latency breakdown
+            # =========================
+            "timing": {
+                "query_time": t_query,
+                "trigger_time": t_trigger,
+                "rag_time": t_rag,
+                "policy_time": t_policy,
+                "response_time": t_response,
+                "total_time": total_t1 - total_t0
+            }
+        }
