@@ -1,67 +1,233 @@
-def print_and_plot(self):
+def run_dialogue_batched(
+    dialogue: Dialogue,
+    retriever: Callable[[str, int], List[Dict[str, str]]] = default_retriever,
+    retrieval_top_k: int = 5,
+    batch_size: int = 8,
+) -> List[PrefixResult]:
 
-    results = self.evaluate()
+    logger.info("Processing dialogue %s (batch_size=%s)", dialogue.dialog_id, batch_size)
 
-    print(json.dumps(results, indent=4))
+    prefix_samples = build_prefix_samples(dialogue)
+    results: List[PrefixResult] = []
 
-    stats = results["rank_stats"]
+    # 按 batch 切分
+    for i in range(0, len(prefix_samples), batch_size):
+        batch = prefix_samples[i:i + batch_size]
 
-    labels = ["Top1", "Top2-3", "Top4-5"]
+        # -------------------------
+        # 1. Query batch
+        # -------------------------
+        query_inputs = []
+        for p in batch:
+            dialogue_prefix = format_history_with_turn_ids(p)
 
-    gold = [
-        stats["gold_top1"],
-        stats["gold_top2_3"],
-        stats["gold_top4_5"]
-    ]
+            query_output_schema = build_turn_skeleton(
+                turn_count=p.turn_id,
+                fields={
+                    "query_mode": '"<none|reuse|refine|rewrite>"',
+                    "query_text": '""',
+                    "reason": '""'
+                }
+            )
 
-    pred = [
-        stats["pred_top1"],
-        stats["pred_top2_3"],
-        stats["pred_top4_5"]
-    ]
+            user_prompt = f"""
+下面是当前 prefix，对应的是“当前客服回复之前”的完整对话历史。
 
-    x = range(len(labels))
+请输出 query trajectory（只输出 JSON）。
 
-    plt.figure(figsize=(8, 5))
+【对话历史】
+{dialogue_prefix}
 
-    bars1 = plt.bar([i - 0.2 for i in x], gold, width=0.4, label="Golden")
-    bars2 = plt.bar([i + 0.2 for i in x], pred, width=0.4, label="Predicted Correct")
+【约束】
+- turn_id 必须从 1 到 {p.turn_id}
+- 不得遗漏或新增
 
-    # =========================
-    # ⭐ add value labels
-    # =========================
-    for bar in bars1:
-        height = bar.get_height()
-        plt.text(
-            bar.get_x() + bar.get_width() / 2,
-            height,
-            str(int(height)),
-            ha='center',
-            va='bottom'
-        )
+【格式】
+{query_output_schema}
+""".strip()
 
-    for bar in bars2:
-        height = bar.get_height()
-        plt.text(
-            bar.get_x() + bar.get_width() / 2,
-            height,
-            str(int(height)),
-            ha='center',
-            va='bottom'
-        )
+            messages = [
+                {"role": "system", "content": QUERY_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
 
-    plt.xticks(list(x), labels)
-    plt.xlabel("Rank Bucket")
-    plt.ylabel("Count")
-    plt.title("Golden vs Predicted Rank Distribution (Top-5)")
-    plt.legend()
+            query_inputs.append({"messages": messages})
 
-    plt.tight_layout()
+        query_raw_outputs = parallel_inference(query_inputs)
 
-    plt.savefig(
-        "figures/rag_rank_distribution.png",
-        dpi=300,
-        bbox_inches="tight"
-    )
+        query_outputs = [
+            parse_query_output(
+                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
+                expected_turns=batch[idx].turn_id
+            )
+            for idx, o in enumerate(query_raw_outputs)
+        ]
 
-    plt.show()
+        # -------------------------
+        # 2. Retrieval batch（逐样本，但可并行）
+        # -------------------------
+        retrieval_outputs = []
+        retrieval_ms_list = []
+
+        for p, q in zip(batch, query_outputs):
+            r_out, r_ms = run_retrieval_model(
+                prefix_sample=p,
+                query_output=q,
+                retriever=retriever,
+                top_k=retrieval_top_k,
+            )
+            retrieval_outputs.append(r_out)
+            retrieval_ms_list.append(r_ms)
+
+        # -------------------------
+        # 3. Trigger batch
+        # -------------------------
+        trigger_inputs = []
+
+        for p, q, r in zip(batch, query_outputs, retrieval_outputs):
+            dialogue_prefix = format_history_with_turn_ids(p)
+            query_trajectory = format_query_trajectory(q)
+            retrieved_evidence = format_retrieved_cases(r.retrieved_cases)
+
+            trigger_output_schema = build_turn_skeleton(
+                turn_count=p.turn_id,
+                fields={
+                    "trigger": '<true_or_false>',
+                    "evidence_mode": '"<no_evidence_needed|retrieve_new_evidence|reuse_existing_evidence>"',
+                    "reason": '""'
+                }
+            )
+
+            messages = [
+                {"role": "system", "content": TRIGGER_PROMPT},
+                {"role": "user", "content": f"""
+{dialogue_prefix}
+
+{query_trajectory}
+
+{retrieved_evidence}
+
+{trigger_output_schema}
+""".strip()},
+            ]
+
+            trigger_inputs.append({"messages": messages})
+
+        trigger_raw_outputs = parallel_inference(trigger_inputs)
+
+        trigger_outputs = [
+            parse_trigger_output(
+                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
+                expected_turns=batch[idx].turn_id
+            )
+            for idx, o in enumerate(trigger_raw_outputs)
+        ]
+
+        # -------------------------
+        # 4. Policy batch
+        # -------------------------
+        policy_inputs = []
+
+        for p, q, r, t in zip(batch, query_outputs, retrieval_outputs, trigger_outputs):
+
+            dialogue_prefix = format_history_with_turn_ids(p)
+            query_trajectory = format_query_trajectory(q)
+            trigger_trajectory = format_trigger_trajectory(t)
+            retrieved_cases = format_retrieved_cases(r.retrieved_cases)
+
+            policy_output_schema = build_turn_skeleton(
+                turn_count=p.turn_id,
+                fields={
+                    "label": '"<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>"',
+                    "case_id": '""',
+                    "reason": '""'
+                }
+            )
+
+            messages = [
+                {"role": "system", "content": POLICY_PROMPT},
+                {"role": "user", "content": f"""
+{dialogue_prefix}
+
+{query_trajectory}
+
+{trigger_trajectory}
+
+{retrieved_cases}
+
+{policy_output_schema}
+""".strip()},
+            ]
+
+            policy_inputs.append({"messages": messages})
+
+        policy_raw_outputs = parallel_inference(policy_inputs)
+
+        policy_outputs = [
+            parse_policy_output(
+                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
+                expected_turns=batch[idx].turn_id
+            )
+            for idx, o in enumerate(policy_raw_outputs)
+        ]
+
+        # -------------------------
+        # 5. Response batch
+        # -------------------------
+        response_inputs = []
+
+        for p, q, r, t, po in zip(batch, query_outputs, retrieval_outputs, trigger_outputs, policy_outputs):
+
+            dialogue_prefix = format_history_with_turn_ids(p)
+            query_trajectory = format_query_trajectory(q)
+            trigger_trajectory = format_trigger_trajectory(t)
+            policy_trajectory = format_policy_trajectory(po)
+            retrieved_cases = format_retrieved_cases(r.retrieved_cases)
+
+            messages = [
+                {"role": "system", "content": RESPONSE_PROMPT},
+                {"role": "user", "content": f"""
+{dialogue_prefix}
+
+{query_trajectory}
+
+{trigger_trajectory}
+
+{policy_trajectory}
+
+{retrieved_cases}
+""".strip()},
+            ]
+
+            response_inputs.append({"messages": messages})
+
+        response_raw_outputs = parallel_inference(response_inputs)
+
+        # -------------------------
+        # 6. assemble PrefixResult（完全不变）
+        # -------------------------
+        for idx, p in enumerate(batch):
+            results.append(
+                PrefixResult(
+                    dialog_id=p.dialog_id,
+                    turn_id=p.turn_id,
+                    prefix_sample=p,
+                    query_output=query_outputs[idx],
+                    retrieval_output=retrieval_outputs[idx],
+                    trigger_output=trigger_outputs[idx],
+                    policy_output=policy_outputs[idx],
+                    response_output=ResponseOutput(
+                        response=_extract_text_from_parallel_result(response_raw_outputs[idx]).strip()
+                    ),
+                    latency=Latency(
+                        query_ms=0,
+                        retrieval_ms=0,
+                        trigger_ms=0,
+                        policy_ms=0,
+                        response_ms=0,
+                        total_ms=0,
+                    ),
+                )
+            )
+
+    return results
