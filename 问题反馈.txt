@@ -1,13 +1,33 @@
+import re
 import json
 import numpy as np
 from collections import defaultdict
+from typing import Dict, Any, List
 
 
-def eval_case_and_retrieval(pred_path: str, gold_path: str):
-    """
-    pred: your model output json
-    gold: original dataset json
-    """
+CASE_PATTERN = re.compile(r"案例链接[:：]\s*\[?([A-Z0-9]+)\]?")
+
+
+def extract_case_ids(text: str) -> List[str]:
+    if not text:
+        return []
+    return CASE_PATTERN.findall(text)
+
+def compute_retrieval_hit(gold_id: str, retrieved_cases: List[Dict]):
+
+    retrieved_ids = [c.get("case_id", "") for c in retrieved_cases]
+
+    return {
+        "hit@1": gold_id in retrieved_ids[:1],
+        "hit@3": gold_id in retrieved_ids[:3],
+        "hit@5": gold_id in retrieved_ids[:5],
+    }
+
+def collect_latency(latency: Dict[str, Any]):
+    keys = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
+    return {k: latency.get(k, 0) for k in keys}
+
+def evaluate(pred_path: str, gold_path: str):
 
     with open(pred_path, "r", encoding="utf-8") as f:
         preds = json.load(f)
@@ -15,97 +35,98 @@ def eval_case_and_retrieval(pred_path: str, gold_path: str):
     with open(gold_path, "r", encoding="utf-8") as f:
         golds = json.load(f)
 
-    # --------------------------
-    # index gold by dialog_id
-    # --------------------------
-    gold_map = {}
-    for dialog_id, dialog in golds.items():
-        gold_map[dialog_id] = dialog
+    gold_map = {k: v for k, v in golds.items()}
 
-    # --------------------------
-    # stats
-    # --------------------------
+    # =========================
+    # metrics containers
+    # =========================
     case_match = []
 
-    hit1, hit3, hit5 = [], [], []
+    hit1_list, hit3_list, hit5_list = [], [], []
 
-    time_stats = defaultdict(list)
+    latency_stats = defaultdict(list)
 
-    # --------------------------
-    # iterate preds
-    # --------------------------
+    # =========================
+    # iterate predictions
+    # =========================
     for item in preds:
 
         dialog_id = item["dialog_id"]
-        turn_id = item["turn_id"]
 
         if dialog_id not in gold_map:
             continue
 
         gold_dialog = gold_map[dialog_id]
 
-        # --------------------------
-        # find gold turn (case link turn)
-        # --------------------------
         turns = gold_dialog["text"]
 
-        gold_case_id = None
+        # =====================================================
+        # find gold case (only assistant turns with link)
+        # =====================================================
+        gold_case_ids_all = []
+        gold_response_text = None
 
-        # 找到这个 turn 是否有 caseId
-        # 注意：case link在“客服回复轮”
-        if turn_id <= len(turns):
-            turn = turns[turn_id - 1]  # prefix对齐
-            if "客服" in turn:
-                if "caseId" in gold_dialog and gold_dialog["caseId"]:
-                    gold_case_id = gold_dialog["caseId"][0]
+        for t in turns:
+            if "客服" in t:
+                text = t["客服"]
+                ids = extract_case_ids(text)
+                if ids:
+                    gold_case_ids_all.extend(ids)
+                    gold_response_text = text
 
-        # 如果该轮没有case，则跳过
-        if not gold_case_id:
+        if not gold_case_ids_all:
             continue
 
-        # ======================================================
-        # Task A: policy match
-        # ======================================================
-        pred_case_id = item["policy_output"]["trajectory"][0].get("case_id", "")
+        gold_case_id = gold_case_ids_all[0]
 
-        case_match.append(pred_case_id == gold_case_id)
+        # =====================================================
+        # pred response extraction (IMPORTANT FIX)
+        # =====================================================
+        pred_response = item.get("response_output", {}).get("response", "")
+        pred_case_ids = extract_case_ids(pred_response)
 
-        # ======================================================
-        # Task B: retrieval hit
-        # ======================================================
-        retrieved = item["retrieval_output"]["retrieved_cases"]
-        retrieved_ids = [c.get("case_id", "") for c in retrieved]
+        case_match.append(gold_case_id in pred_case_ids)
 
-        hit1.append(gold_case_id in retrieved_ids[:1])
-        hit3.append(gold_case_id in retrieved_ids[:3])
-        hit5.append(gold_case_id in retrieved_ids[:5])
+        # =====================================================
+        # retrieval evaluation
+        # =====================================================
+        retrieval = item.get("retrieval_output", {}).get("retrieved_cases", [])
 
-        # ======================================================
-        # Task C: time
-        # ======================================================
+        r = compute_retrieval_hit(gold_case_id, retrieval)
+
+        hit1_list.append(r["hit@1"])
+        hit3_list.append(r["hit@3"])
+        hit5_list.append(r["hit@5"])
+
+        # =====================================================
+        # latency
+        # =====================================================
         latency = item.get("latency", {})
-        for k in latency:
-            time_stats[k].append(latency[k])
+        for k, v in collect_latency(latency).items():
+            latency_stats[k].append(v)
 
-    # --------------------------
-    # final report
-    # --------------------------
-    def safe_mean(x):
+    # =========================
+    # final aggregation
+    # =========================
+    def mean(x): 
         return float(np.mean(x)) if len(x) > 0 else 0.0
 
     result = {
-        "policy_case_accuracy": safe_mean(case_match),
+        # -------- case grounding --------
+        "case_grounding_accuracy": mean(case_match),
 
-        "retrieval_hit@1": safe_mean(hit1),
-        "retrieval_hit@3": safe_mean(hit3),
-        "retrieval_hit@5": safe_mean(hit5),
+        # -------- retrieval --------
+        "retrieval_hit@1": mean(hit1_list),
+        "retrieval_hit@3": mean(hit3_list),
+        "retrieval_hit@5": mean(hit5_list),
 
-        "avg_query_ms": safe_mean(time_stats["query_ms"]),
-        "avg_retrieval_ms": safe_mean(time_stats["retrieval_ms"]),
-        "avg_trigger_ms": safe_mean(time_stats["trigger_ms"]),
-        "avg_policy_ms": safe_mean(time_stats["policy_ms"]),
-        "avg_response_ms": safe_mean(time_stats["response_ms"]),
-        "avg_total_ms": safe_mean(time_stats["total_ms"]),
+        # -------- latency --------
+        "avg_query_ms": mean(latency_stats["query_ms"]),
+        "avg_retrieval_ms": mean(latency_stats["retrieval_ms"]),
+        "avg_trigger_ms": mean(latency_stats["trigger_ms"]),
+        "avg_policy_ms": mean(latency_stats["policy_ms"]),
+        "avg_response_ms": mean(latency_stats["response_ms"]),
+        "avg_total_ms": mean(latency_stats["total_ms"]),
     }
 
     return result
