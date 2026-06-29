@@ -2,23 +2,75 @@ import json
 import re
 import numpy as np
 from collections import defaultdict
+from typing import Dict, List, Tuple, Any
 
 
-# =========================
-# regex extractor
-# =========================
+# =========================================================
+# 1. Regex
+# =========================================================
 CASE_PATTERN = re.compile(r"案例链接[:：]\s*\[?([A-Z0-9]+)\]?")
 
-def extract_case_ids(text: str):
+
+def extract_case_ids(text: str) -> List[str]:
     if not text:
         return []
     return CASE_PATTERN.findall(text)
 
 
-# =========================
-# retrieval metrics
-# =========================
-def retrieval_hit(gold_id, retrieved_cases):
+# =========================================================
+# 2. GOLD event extraction
+# =========================================================
+def build_gold_events(gold_map: Dict[str, Any]) -> List[Tuple[str, int, str]]:
+    """
+    return:
+        (dialog_id, turn_id, case_id)
+    """
+    events = []
+
+    for dialog_id, gold_dialog in gold_map.items():
+
+        turns = gold_dialog["text"]
+
+        for t_id, t in enumerate(turns):
+
+            if "客服" not in t:
+                continue
+
+            text = t["客服"]
+            case_ids = extract_case_ids(text)
+
+            for cid in case_ids:
+                events.append((dialog_id, t_id + 1, cid))
+
+    return events
+
+
+# =========================================================
+# 3. PRED event extraction
+# =========================================================
+def build_pred_events(preds: List[Dict]) -> List[Tuple[str, int, str]]:
+
+    events = []
+
+    for item in preds:
+
+        dialog_id = item["dialog_id"]
+        turn_id = item["turn_id"]
+
+        response = item.get("response_output", {}).get("response", "")
+
+        case_ids = extract_case_ids(response)
+
+        for cid in case_ids:
+            events.append((dialog_id, turn_id, cid))
+
+    return events
+
+
+# =========================================================
+# 4. Retrieval metrics
+# =========================================================
+def retrieval_hit(gold_id: str, retrieved_cases: List[Dict]):
 
     ids = [c.get("case_id", "") for c in retrieved_cases]
 
@@ -29,32 +81,36 @@ def retrieval_hit(gold_id, retrieved_cases):
     }
 
 
-# =========================
-# position accuracy
-# =========================
-def position_accuracy(gold_seq, pred_seq):
+# =========================================================
+# 5. Event-level evaluation
+# =========================================================
+def eval_event_alignment(gold_events, pred_events):
 
-    n = min(len(gold_seq), len(pred_seq))
-    if n == 0:
-        return 0.0
+    gold_set = set(gold_events)
+    pred_set = set(pred_events)
 
-    return sum(
-        1 if gold_seq[i] == pred_seq[i] else 0
-        for i in range(n)
-    ) / n
+    hit = len(gold_set & pred_set) / len(gold_set) if gold_set else 0.0
+    precision = len(gold_set & pred_set) / len(pred_set) if pred_set else 0.0
+    recall = len(gold_set & pred_set) / len(gold_set) if gold_set else 0.0
+
+    return {
+        "event_accuracy": hit,
+        "event_precision": precision,
+        "event_recall": recall
+    }
 
 
-# =========================
-# latency collector
-# =========================
-def collect_latency(latency: dict):
+# =========================================================
+# 6. Latency
+# =========================================================
+def collect_latency(latency: Dict[str, Any]):
     keys = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
     return {k: latency.get(k, 0) for k in keys}
 
 
-# =========================
-# main eval
-# =========================
+# =========================================================
+# 7. MAIN EVAL
+# =========================================================
 def evaluate(pred_path: str, gold_path: str):
 
     with open(pred_path, "r", encoding="utf-8") as f:
@@ -63,6 +119,7 @@ def evaluate(pred_path: str, gold_path: str):
     with open(gold_path, "r", encoding="utf-8") as f:
         golds = json.load(f)
 
+    # gold map
     gold_map = golds
 
     # =========================
@@ -72,12 +129,18 @@ def evaluate(pred_path: str, gold_path: str):
 
     hit1_list, hit3_list, hit5_list = [], [], []
 
-    position_acc_list = []
-
     latency_stats = defaultdict(list)
 
     # =========================
-    # iterate preds
+    # build global events
+    # =========================
+    gold_events = build_gold_events(gold_map)
+    pred_events = build_pred_events(preds)
+
+    event_metrics = eval_event_alignment(gold_events, pred_events)
+
+    # =========================
+    # per-dialog evaluation
     # =========================
     for item in preds:
 
@@ -87,57 +150,46 @@ def evaluate(pred_path: str, gold_path: str):
             continue
 
         gold_dialog = gold_map[dialog_id]
-
         turns = gold_dialog["text"]
 
-        # =====================================================
-        # GOLD CASE SEQUENCE (ordered)
-        # =====================================================
+        # -------------------------
+        # gold case sequence
+        # -------------------------
         gold_seq = []
-        gold_case_all = []
-
         for t in turns:
             if "客服" in t:
-                ids = extract_case_ids(t["客服"])
-                if ids:
-                    gold_seq.extend(ids)
-                    gold_case_all.extend(ids)
+                gold_seq.extend(extract_case_ids(t["客服"]))
 
-        if len(gold_seq) == 0:
+        if not gold_seq:
             continue
 
         gold_first_case = gold_seq[0]
 
-        # =====================================================
-        # PRED CASE SEQUENCE (response-based)
-        # =====================================================
+        # -------------------------
+        # pred response
+        # -------------------------
         pred_response = item.get("response_output", {}).get("response", "")
         pred_seq = extract_case_ids(pred_response)
 
-        # =====================================================
-        # 1. case grounding accuracy (ANY match)
-        # =====================================================
+        # -------------------------
+        # case grounding
+        # -------------------------
         grounding_acc.append(len(set(gold_seq) & set(pred_seq)) > 0)
 
-        # =====================================================
-        # 2. retrieval metrics
-        # =====================================================
+        # -------------------------
+        # retrieval
+        # -------------------------
         retrieval = item.get("retrieval_output", {}).get("retrieved_cases", [])
 
-        r = retrieval_hit(gold_first_case, retrieval)
+        ids = [c.get("case_id", "") for c in retrieval]
 
-        hit1_list.append(r["hit@1"])
-        hit3_list.append(r["hit@3"])
-        hit5_list.append(r["hit@5"])
+        hit1_list.append(gold_first_case in ids[:1])
+        hit3_list.append(gold_first_case in ids[:3])
+        hit5_list.append(gold_first_case in ids[:5])
 
-        # =====================================================
-        # 3. position-wise accuracy (your request)
-        # =====================================================
-        position_acc_list.append(position_accuracy(gold_seq, pred_seq))
-
-        # =====================================================
-        # 4. latency
-        # =====================================================
+        # -------------------------
+        # latency
+        # -------------------------
         latency = item.get("latency", {})
         for k, v in collect_latency(latency).items():
             latency_stats[k].append(v)
@@ -149,26 +201,28 @@ def evaluate(pred_path: str, gold_path: str):
         return float(np.mean(x)) if len(x) > 0 else 0.0
 
     result = {
-        # -------------------------
-        # grounding
-        # -------------------------
+        # =========================
+        # event-level (核心新增)
+        # =========================
+        "event_accuracy": event_metrics["event_accuracy"],
+        "event_precision": event_metrics["event_precision"],
+        "event_recall": event_metrics["event_recall"],
+
+        # =========================
+        # response grounding
+        # =========================
         "case_grounding_accuracy": mean(grounding_acc),
 
-        # -------------------------
+        # =========================
         # retrieval
-        # -------------------------
+        # =========================
         "retrieval_hit@1": mean(hit1_list),
         "retrieval_hit@3": mean(hit3_list),
         "retrieval_hit@5": mean(hit5_list),
 
-        # -------------------------
-        # position alignment
-        # -------------------------
-        "case_position_accuracy": mean(position_acc_list),
-
-        # -------------------------
+        # =========================
         # latency
-        # -------------------------
+        # =========================
         "avg_query_ms": mean(latency_stats["query_ms"]),
         "avg_retrieval_ms": mean(latency_stats["retrieval_ms"]),
         "avg_trigger_ms": mean(latency_stats["trigger_ms"]),
@@ -178,3 +232,16 @@ def evaluate(pred_path: str, gold_path: str):
     }
 
     return result
+
+
+# =========================================================
+# 8. RUN
+# =========================================================
+if __name__ == "__main__":
+
+    pred_path = "pred.json"
+    gold_path = "gold.json"
+
+    metrics = evaluate(pred_path, gold_path)
+
+    print(json.dumps(metrics, indent=2, ensure_ascii=False))
