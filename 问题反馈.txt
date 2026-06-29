@@ -1,233 +1,244 @@
-def run_dialogue_batched(
-    dialogue: Dialogue,
-    retriever: Callable[[str, int], List[Dict[str, str]]] = default_retriever,
-    retrieval_top_k: int = 5,
-    batch_size: int = 8,
-) -> List[PrefixResult]:
+def chunk_list(items: List[Any], batch_size: int) -> List[List[Any]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
 
-    logger.info("Processing dialogue %s (batch_size=%s)", dialogue.dialog_id, batch_size)
 
-    prefix_samples = build_prefix_samples(dialogue)
-    results: List[PrefixResult] = []
+def safe_json_loads_from_llm_output(output: Any) -> Dict[str, Any]:
+    text = _extract_text_from_parallel_result(output)
+    text = strip_code_fence(text)
+    return json.loads(text)
 
-    # 按 batch 切分
-    for i in range(0, len(prefix_samples), batch_size):
-        batch = prefix_samples[i:i + batch_size]
 
-        # -------------------------
-        # 1. Query batch
-        # -------------------------
-        query_inputs = []
-        for p in batch:
-            dialogue_prefix = format_history_with_turn_ids(p)
+def build_query_messages(prefix_sample: PrefixSample) -> List[Dict[str, str]]:
+    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
 
-            query_output_schema = build_turn_skeleton(
-                turn_count=p.turn_id,
-                fields={
-                    "query_mode": '"<none|reuse|refine|rewrite>"',
-                    "query_text": '""',
-                    "reason": '""'
-                }
-            )
+    query_output_schema = build_turn_skeleton(
+        turn_count=prefix_sample.turn_id,
+        fields={
+            "query_mode": '"<none|reuse|refine|rewrite>"',
+            "query_text": '""',
+            "reason": '""'
+        }
+    )
 
-            user_prompt = f"""
+    user_prompt = f"""
 下面是当前 prefix，对应的是“当前客服回复之前”的完整对话历史。
 
-请输出 query trajectory（只输出 JSON）。
+请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 query trajectory。
+
+【重要约束】
+1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
+2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
+3. 不能新增任何 turn_id
+4. 不能遗漏任何 turn_id
+5. 不能只输出最后一个 turn_id
+6. 不能脑补未来用户发言、未来客服回复或未来轮次
+7. 你的任务是“对固定轮次做标注”，不是“预测未来对话”或“补全轨迹”
+
+【特别提醒】
+- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
+- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
+- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
 
 【对话历史】
 {dialogue_prefix}
 
-【约束】
-- turn_id 必须从 1 到 {p.turn_id}
-- 不得遗漏或新增
-
-【格式】
+**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
 {query_output_schema}
+
+若输出 turn 数不等于 target_turn_count，答案视为无效；请自行修正后再输出。
 """.strip()
 
-            messages = [
-                {"role": "system", "content": QUERY_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ]
+    return [
+        {"role": "system", "content": QUERY_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
-            query_inputs.append({"messages": messages})
 
-        query_raw_outputs = parallel_inference(query_inputs)
+def build_trigger_messages(
+    prefix_sample: PrefixSample,
+    query_output: QueryTrajectoryOutput,
+    retrieval_output: RetrievalOutput,
+) -> List[Dict[str, str]]:
+    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
+    query_trajectory = format_query_trajectory(query_output)
+    retrieved_evidence = format_retrieved_cases(retrieval_output.retrieved_cases)
 
-        query_outputs = [
-            parse_query_output(
-                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
-                expected_turns=batch[idx].turn_id
-            )
-            for idx, o in enumerate(query_raw_outputs)
-        ]
+    trigger_output_schema = build_turn_skeleton(
+        turn_count=prefix_sample.turn_id,
+        fields={
+            "trigger": '<true_or_false>',
+            "evidence_mode": '"<no_evidence_needed|retrieve_new_evidence|reuse_existing_evidence>"',
+            "reason": '""'
+        }
+    )
 
-        # -------------------------
-        # 2. Retrieval batch（逐样本，但可并行）
-        # -------------------------
-        retrieval_outputs = []
-        retrieval_ms_list = []
+    user_prompt = f"""
+下面是当前 prefix、该 prefix 对应的 query trajectory，以及当前 prefix 可用的候选 evidence。
 
-        for p, q in zip(batch, query_outputs):
-            r_out, r_ms = run_retrieval_model(
-                prefix_sample=p,
-                query_output=q,
-                retriever=retriever,
-                top_k=retrieval_top_k,
-            )
-            retrieval_outputs.append(r_out)
-            retrieval_ms_list.append(r_ms)
+请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 trigger trajectory。
 
-        # -------------------------
-        # 3. Trigger batch
-        # -------------------------
-        trigger_inputs = []
+【重要约束】
+1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
+2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
+3. 不能新增任何 turn_id
+4. 不能遗漏任何 turn_id
+5. 不能只输出最后一个 turn_id
+6. 不能脑补未来用户发言、未来客服回复或未来知识链路变化
+7. 你的任务是“对固定轮次做标注”，不是“推演知识链路会如何发展”
 
-        for p, q, r in zip(batch, query_outputs, retrieval_outputs):
-            dialogue_prefix = format_history_with_turn_ids(p)
-            query_trajectory = format_query_trajectory(q)
-            retrieved_evidence = format_retrieved_cases(r.retrieved_cases)
+【特别提醒】
+- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
+- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
+- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
+- 少写任何一个 turn 或多写任何一个 turn 都是错误的
 
-            trigger_output_schema = build_turn_skeleton(
-                turn_count=p.turn_id,
-                fields={
-                    "trigger": '<true_or_false>',
-                    "evidence_mode": '"<no_evidence_needed|retrieve_new_evidence|reuse_existing_evidence>"',
-                    "reason": '""'
-                }
-            )
-
-            messages = [
-                {"role": "system", "content": TRIGGER_PROMPT},
-                {"role": "user", "content": f"""
+【对话历史】
 {dialogue_prefix}
 
+【query trajectory】
 {query_trajectory}
 
+【当前 prefix 可用的候选 evidence】
 {retrieved_evidence}
 
+**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
 {trigger_output_schema}
-""".strip()},
-            ]
+""".strip()
 
-            trigger_inputs.append({"messages": messages})
+    return [
+        {"role": "system", "content": TRIGGER_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
-        trigger_raw_outputs = parallel_inference(trigger_inputs)
 
-        trigger_outputs = [
-            parse_trigger_output(
-                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
-                expected_turns=batch[idx].turn_id
-            )
-            for idx, o in enumerate(trigger_raw_outputs)
-        ]
+def build_policy_messages(
+    prefix_sample: PrefixSample,
+    query_output: QueryTrajectoryOutput,
+    retrieval_output: RetrievalOutput,
+    trigger_output: TriggerTrajectoryOutput,
+) -> List[Dict[str, str]]:
+    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
+    query_trajectory = format_query_trajectory(query_output)
+    trigger_trajectory = format_trigger_trajectory(trigger_output)
+    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
 
-        # -------------------------
-        # 4. Policy batch
-        # -------------------------
-        policy_inputs = []
+    policy_output_schema = build_turn_skeleton(
+        turn_count=prefix_sample.turn_id,
+        fields={
+            "label": '"<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>"',
+            "case_id": '""',
+            "reason": '""'
+        }
+    )
 
-        for p, q, r, t in zip(batch, query_outputs, retrieval_outputs, trigger_outputs):
+    user_prompt = f"""
+下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory，以及当前 prefix 可用的返回案例内容。
 
-            dialogue_prefix = format_history_with_turn_ids(p)
-            query_trajectory = format_query_trajectory(q)
-            trigger_trajectory = format_trigger_trajectory(t)
-            retrieved_cases = format_retrieved_cases(r.retrieved_cases)
+请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 policy trajectory。
 
-            policy_output_schema = build_turn_skeleton(
-                turn_count=p.turn_id,
-                fields={
-                    "label": '"<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>"',
-                    "case_id": '""',
-                    "reason": '""'
-                }
-            )
+【重要约束】
+1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
+2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
+3. 不能新增任何 turn_id
+4. 不能遗漏任何 turn_id
+5. 不能只输出最后一个 turn_id
+6. 不能脑补未来用户发言、未来客服回复或未来策略变化
+7. 你的任务是“对固定轮次做标注”，不是“预测后续客服会怎么做”
 
-            messages = [
-                {"role": "system", "content": POLICY_PROMPT},
-                {"role": "user", "content": f"""
+【特别提醒】
+- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
+- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
+- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
+- 少写任何一个 turn 或多写任何一个 turn 都是错误的
+
+【对话上下文】
 {dialogue_prefix}
 
+【query trajectory】
 {query_trajectory}
 
+【trigger trajectory】
 {trigger_trajectory}
 
+【返回案例】
 {retrieved_cases}
 
+**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
 {policy_output_schema}
-""".strip()},
-            ]
+""".strip()
 
-            policy_inputs.append({"messages": messages})
+    return [
+        {"role": "system", "content": POLICY_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
-        policy_raw_outputs = parallel_inference(policy_inputs)
 
-        policy_outputs = [
-            parse_policy_output(
-                json.loads(strip_code_fence(_extract_text_from_parallel_result(o))),
-                expected_turns=batch[idx].turn_id
-            )
-            for idx, o in enumerate(policy_raw_outputs)
-        ]
+def build_response_messages(
+    prefix_sample: PrefixSample,
+    query_output: QueryTrajectoryOutput,
+    retrieval_output: RetrievalOutput,
+    trigger_output: TriggerTrajectoryOutput,
+    policy_output: PolicyTrajectoryOutput,
+) -> List[Dict[str, str]]:
+    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
+    query_trajectory = format_query_trajectory(query_output)
+    trigger_trajectory = format_trigger_trajectory(trigger_output)
+    policy_trajectory = format_policy_trajectory(policy_output)
+    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
 
-        # -------------------------
-        # 5. Response batch
-        # -------------------------
-        response_inputs = []
+    user_prompt = f"""
+下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory、policy trajectory，以及当前 prefix 可用的返回案例内容。
 
-        for p, q, r, t, po in zip(batch, query_outputs, retrieval_outputs, trigger_outputs, policy_outputs):
+请你只为 policy trajectory 最后一轮所对应的当前客服目标轮，生成一条自然、合理、符合策略的客服回复。
 
-            dialogue_prefix = format_history_with_turn_ids(p)
-            query_trajectory = format_query_trajectory(q)
-            trigger_trajectory = format_trigger_trajectory(t)
-            policy_trajectory = format_policy_trajectory(po)
-            retrieved_cases = format_retrieved_cases(r.retrieved_cases)
-
-            messages = [
-                {"role": "system", "content": RESPONSE_PROMPT},
-                {"role": "user", "content": f"""
+【历史对话】
 {dialogue_prefix}
 
+【query trajectory】
 {query_trajectory}
 
+【trigger trajectory】
 {trigger_trajectory}
 
+【policy trajectory】
 {policy_trajectory}
 
+【返回的案例内容】
 {retrieved_cases}
-""".strip()},
-            ]
+""".strip()
 
-            response_inputs.append({"messages": messages})
+    return [
+        {"role": "system", "content": RESPONSE_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
-        response_raw_outputs = parallel_inference(response_inputs)
 
-        # -------------------------
-        # 6. assemble PrefixResult（完全不变）
-        # -------------------------
-        for idx, p in enumerate(batch):
-            results.append(
-                PrefixResult(
-                    dialog_id=p.dialog_id,
-                    turn_id=p.turn_id,
-                    prefix_sample=p,
-                    query_output=query_outputs[idx],
-                    retrieval_output=retrieval_outputs[idx],
-                    trigger_output=trigger_outputs[idx],
-                    policy_output=policy_outputs[idx],
-                    response_output=ResponseOutput(
-                        response=_extract_text_from_parallel_result(response_raw_outputs[idx]).strip()
-                    ),
-                    latency=Latency(
-                        query_ms=0,
-                        retrieval_ms=0,
-                        trigger_ms=0,
-                        policy_ms=0,
-                        response_ms=0,
-                        total_ms=0,
-                    ),
-                )
+def run_parallel_inference_batched(
+    items: List[Dict[str, Any]],
+    batch_size: int,
+    desc: str,
+) -> List[Any]:
+    """
+    真正使用 parallel_inference 的 batch 能力。
+    输入 items: [{"messages": [...]}, ...]
+    输出顺序必须与输入顺序一致。
+    """
+    if parallel_inference is None:
+        raise RuntimeError("parallel_inference is unavailable.")
+
+    outputs: List[Any] = []
+
+    for batch in tqdm(chunk_list(items, batch_size), desc=desc):
+        batch_outputs = parallel_inference(batch)
+
+        if len(batch_outputs) != len(batch):
+            raise ValueError(
+                f"{desc} output length mismatch: "
+                f"expected={len(batch)}, got={len(batch_outputs)}"
             )
 
-    return results
+        outputs.extend(batch_outputs)
+
+    return outputs
