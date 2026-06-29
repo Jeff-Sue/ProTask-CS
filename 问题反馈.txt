@@ -1,1483 +1,341 @@
-"""静态多轮 LLM-prompt 全局批处理框架。
+你是一个 IT 客服对话分析助手。你的任务是：根据“当前客服回复之前的完整对话历史 prefix”、该 prefix 已有的 query trajectory、trigger trajectory、历史 policy trajectory，以及当前 prefix 可用的返回案例内容，只判断当前最后一个客服目标轮理论上应采取什么主要对话动作，并输出该轮的 policy step。
 
-核心能力：
-1. 将完整对话展开为 prefix samples；
-2. Query / Trigger / Policy 输出完整 trajectory；
-3. Retrieval / Response 只服务当前 prefix 的最后一轮；
-4. Query / Retrieval / Trigger / Policy / Response 都使用全局 flatten 后的 batch 执行；
-5. Retrieval 已适配 batch_zefeng_rag(dialogue_history_list, query_text_list)；
-6. 保留 PrefixResult 输出结构，并记录各模块平均耗时。
+## 任务目标
 
-运行示例：
-python multi_turn_global_batch_pipeline.py \
-  --data_path /path/to/dialogues.json \
-  --output_path multi_turn_output.json \
-  --prompt_dir prompts \
-  --batch_size 16 \
-  --rag_batch_size 64
-"""
+你不是在生成客服回复文本，而是在判断：
 
-from __future__ import annotations
+在当前 prefix 的最后一个客服目标轮上，客服系统理论上最主要的交互动作是什么。
 
-import argparse
-import json
-import logging
-import sys
-import time
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+你必须只输出当前目标轮的 policy step，不要重新输出历史轮次，不要输出完整 trajectory。
 
-from tqdm import tqdm
+---
 
-# =========================================================
-# External APIs
-# =========================================================
+## 输入说明
 
-try:
-    # 根据你原工程结构保留 parent.parent.parent 搜索路径。
-    sys.path.append(str(Path(__file__).parent.parent.parent))
-    from utils.qwen_api import parallel_inference  # type: ignore
-    from utils.scu_rag import batch_zefeng_rag  # type: ignore
-except Exception:
-    parallel_inference = None  # type: ignore
-    batch_zefeng_rag = None  # type: ignore
+你会收到以下输入：
 
-try:
-    from json_repair import repair_json  # type: ignore
-except Exception:
-    repair_json = None  # type: ignore
+1. 【对话上下文 prefix】
+2. 【当前目标轮 turn_id】
+3. 【query trajectory】
+4. 【trigger trajectory】
+5. 【历史 policy trajectory】
+6. 【返回案例内容】（当前 prefix 可用的候选案例，可能为空）
 
+你只能基于这些输入进行判断，不能利用未来轮次信息，也不能假设看到了 prefix 之后的对话。
 
-# =========================================================
-# Logging
-# =========================================================
+---
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+## 当前目标轮定义
 
+当前目标轮是该 prefix 中最后一个等待客服处理和回复的客服目标轮。
 
-# =========================================================
-# Constants
-# =========================================================
+所谓“客服目标轮”，是指：
 
-ALLOWED_QUERY_MODES = {"none", "reuse", "refine", "rewrite"}
-ALLOWED_EVIDENCE_MODES = {
-    "no_evidence_needed",
-    "retrieve_new_evidence",
-    "reuse_existing_evidence",
+在原始对话顺序中，每当用户发言后，轮到客服进行处理和回复，就形成一个目标轮。
+
+注意：
+
+1. 当前任务只标注【当前目标轮 turn_id】对应的这一轮。
+2. 你可以参考历史 query trajectory、trigger trajectory 和历史 policy trajectory，但不能修改历史轮次。
+3. 当前最后一个尚未生成客服回复、但正等待客服作答的时点，也算一个目标轮。
+4. 即使输入中还没有任何 assistant 文本，只要已经有用户发言并轮到客服处理，当前目标轮也可以是 turn_id = 1。
+5. 你只能标注当前目标轮，不能脑补未来额外轮次。
+
+---
+
+## 标注目标
+
+请你对当前目标轮综合判断理论上最合适的“主要交互功能”，并从以下 6 个标签中选择 1 个最合适的主标签。
+
+注意：
+
+* 你标注的是“当前轮客服回复本身最主要应该是什么动作”
+* 返回案例内容只是辅助你判断该轮是否应利用案例、解释案例、推荐案例，或与案例无关
+* 不能因为系统返回了案例，就机械地标成 CaseRecommendation
+* 如果该轮主要是在整合案例内容并进行解释，应该标为 ExplainedResponse，而不是 CaseRecommendation
+* 历史 policy trajectory 只用于保持策略连贯性，不能被重新改写
+
+---
+
+## 输出格式
+
+你必须输出一个 JSON 对象，格式如下：
+
+{
+"trajectory": [
+{
+"turn_id": 当前目标轮turn_id,
+"label": "六个标签之一",
+"case_id": "案例ID或空字符串",
+"reason": "一句简洁中文说明"
 }
-ALLOWED_POLICY_LABELS = {
-    "AskMissingSlot",
-    "AskClarification",
-    "ExplainedResponse",
-    "CaseRecommendation",
-    "Handoff",
-    "ProcessAcknowledgement",
+]
 }
 
-PROMPT_FILES = {
-    "query": "query.prompt",
-    "trigger": "trigger.prompt",
-    "policy": "policy.prompt",
-    "response": "response.prompt",
-}
+其中：
 
+1. trajectory
 
-# =========================================================
-# Data Structures
-# =========================================================
+   * 必须只包含 1 个元素
+   * 只能输出当前目标轮
+   * 不能输出历史轮次
+   * 不能输出未来轮次
 
-@dataclass
-class Dialogue:
-    """完整对话。"""
+2. turn_id
 
-    dialog_id: str
-    turns: List[Dict[str, str]]  # [{"role": "user"|"assistant", "text": "..."}]
+   * 必须严格等于输入中的【当前目标轮 turn_id】
+   * 不能从 1 重新编号
+   * 不能输出其他 turn_id
 
+3. label
+   只能是以下六个标签之一：
 
-@dataclass
-class PrefixSample:
-    """一个 prefix 样本，对应一个客服目标轮。"""
+   * AskMissingSlot
+   * AskClarification
+   * ExplainedResponse
+   * CaseRecommendation
+   * Handoff
+   * ProcessAcknowledgement
 
-    dialog_id: str
-    turn_id: int
-    history: List[Dict[str, str]]
-    target_role: str
-    gold_response: str
-    target_turn_index: int
+4. case_id
+   输出规则：
 
+   当 label 为 ExplainedResponse 或 CaseRecommendation：
 
-@dataclass
-class QueryTrajectoryStep:
-    turn_id: int
-    query_mode: str
-    query_text: str
-    reason: str = ""
+   * 如果返回案例中有可用案例，输出最合适的 1 个 case_id
+   * 只能输出 1 个 case_id
+   * 只能从返回案例内容中选择，不能编造不存在的 case_id
 
+   当 label 为 AskMissingSlot、AskClarification、Handoff、ProcessAcknowledgement：
 
-@dataclass
-class QueryTrajectoryOutput:
-    trajectory: List[QueryTrajectoryStep] = field(default_factory=list)
+   * case_id 必须为 ""
 
+   不要输出多个 case_id，不要编造不存在的 case_id。
 
-@dataclass
-class RetrievalCase:
-    case_id: str
-    title: str
-    content: str
+5. reason
 
+   * 用一句简洁中文说明当前轮为什么是这个标签
+   * 不超过 50 字
 
-@dataclass
-class RetrievalOutput:
-    retrieved_cases: List[RetrievalCase] = field(default_factory=list)
+---
 
+## 标签定义
 
-@dataclass
-class TriggerTrajectoryStep:
-    turn_id: int
-    trigger: bool
-    evidence_mode: str
-    reason: str = ""
+### 1. AskMissingSlot（请求补充缺失信息）
 
+定义：客服为了继续判断、排查、处理问题，向用户索取缺失的客观事实信息、材料、参数、身份信息、环境信息或执行结果。
 
-@dataclass
-class TriggerTrajectoryOutput:
-    trajectory: List[TriggerTrajectoryStep] = field(default_factory=list)
+适用情形：
 
+* 索要工号、账号、手机号、邮箱
+* 索要截图、日志、报错码
+* 询问设备类型、系统版本、客户端类型
+* 询问时间、地点、单号、操作步骤、执行结果等
 
-@dataclass
-class PolicyTrajectoryStep:
-    turn_id: int
-    label: str
-    case_id: str = ""
-    reason: str = ""
+核心判断：
 
+缺的是“客观信息/材料”，而不是对用户意思的理解。
 
-@dataclass
-class PolicyTrajectoryOutput:
-    trajectory: List[PolicyTrajectoryStep] = field(default_factory=list)
+---
 
+### 2. AskClarification（请求澄清）
 
-@dataclass
-class ResponseOutput:
-    response: str
+定义：客服因用户表述不清、范围不明、指代模糊、意图不明确，而主动提问，以便澄清用户到底在说什么、问什么、指什么。
 
+适用情形：
 
-@dataclass
-class Latency:
-    query_ms: int
-    retrieval_ms: int
-    trigger_ms: int
-    policy_ms: int
-    response_ms: int
-    total_ms: int
+* “您说的是 C 区的情况吗？”
+* “您这里指的是登录失败还是页面卡顿？”
+* “您是想查询进度，还是想重新发起？”
 
+核心判断：
 
-@dataclass
-class PrefixResult:
-    dialog_id: str
-    turn_id: int
-    prefix_sample: PrefixSample
-    query_output: QueryTrajectoryOutput
-    retrieval_output: RetrievalOutput
-    trigger_output: TriggerTrajectoryOutput
-    policy_output: PolicyTrajectoryOutput
-    response_output: ResponseOutput
-    latency: Latency
-
-
-@dataclass
-class PromptBundle:
-    query: str
-    trigger: str
-    policy: str
-    response: str
-
-
-# =========================================================
-# I/O and Dataset Normalization
-# =========================================================
-
-def load_prompt(prompt_name: str, prompt_dir: Path) -> str:
-    if prompt_name not in PROMPT_FILES:
-        raise KeyError(f"Unknown prompt_name={prompt_name}")
-
-    path = prompt_dir / PROMPT_FILES[prompt_name]
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def load_prompts(prompt_dir: str | Path) -> PromptBundle:
-    prompt_path = Path(prompt_dir)
-    return PromptBundle(
-        query=load_prompt("query", prompt_path),
-        trigger=load_prompt("trigger", prompt_path),
-        policy=load_prompt("policy", prompt_path),
-        response=load_prompt("response", prompt_path),
-    )
-
-
-def normalize_turns(raw_turns: Any) -> List[Dict[str, str]]:
-    """兼容两类输入：
-    1. [{"role": "user", "text": "..."}, ...]
-    2. [{"用户": "..."}, {"客服": "..."}, ...]
-    """
-
-    if not isinstance(raw_turns, list):
-        raise ValueError(f"turns/text must be a list, got {type(raw_turns)}")
-
-    turns: List[Dict[str, str]] = []
-    for item in raw_turns:
-        if not isinstance(item, dict):
-            continue
-
-        if "role" in item and "text" in item:
-            role = str(item.get("role", "")).strip()
-            text = str(item.get("text", ""))
-            if role in {"user", "assistant"}:
-                turns.append({"role": role, "text": text})
-            elif role in {"用户", "human"}:
-                turns.append({"role": "user", "text": text})
-            elif role in {"客服", "system", "bot"}:
-                turns.append({"role": "assistant", "text": text})
-            continue
-
-        if "用户" in item:
-            turns.append({"role": "user", "text": str(item.get("用户", ""))})
-            continue
-
-        if "客服" in item:
-            turns.append({"role": "assistant", "text": str(item.get("客服", ""))})
-            continue
-
-    return turns
-
-
-def load_dialogues(data_path: str | Path, max_dialogues: Optional[int] = None) -> List[Dialogue]:
-    """加载对话数据。
-
-    支持：
-    - list: [{"dialog_id": ..., "turns": [...]}, ...]
-    - dict: {dialog_id: {"turns": [...]}} 或 {dialog_id: {"text": [...]}}
-    """
-
-    with open(data_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    dialogues: List[Dialogue] = []
-
-    if isinstance(data, list):
-        iterable: Iterable[Tuple[str, Any]] = []
-        temp: List[Tuple[str, Any]] = []
-        for idx, item in enumerate(data):
-            if not isinstance(item, dict):
-                continue
-            dialog_id = str(item.get("dialog_id", f"dialog_{idx}"))
-            temp.append((dialog_id, item))
-        iterable = temp
-
-    elif isinstance(data, dict):
-        iterable = [(str(k), v) for k, v in data.items()]
-    else:
-        raise ValueError(f"Unsupported dialogue json format: {type(data)}")
-
-    for dialog_id, item in iterable:
-        if max_dialogues is not None and len(dialogues) >= max_dialogues:
-            break
-
-        try:
-            if isinstance(item, dict) and "turns" in item:
-                turns = normalize_turns(item["turns"])
-            elif isinstance(item, dict) and "text" in item:
-                turns = normalize_turns(item["text"])
-            elif isinstance(item, list):
-                turns = normalize_turns(item)
-            else:
-                raise ValueError("Cannot find turns/text field")
-
-            if turns:
-                dialogues.append(Dialogue(dialog_id=dialog_id, turns=turns))
-        except Exception:
-            logger.exception("Failed to normalize dialogue: dialog_id=%s", dialog_id)
-
-    logger.info("Loaded %s dialogues from %s", len(dialogues), data_path)
-    return dialogues
-
-
-def save_results(results: List[PrefixResult], output_path: str | Path) -> None:
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([asdict(r) for r in results], f, ensure_ascii=False, indent=2)
-    logger.info("Saved %s prefix results to %s", len(results), path)
-
-
-# =========================================================
-# Prefix Construction and Formatting
-# =========================================================
-
-def build_prefix_samples(dialogue: Dialogue) -> List[PrefixSample]:
-    """将完整对话拆成多个 prefix 样本。每个 assistant 回复点对应一个样本。"""
-
-    prefix_samples: List[PrefixSample] = []
-    assistant_turn_id = 0
-
-    for idx, turn in enumerate(dialogue.turns):
-        if turn.get("role") != "assistant":
-            continue
-
-        assistant_turn_id += 1
-        prefix_samples.append(
-            PrefixSample(
-                dialog_id=dialogue.dialog_id,
-                turn_id=assistant_turn_id,
-                history=dialogue.turns[:idx],
-                target_role="assistant",
-                gold_response=turn.get("text", ""),
-                target_turn_index=idx,
-            )
-        )
-
-    return prefix_samples
-
-
-def format_history(turns: Sequence[Dict[str, str]]) -> str:
-    if not turns:
-        return "无"
-
-    role_map = {"user": "用户", "assistant": "客服"}
-    return "\n".join(
-        f"{role_map.get(t.get('role', ''), t.get('role', 'unknown'))}：{t.get('text', '')}"
-        for t in turns
-    )
-
-
-def format_history_for_rag(turns: Sequence[Dict[str, str]]) -> str:
-    if not turns:
-        return ""
-
-    parts: List[str] = []
-    for turn in turns:
-        role = "用户" if turn.get("role") == "user" else "客服"
-        parts.append(f"{role}: {turn.get('text', '')}")
-    return "\n".join(parts)
-
-
-def format_history_with_turn_ids(prefix_sample: PrefixSample) -> str:
-    """按客服目标轮格式化 prefix 历史。"""
-
-    if not prefix_sample.history:
-        return "[Turn 1 | 当前待生成回复的客服目标轮]\n无历史客服回复，等待当前客服回复。"
-
-    blocks: List[str] = []
-    current_turn = 1
-    current_block: List[str] = []
-
-    for turn in prefix_sample.history:
-        role = "用户" if turn.get("role") == "user" else "客服"
-        current_block.append(f"{role}：{turn.get('text', '')}")
-
-        if turn.get("role") == "assistant":
-            block_text = "\n".join(current_block)
-            blocks.append(f"[Turn {current_turn} | 客服目标轮]\n{block_text}")
-            current_turn += 1
-            current_block = []
-
-    if current_block:
-        block_text = "\n".join(current_block)
-        blocks.append(f"[Turn {current_turn} | 当前待生成回复的客服目标轮]\n{block_text}")
-
-    return "\n\n".join(blocks)
-
-
-def build_turn_skeleton(turn_count: int, fields: Dict[str, str]) -> str:
-    """根据 turn_count 和字段模板生成固定长度 trajectory JSON 骨架。"""
-
-    items: List[str] = []
-    for i in range(1, turn_count + 1):
-        lines = [f'    "turn_id": {i}']
-        for key, value in fields.items():
-            lines.append(f'    "{key}": {value}')
-        items.append("  {\n" + ",\n".join(lines) + "\n  }")
-
-    return '{\n  "trajectory": [\n' + ",\n".join(items) + "\n  ]\n}"
-
-
-def format_retrieved_cases(retrieved_cases: Sequence[RetrievalCase]) -> str:
-    if not retrieved_cases:
-        return "无"
-
-    parts: List[str] = []
-    for i, case in enumerate(retrieved_cases, start=1):
-        parts.append(
-            f"{i}. case_id: {case.case_id}\n"
-            f"   title: {case.title}\n"
-            f"   content: {case.content}"
-        )
-    return "\n".join(parts)
-
-
-def format_query_trajectory(query_output: QueryTrajectoryOutput) -> str:
-    if not query_output.trajectory:
-        return "无"
-
-    parts: List[str] = []
-    for step in query_output.trajectory:
-        parts.append(
-            f"turn {step.turn_id}:\n"
-            f"- query_mode: {step.query_mode}\n"
-            f"- query_text: {step.query_text}\n"
-            f"- reason: {step.reason}"
-        )
-    return "\n\n".join(parts)
-
-
-def format_trigger_trajectory(trigger_output: TriggerTrajectoryOutput) -> str:
-    if not trigger_output.trajectory:
-        return "无"
-
-    parts: List[str] = []
-    for step in trigger_output.trajectory:
-        parts.append(
-            f"turn {step.turn_id}:\n"
-            f"- trigger: {str(step.trigger).lower()}\n"
-            f"- evidence_mode: {step.evidence_mode}\n"
-            f"- reason: {step.reason}"
-        )
-    return "\n\n".join(parts)
-
-
-def format_policy_trajectory(policy_output: PolicyTrajectoryOutput) -> str:
-    if not policy_output.trajectory:
-        return "无"
-
-    parts: List[str] = []
-    for step in policy_output.trajectory:
-        parts.append(
-            f"turn {step.turn_id}:\n"
-            f"- label: {step.label}\n"
-            f"- case_id: {step.case_id}\n"
-            f"- reason: {step.reason}"
-        )
-    return "\n\n".join(parts)
-
-
-# =========================================================
-# LLM Utilities
-# =========================================================
-
-def chunk_list(items: List[Any], batch_size: int) -> List[List[Any]]:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
-
-
-def strip_code_fence(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        return "\n".join(lines).strip()
-    return text
-
-
-def _extract_text_from_parallel_result(result: Any) -> str:
-    """兼容常见 parallel_inference 返回结构。"""
-
-    if isinstance(result, str):
-        return result
-
-    if isinstance(result, dict):
-        for key in ["content", "text", "response", "output", "answer"]:
-            value = result.get(key)
-            if isinstance(value, str):
-                return value
-        if "choices" in result and isinstance(result["choices"], list) and result["choices"]:
-            choice = result["choices"][0]
-            if isinstance(choice, dict):
-                message = choice.get("message", {})
-                if isinstance(message, dict) and isinstance(message.get("content"), str):
-                    return message["content"]
-
-    if isinstance(result, list) and result:
-        return _extract_text_from_parallel_result(result[0])
-
-    raise ValueError(f"Unrecognized LLM result format: {type(result)} -> {result}")
-
-
-def safe_json_loads_from_llm_output(output: Any) -> Dict[str, Any]:
-    text = _extract_text_from_parallel_result(output)
-    text = strip_code_fence(text)
-
-    try:
-        value = json.loads(text)
-    except Exception:
-        if repair_json is None:
-            raise
-        value = json.loads(repair_json(text))
-
-    if not isinstance(value, dict):
-        raise ValueError(f"LLM JSON output must be dict, got {type(value)}")
-    return value
-
-
-def run_parallel_inference_batched(
-    items: List[Dict[str, Any]],
-    batch_size: int,
-    desc: str,
-    llm_batch_fn: Optional[Callable[[List[Dict[str, Any]]], List[Any]]] = None,
-) -> List[Any]:
-    """真正使用 parallel_inference 的 batch 能力。
-
-    输入：items = [{"messages": [...]}, ...]
-    输出：顺序必须与输入顺序一致。
-    """
-
-    batch_fn = llm_batch_fn or parallel_inference
-    if batch_fn is None:
-        raise RuntimeError("parallel_inference is unavailable. Please check utils.qwen_api import.")
-
-    outputs: List[Any] = []
-    for batch in tqdm(chunk_list(items, batch_size), desc=desc):
-        batch_outputs = batch_fn(batch)
-
-        if not isinstance(batch_outputs, list):
-            if len(batch) == 1:
-                batch_outputs = [batch_outputs]
-            else:
-                raise ValueError(f"{desc} must return list for batch input, got {type(batch_outputs)}")
-
-        if len(batch_outputs) != len(batch):
-            raise ValueError(
-                f"{desc} output length mismatch: expected={len(batch)}, got={len(batch_outputs)}"
-            )
-
-        outputs.extend(batch_outputs)
-
-    return outputs
-
-
-# =========================================================
-# Prompt Builders
-# =========================================================
-
-def build_query_messages(prefix_sample: PrefixSample, prompts: PromptBundle) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "query_mode": '"<none|reuse|refine|rewrite>"',
-            "query_text": '""',
-            "reason": '""',
-        },
-    )
-
-    user_prompt = f"""
-下面是当前 prefix，对应的是“当前客服回复之前”的完整对话历史。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 query trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来轮次
-7. 你的任务是“对固定轮次做标注”，不是“预测未来对话”或“补全轨迹”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-
-【对话历史】
-{dialogue_prefix}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{query_output_schema}
-
-若输出 turn 数不等于 target_turn_count，答案视为无效；请自行修正后再输出。
-""".strip()
-
-    return [
-        {"role": "system", "content": prompts.query},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_trigger_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-    prompts: PromptBundle,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    retrieved_evidence = format_retrieved_cases(retrieval_output.retrieved_cases)
-    trigger_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "trigger": "<true_or_false>",
-            "evidence_mode": '"<no_evidence_needed|retrieve_new_evidence|reuse_existing_evidence>"',
-            "reason": '""',
-        },
-    )
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory，以及当前 prefix 可用的候选 evidence。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 trigger trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来知识链路变化
-7. 你的任务是“对固定轮次做标注”，不是“推演知识链路会如何发展”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-- 少写任何一个 turn 或多写任何一个 turn 都是错误的
-
-【对话历史】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【当前 prefix 可用的候选 evidence】
-{retrieved_evidence}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{trigger_output_schema}
-""".strip()
-
-    return [
-        {"role": "system", "content": prompts.trigger},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_policy_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-    trigger_output: TriggerTrajectoryOutput,
-    prompts: PromptBundle,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    trigger_trajectory = format_trigger_trajectory(trigger_output)
-    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
-    policy_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "label": '"<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>"',
-            "case_id": '""',
-            "reason": '""',
-        },
-    )
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory，以及当前 prefix 可用的返回案例内容。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 policy trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来策略变化
-7. 你的任务是“对固定轮次做标注”，不是“预测后续客服会怎么做”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-- 少写任何一个 turn 或多写任何一个 turn 都是错误的
-
-【对话上下文】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【trigger trajectory】
-{trigger_trajectory}
-
-【返回案例】
-{retrieved_cases}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{policy_output_schema}
-""".strip()
-
-    return [
-        {"role": "system", "content": prompts.policy},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_response_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-    trigger_output: TriggerTrajectoryOutput,
-    policy_output: PolicyTrajectoryOutput,
-    prompts: PromptBundle,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    trigger_trajectory = format_trigger_trajectory(trigger_output)
-    policy_trajectory = format_policy_trajectory(policy_output)
-    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory、policy trajectory，以及当前 prefix 可用的返回案例内容。
-
-请你只为 policy trajectory 最后一轮所对应的当前客服目标轮，生成一条自然、合理、符合策略的客服回复。
-
-【历史对话】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【trigger trajectory】
-{trigger_trajectory}
-
-【policy trajectory】
-{policy_trajectory}
-
-【返回的案例内容】
-{retrieved_cases}
-""".strip()
-
-    return [
-        {"role": "system", "content": prompts.response},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-# =========================================================
-# Parsers and Fallbacks
-# =========================================================
-
-def _validate_turn_ids(trajectory: Sequence[Any], expected_turns: int, name: str) -> None:
-    got = [getattr(x, "turn_id", None) for x in trajectory]
-    expected = list(range(1, expected_turns + 1))
-    if got != expected:
-        raise ValueError(f"{name} turn_id invalid. expected={expected}, got={got}")
-
-
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"true", "yes", "1", "是"}:
-            return True
-        if lowered in {"false", "no", "0", "否"}:
-            return False
-    raise ValueError(f"Cannot parse bool from {value!r}")
-
-
-def parse_query_output(raw: Dict[str, Any], expected_turns: int) -> QueryTrajectoryOutput:
-    traj_raw = raw.get("trajectory", [])
-    if not isinstance(traj_raw, list):
-        raise ValueError("query trajectory must be list")
-
-    traj: List[QueryTrajectoryStep] = []
-    for item in traj_raw:
-        step = QueryTrajectoryStep(
-            turn_id=int(item["turn_id"]),
-            query_mode=str(item.get("query_mode", "")).strip(),
-            query_text=str(item.get("query_text", "") or "").strip(),
-            reason=str(item.get("reason", "") or ""),
-        )
-
-        if step.query_mode not in ALLOWED_QUERY_MODES:
-            raise ValueError(f"Invalid query_mode: {step.query_mode}")
-        if step.query_mode == "none" and step.query_text != "":
-            step.query_text = ""
-        if step.query_mode != "none" and not step.query_text:
-            raise ValueError("non-none query_mode must have query_text")
-
-        traj.append(step)
-
-    _validate_turn_ids(traj, expected_turns, "query trajectory")
-    return QueryTrajectoryOutput(trajectory=traj)
-
-
-def parse_trigger_output(raw: Dict[str, Any], expected_turns: int) -> TriggerTrajectoryOutput:
-    traj_raw = raw.get("trajectory", [])
-    if not isinstance(traj_raw, list):
-        raise ValueError("trigger trajectory must be list")
-
-    traj: List[TriggerTrajectoryStep] = []
-    for item in traj_raw:
-        trigger = _as_bool(item.get("trigger"))
-        evidence_mode = str(item.get("evidence_mode", "")).strip()
-
-        step = TriggerTrajectoryStep(
-            turn_id=int(item["turn_id"]),
-            trigger=trigger,
-            evidence_mode=evidence_mode,
-            reason=str(item.get("reason", "") or ""),
-        )
-
-        if step.evidence_mode not in ALLOWED_EVIDENCE_MODES:
-            raise ValueError(f"Invalid evidence_mode: {step.evidence_mode}")
-        if not step.trigger and step.evidence_mode != "no_evidence_needed":
-            step.evidence_mode = "no_evidence_needed"
-        if step.trigger and step.evidence_mode == "no_evidence_needed":
-            raise ValueError("trigger=True cannot use no_evidence_needed")
-
-        traj.append(step)
-
-    _validate_turn_ids(traj, expected_turns, "trigger trajectory")
-    return TriggerTrajectoryOutput(trajectory=traj)
-
-
-def parse_policy_output(raw: Dict[str, Any], expected_turns: int) -> PolicyTrajectoryOutput:
-    traj_raw = raw.get("trajectory", [])
-    if not isinstance(traj_raw, list):
-        raise ValueError("policy trajectory must be list")
-
-    traj: List[PolicyTrajectoryStep] = []
-    for item in traj_raw:
-        label = str(item.get("label", "")).strip()
-        step = PolicyTrajectoryStep(
-            turn_id=int(item["turn_id"]),
-            label=label,
-            case_id=str(item.get("case_id", "") or ""),
-            reason=str(item.get("reason", "") or ""),
-        )
-
-        if step.label not in ALLOWED_POLICY_LABELS:
-            raise ValueError(f"Invalid policy label: {step.label}")
-
-        traj.append(step)
-
-    _validate_turn_ids(traj, expected_turns, "policy trajectory")
-    return PolicyTrajectoryOutput(trajectory=traj)
-
-
-def fallback_query_output(prefix_sample: PrefixSample, reason: str) -> QueryTrajectoryOutput:
-    return QueryTrajectoryOutput(
-        trajectory=[
-            QueryTrajectoryStep(turn_id=i, query_mode="none", query_text="", reason=reason)
-            for i in range(1, prefix_sample.turn_id + 1)
-        ]
-    )
-
-
-def fallback_trigger_output(prefix_sample: PrefixSample, reason: str) -> TriggerTrajectoryOutput:
-    return TriggerTrajectoryOutput(
-        trajectory=[
-            TriggerTrajectoryStep(
-                turn_id=i,
-                trigger=False,
-                evidence_mode="no_evidence_needed",
-                reason=reason,
-            )
-            for i in range(1, prefix_sample.turn_id + 1)
-        ]
-    )
-
-
-def fallback_policy_output(prefix_sample: PrefixSample, reason: str) -> PolicyTrajectoryOutput:
-    return PolicyTrajectoryOutput(
-        trajectory=[
-            PolicyTrajectoryStep(
-                turn_id=i,
-                label="ProcessAcknowledgement",
-                case_id="",
-                reason=reason,
-            )
-            for i in range(1, prefix_sample.turn_id + 1)
-        ]
-    )
-
-
-# =========================================================
-# Retrieval Global Batch
-# =========================================================
-
-def _get_case_field(case: Dict[str, Any], keys: Sequence[str], default: str = "") -> str:
-    for key in keys:
-        value = case.get(key)
-        if value is not None:
-            return str(value)
-    return default
-
-
-def normalize_raw_cases(raw_cases: Any, top_k: Optional[int] = None) -> List[RetrievalCase]:
-    """兼容 batch_zefeng_rag 可能返回的多种 case 格式。"""
-
-    if raw_cases is None:
-        return []
-
-    if isinstance(raw_cases, dict):
-        # 常见格式：{"cases": [...]}, {"retrieved_cases": [...]}, {"data": [...]}
-        for key in ["cases", "retrieved_cases", "results", "data"]:
-            if isinstance(raw_cases.get(key), list):
-                raw_cases = raw_cases[key]
-                break
-        else:
-            raw_cases = [raw_cases]
-
-    if not isinstance(raw_cases, list):
-        raw_cases = [raw_cases]
-
-    normalized: List[RetrievalCase] = []
-    for item in raw_cases:
-        if isinstance(item, RetrievalCase):
-            normalized.append(item)
-            continue
-
-        if isinstance(item, str):
-            normalized.append(RetrievalCase(case_id="", title="", content=item))
-            continue
-
-        if not isinstance(item, dict):
-            normalized.append(RetrievalCase(case_id="", title="", content=str(item)))
-            continue
-
-        normalized.append(
-            RetrievalCase(
-                case_id=_get_case_field(item, ["case_id", "id", "caseID", "caseId"]),
-                title=_get_case_field(item, ["title", "case_title", "name", "question"]),
-                content=_get_case_field(
-                    item,
-                    ["content", "case_content", "answer", "solution", "text", "body"],
-                ),
-            )
-        )
-
-    if top_k is not None and top_k > 0:
-        normalized = normalized[:top_k]
-    return normalized
-
-
-def run_retrieval_global_batched(
-    all_prefix_samples: List[PrefixSample],
-    query_outputs: List[QueryTrajectoryOutput],
-    retriever_batch_fn: Callable[[List[str], List[str]], List[Any]],
-    rag_batch_size: int = 64,
-    top_k: Optional[int] = 5,
-) -> Tuple[List[RetrievalOutput], int]:
-    """Retrieval 全局 batch 版本。
-
-    关键变化：
-    - 从每个 prefix 单独调用 RAG，改为先 flatten；
-    - 构造 dialogue_history_list 和 query_text_list；
-    - 调用 batch_zefeng_rag(dialogue_history_list, query_text_list)；
-    - 再按照原 prefix 顺序 map 回 RetrievalOutput。
-
-    注意：这里默认 batch_zefeng_rag 的签名是：
-        batch_zefeng_rag(dialogue_history_list, query_text_list)
-    如果你另一个文件里的顺序相反，只需要在传入 retriever_batch_fn 前包一层 adapter。
-    """
-
-    start_time = time.time()
-
-    if len(all_prefix_samples) != len(query_outputs):
-        raise ValueError(
-            f"retrieval input length mismatch: prefixes={len(all_prefix_samples)}, "
-            f"query_outputs={len(query_outputs)}"
-        )
-
-    retrieval_outputs: List[RetrievalOutput] = [
-        RetrievalOutput(retrieved_cases=[]) for _ in all_prefix_samples
-    ]
-
-    valid_indices: List[int] = []
-    dialogue_history_list: List[str] = []
-    query_text_list: List[str] = []
-
-    for idx, (prefix_sample, query_output) in enumerate(zip(all_prefix_samples, query_outputs)):
-        if not query_output.trajectory:
-            continue
-
-        last_query = query_output.trajectory[-1]
-        need_retrieval = (
-            last_query.query_mode != "none"
-            and bool(last_query.query_text.strip())
-        )
-
-        if not need_retrieval:
-            continue
-
-        valid_indices.append(idx)
-        dialogue_history_list.append(format_history_for_rag(prefix_sample.history))
-        query_text_list.append(last_query.query_text.strip())
-
-    if not valid_indices:
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        return retrieval_outputs, elapsed_ms
-
-    raw_outputs: List[Any] = []
-    paired_inputs = list(zip(dialogue_history_list, query_text_list))
-
-    for batch in tqdm(chunk_list(paired_inputs, rag_batch_size), desc="Retrieval global batch"):
-        history_batch = [x[0] for x in batch]
-        query_batch = [x[1] for x in batch]
-
-        batch_outputs = retriever_batch_fn(history_batch, query_batch)
-
-        if not isinstance(batch_outputs, list):
-            if len(batch) == 1:
-                batch_outputs = [batch_outputs]
-            else:
-                raise ValueError(
-                    f"retriever_batch_fn must return list for batch input, got {type(batch_outputs)}"
-                )
-
-        if len(batch_outputs) != len(batch):
-            raise ValueError(
-                f"Retrieval output length mismatch: expected={len(batch)}, got={len(batch_outputs)}"
-            )
-
-        raw_outputs.extend(batch_outputs)
-
-    for original_idx, raw_cases in zip(valid_indices, raw_outputs):
-        retrieval_outputs[original_idx] = RetrievalOutput(
-            retrieved_cases=normalize_raw_cases(raw_cases, top_k=top_k)
-        )
-
-    elapsed_ms = int((time.time() - start_time) * 1000)
-    return retrieval_outputs, elapsed_ms
-
-
-# =========================================================
-# Global Batch Pipeline
-# =========================================================
-
-def parse_query_outputs(
-    raw_outputs: List[Any],
-    all_prefix_samples: List[PrefixSample],
-) -> List[QueryTrajectoryOutput]:
-    outputs: List[QueryTrajectoryOutput] = []
-
-    for idx, raw_output in enumerate(raw_outputs):
-        prefix_sample = all_prefix_samples[idx]
-        try:
-            raw_json = safe_json_loads_from_llm_output(raw_output)
-            outputs.append(parse_query_output(raw_json, expected_turns=prefix_sample.turn_id))
-        except Exception:
-            logger.exception(
-                "Query parse failed: dialog_id=%s, turn_id=%s",
-                prefix_sample.dialog_id,
-                prefix_sample.turn_id,
-            )
-            outputs.append(fallback_query_output(prefix_sample, reason="query parse failed"))
-
-    return outputs
-
-
-def parse_trigger_outputs(
-    raw_outputs: List[Any],
-    all_prefix_samples: List[PrefixSample],
-) -> List[TriggerTrajectoryOutput]:
-    outputs: List[TriggerTrajectoryOutput] = []
-
-    for idx, raw_output in enumerate(raw_outputs):
-        prefix_sample = all_prefix_samples[idx]
-        try:
-            raw_json = safe_json_loads_from_llm_output(raw_output)
-            outputs.append(parse_trigger_output(raw_json, expected_turns=prefix_sample.turn_id))
-        except Exception:
-            logger.exception(
-                "Trigger parse failed: dialog_id=%s, turn_id=%s",
-                prefix_sample.dialog_id,
-                prefix_sample.turn_id,
-            )
-            outputs.append(fallback_trigger_output(prefix_sample, reason="trigger parse failed"))
-
-    return outputs
-
-
-def parse_policy_outputs(
-    raw_outputs: List[Any],
-    all_prefix_samples: List[PrefixSample],
-) -> List[PolicyTrajectoryOutput]:
-    outputs: List[PolicyTrajectoryOutput] = []
-
-    for idx, raw_output in enumerate(raw_outputs):
-        prefix_sample = all_prefix_samples[idx]
-        try:
-            raw_json = safe_json_loads_from_llm_output(raw_output)
-            outputs.append(parse_policy_output(raw_json, expected_turns=prefix_sample.turn_id))
-        except Exception:
-            logger.exception(
-                "Policy parse failed: dialog_id=%s, turn_id=%s",
-                prefix_sample.dialog_id,
-                prefix_sample.turn_id,
-            )
-            outputs.append(fallback_policy_output(prefix_sample, reason="policy parse failed"))
-
-    return outputs
-
-
-def parse_response_outputs(
-    raw_outputs: List[Any],
-    all_prefix_samples: List[PrefixSample],
-) -> List[ResponseOutput]:
-    outputs: List[ResponseOutput] = []
-
-    for idx, raw_output in enumerate(raw_outputs):
-        prefix_sample = all_prefix_samples[idx]
-        try:
-            response_text = _extract_text_from_parallel_result(raw_output).strip()
-            outputs.append(ResponseOutput(response=response_text))
-        except Exception:
-            logger.exception(
-                "Response parse failed: dialog_id=%s, turn_id=%s",
-                prefix_sample.dialog_id,
-                prefix_sample.turn_id,
-            )
-            outputs.append(ResponseOutput(response=""))
-
-    return outputs
-
-
-def run_dataset_global_batched(
-    dialogues: List[Dialogue],
-    prompts: PromptBundle,
-    output_path: str = "multi_turn_output.json",
-    retriever_batch_fn: Optional[Callable[[List[str], List[str]], List[Any]]] = None,
-    batch_size: int = 16,
-    rag_batch_size: int = 64,
-    retrieval_top_k: int = 5,
-    llm_batch_fn: Optional[Callable[[List[Dict[str, Any]]], List[Any]]] = None,
-) -> List[PrefixResult]:
-    """完整五阶段全局 batch pipeline。"""
-
-    logger.info(
-        "Processing dataset: dialogues=%s, llm_batch_size=%s, rag_batch_size=%s",
-        len(dialogues),
-        batch_size,
-        rag_batch_size,
-    )
-
-    total_start = time.time()
-
-    # =========================================================
-    # 0. Flatten dialogues into prefix samples
-    # =========================================================
-    all_prefix_samples: List[PrefixSample] = []
-    for dialogue in dialogues:
-        try:
-            all_prefix_samples.extend(build_prefix_samples(dialogue))
-        except Exception:
-            logger.exception("Failed to build prefix samples for dialogue %s", dialogue.dialog_id)
-
-    logger.info(
-        "Built %s prefix samples from %s dialogues",
-        len(all_prefix_samples),
-        len(dialogues),
-    )
-
-    if not all_prefix_samples:
-        save_results([], output_path)
-        return []
-
-    sample_count = len(all_prefix_samples)
-
-    # =========================================================
-    # 1. Query global batch
-    # =========================================================
-    query_stage_start = time.time()
-    query_items = [
-        {"messages": build_query_messages(prefix_sample, prompts)}
-        for prefix_sample in all_prefix_samples
-    ]
-    query_raw_outputs = run_parallel_inference_batched(
-        items=query_items,
-        batch_size=batch_size,
-        desc="Query global batch",
-        llm_batch_fn=llm_batch_fn,
-    )
-    query_outputs = parse_query_outputs(query_raw_outputs, all_prefix_samples)
-    query_stage_ms = int((time.time() - query_stage_start) * 1000)
-    query_avg_ms = int(query_stage_ms / max(sample_count, 1))
-    logger.info("Query stage completed: %sms", query_stage_ms)
-
-    # =========================================================
-    # 2. Retrieval global batch
-    # =========================================================
-    retrieval_fn = retriever_batch_fn or batch_zefeng_rag
-    if retrieval_fn is None:
-        raise RuntimeError("batch_zefeng_rag is unavailable. Please check utils.scu_rag import.")
-
-    retrieval_outputs, retrieval_stage_ms = run_retrieval_global_batched(
-        all_prefix_samples=all_prefix_samples,
-        query_outputs=query_outputs,
-        retriever_batch_fn=retrieval_fn,
-        rag_batch_size=rag_batch_size,
-        top_k=retrieval_top_k,
-    )
-    retrieval_avg_ms = int(retrieval_stage_ms / max(sample_count, 1))
-    logger.info("Retrieval stage completed: %sms", retrieval_stage_ms)
-
-    # =========================================================
-    # 3. Trigger global batch
-    # =========================================================
-    trigger_stage_start = time.time()
-    trigger_items = [
-        {
-            "messages": build_trigger_messages(
-                prefix_sample=prefix_sample,
-                query_output=query_output,
-                retrieval_output=retrieval_output,
-                prompts=prompts,
-            )
-        }
-        for prefix_sample, query_output, retrieval_output in zip(
-            all_prefix_samples,
-            query_outputs,
-            retrieval_outputs,
-        )
-    ]
-    trigger_raw_outputs = run_parallel_inference_batched(
-        items=trigger_items,
-        batch_size=batch_size,
-        desc="Trigger global batch",
-        llm_batch_fn=llm_batch_fn,
-    )
-    trigger_outputs = parse_trigger_outputs(trigger_raw_outputs, all_prefix_samples)
-    trigger_stage_ms = int((time.time() - trigger_stage_start) * 1000)
-    trigger_avg_ms = int(trigger_stage_ms / max(sample_count, 1))
-    logger.info("Trigger stage completed: %sms", trigger_stage_ms)
-
-    # =========================================================
-    # 4. Policy global batch
-    # =========================================================
-    policy_stage_start = time.time()
-    policy_items = [
-        {
-            "messages": build_policy_messages(
-                prefix_sample=prefix_sample,
-                query_output=query_output,
-                retrieval_output=retrieval_output,
-                trigger_output=trigger_output,
-                prompts=prompts,
-            )
-        }
-        for prefix_sample, query_output, retrieval_output, trigger_output in zip(
-            all_prefix_samples,
-            query_outputs,
-            retrieval_outputs,
-            trigger_outputs,
-        )
-    ]
-    policy_raw_outputs = run_parallel_inference_batched(
-        items=policy_items,
-        batch_size=batch_size,
-        desc="Policy global batch",
-        llm_batch_fn=llm_batch_fn,
-    )
-    policy_outputs = parse_policy_outputs(policy_raw_outputs, all_prefix_samples)
-    policy_stage_ms = int((time.time() - policy_stage_start) * 1000)
-    policy_avg_ms = int(policy_stage_ms / max(sample_count, 1))
-    logger.info("Policy stage completed: %sms", policy_stage_ms)
-
-    # =========================================================
-    # 5. Response global batch
-    # =========================================================
-    response_stage_start = time.time()
-    response_items = [
-        {
-            "messages": build_response_messages(
-                prefix_sample=prefix_sample,
-                query_output=query_output,
-                retrieval_output=retrieval_output,
-                trigger_output=trigger_output,
-                policy_output=policy_output,
-                prompts=prompts,
-            )
-        }
-        for prefix_sample, query_output, retrieval_output, trigger_output, policy_output in zip(
-            all_prefix_samples,
-            query_outputs,
-            retrieval_outputs,
-            trigger_outputs,
-            policy_outputs,
-        )
-    ]
-    response_raw_outputs = run_parallel_inference_batched(
-        items=response_items,
-        batch_size=batch_size,
-        desc="Response global batch",
-        llm_batch_fn=llm_batch_fn,
-    )
-    response_outputs = parse_response_outputs(response_raw_outputs, all_prefix_samples)
-    response_stage_ms = int((time.time() - response_stage_start) * 1000)
-    response_avg_ms = int(response_stage_ms / max(sample_count, 1))
-    logger.info("Response stage completed: %sms", response_stage_ms)
-
-    # =========================================================
-    # 6. Assemble results
-    # =========================================================
-    total_ms = int((time.time() - total_start) * 1000)
-    total_avg_ms = int(total_ms / max(sample_count, 1))
-
-    results: List[PrefixResult] = []
-    for idx, prefix_sample in enumerate(all_prefix_samples):
-        results.append(
-            PrefixResult(
-                dialog_id=prefix_sample.dialog_id,
-                turn_id=prefix_sample.turn_id,
-                prefix_sample=prefix_sample,
-                query_output=query_outputs[idx],
-                retrieval_output=retrieval_outputs[idx],
-                trigger_output=trigger_outputs[idx],
-                policy_output=policy_outputs[idx],
-                response_output=response_outputs[idx],
-                latency=Latency(
-                    query_ms=query_avg_ms,
-                    retrieval_ms=retrieval_avg_ms,
-                    trigger_ms=trigger_avg_ms,
-                    policy_ms=policy_avg_ms,
-                    response_ms=response_avg_ms,
-                    total_ms=total_avg_ms,
-                ),
-            )
-        )
-
-    save_results(results, output_path)
-
-    logger.info(
-        "GLOBAL batch dataset completed: dialogues=%s, prefixes=%s, total_ms=%s, saved=%s",
-        len(dialogues),
-        len(all_prefix_samples),
-        total_ms,
-        output_path,
-    )
-
-    return results
-
-
-def run_dataset(
-    dialogues: List[Dialogue],
-    output_path: str = "multi_turn_output.json",
-    prompt_dir: str | Path = "prompts",
-    batch_size: int = 16,
-    rag_batch_size: int = 64,
-    retrieval_top_k: int = 5,
-) -> List[PrefixResult]:
-    prompts = load_prompts(prompt_dir)
-    return run_dataset_global_batched(
-        dialogues=dialogues,
-        prompts=prompts,
-        output_path=output_path,
-        retriever_batch_fn=batch_zefeng_rag,
-        batch_size=batch_size,
-        rag_batch_size=rag_batch_size,
-        retrieval_top_k=retrieval_top_k,
-    )
-
-
-# =========================================================
-# Validation Helpers
-# =========================================================
-
-def validate_prefix_samples(dialogue: Dialogue, prefix_samples: List[PrefixSample]) -> bool:
-    assistant_indices = [idx for idx, turn in enumerate(dialogue.turns) if turn.get("role") == "assistant"]
-
-    if len(prefix_samples) != len(assistant_indices):
-        logger.error(
-            "Sample count mismatch: dialog_id=%s, expected=%s, got=%s",
-            dialogue.dialog_id,
-            len(assistant_indices),
-            len(prefix_samples),
-        )
-        return False
-
-    for expected_turn_id, (sample, assistant_idx) in enumerate(
-        zip(prefix_samples, assistant_indices),
-        start=1,
-    ):
-        if sample.turn_id != expected_turn_id:
-            logger.error("Turn ID mismatch: expected=%s, got=%s", expected_turn_id, sample.turn_id)
-            return False
-        if sample.history != dialogue.turns[:assistant_idx]:
-            logger.error("History mismatch: dialog_id=%s, turn_id=%s", dialogue.dialog_id, sample.turn_id)
-            return False
-        if sample.gold_response != dialogue.turns[assistant_idx].get("text", ""):
-            logger.error("Gold response mismatch: dialog_id=%s, turn_id=%s", dialogue.dialog_id, sample.turn_id)
-            return False
-        if sample.target_turn_index != assistant_idx:
-            logger.error("target_turn_index mismatch: dialog_id=%s, turn_id=%s", dialogue.dialog_id, sample.turn_id)
-            return False
-
-    return True
-
-
-def validate_dialogues(dialogues: List[Dialogue]) -> None:
-    for dialogue in dialogues:
-        prefix_samples = build_prefix_samples(dialogue)
-        if not validate_prefix_samples(dialogue, prefix_samples):
-            raise ValueError(f"Invalid prefix samples: {dialogue.dialog_id}")
-
-
-# =========================================================
-# CLI
-# =========================================================
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Static multi-turn global batch LLM-prompt pipeline")
-    parser.add_argument("--data_path", type=str, required=True, help="Input dialogue JSON path")
-    parser.add_argument("--output_path", type=str, default="multi_turn_output.json", help="Output JSON path")
-    parser.add_argument("--prompt_dir", type=str, default="prompts", help="Prompt directory")
-    parser.add_argument("--batch_size", type=int, default=16, help="LLM batch size")
-    parser.add_argument("--rag_batch_size", type=int, default=64, help="RAG batch size")
-    parser.add_argument("--retrieval_top_k", type=int, default=5, help="Top-k retrieved cases to keep")
-    parser.add_argument("--max_dialogues", type=int, default=None, help="Optional max number of dialogues")
-    parser.add_argument("--skip_validation", action="store_true", help="Skip prefix validation")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    dialogues = load_dialogues(args.data_path, max_dialogues=args.max_dialogues)
-    if not dialogues:
-        logger.warning("No valid dialogues loaded. Save empty output.")
-        with open(args.output_path, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
-        return
-
-    if not args.skip_validation:
-        validate_dialogues(dialogues)
-
-    run_dataset(
-        dialogues=dialogues,
-        output_path=args.output_path,
-        prompt_dir=args.prompt_dir,
-        batch_size=args.batch_size,
-        rag_batch_size=args.rag_batch_size,
-        retrieval_top_k=args.retrieval_top_k,
-    )
-
-
-if __name__ == "__main__":
-    main()
+缺的是“对用户意思的理解”，而不是材料。
+
+---
+
+### 3. ExplainedResponse（解释性回复）
+
+定义：客服基于当前信息，直接向用户提供解释、判断、原因分析、规则说明、排查建议、解决方案、操作指导或结论，且该轮主要价值来自客服自己的解释。
+
+适用情形：
+
+* 解释问题原因
+* 说明规则机制
+* 给出排查建议
+* 给出处理步骤
+* 给出判断和结论
+
+注意：
+
+* 如果客服已经做了主要解释，只是顺带附了案例或文档，仍标为 ExplainedResponse
+* 如果客服结合返回案例内容进行整合、总结、转述，并把核心价值放在自己的解释上，仍标为 ExplainedResponse
+
+核心判断：
+
+主要价值来自“客服自己在解释”。
+
+---
+
+### 4. CaseRecommendation（案例推荐）
+
+定义：客服主要通过推荐案例、FAQ、知识文档、操作手册、帮助链接等外部知识资源来帮助用户，而不是在当前轮中自己完成完整解释。
+
+适用情形：
+
+* “您可以参考这个案例处理”
+* “这边给您一个操作文档，您按里面步骤试一下”
+* “建议先查看这个 FAQ”
+
+注意：
+
+* 只有当该轮客服回复的主要作用是“把案例/文档推荐给用户查看”时，才标 CaseRecommendation
+* 如果案例只是被客服吸收后用于解释，而不是直接推荐给用户，则不要标 CaseRecommendation
+
+核心判断：
+
+主要价值来自“给资源/给案例/给文档”，不是“自己解释”。
+
+---
+
+### 5. Handoff（转接/转交处理）
+
+定义：客服明确表示当前问题将被转交给其他处理主体或处理通道，如人工客服、专员、二线团队、后台团队、工程师、工单系统、其他部门等。
+
+适用情形：
+
+* 转人工
+* 提交工单并由后续团队跟进
+* 转后台/专员/其他团队处理
+
+核心判断：
+
+核心不是当前轮直接解决，而是“交给别人处理”。
+
+---
+
+### 6. ProcessAcknowledgement（应承/流程推进/状态告知/收尾）
+
+定义：客服对用户进行承接、回应、安抚、状态同步、流程推进、等待占位或礼貌收尾，但没有提供实质性的解释性知识，也没有把案例推荐或转接作为核心动作。
+
+适用情形：
+
+* “好的，收到”
+* “明白了，我这边帮您核实一下”
+* “您稍等，我查一下”
+* “已为您记录该问题”
+* “请问还有其他可以帮您的吗？”
+
+核心判断：
+
+接得住、推得动，但没有真正解释或解决。
+
+---
+
+## 标注原则
+
+1. 只标注当前目标轮的“主要主标签”。
+2. 当前轮只能选择 1 个标签。
+3. 按当前轮最主要的作用标注，不要按句子碎片分别标。
+4. 不要被“好的、收到、明白了、稍等”这类礼貌或承接性词语干扰，要看真正推进了什么。
+5. 返回案例内容只是辅助信息，不能因为“有案例返回”就直接标为 CaseRecommendation。
+6. 如果客服主要是在吸收案例内容后自己解释给用户听，应标 ExplainedResponse。
+7. 如果客服主要是在让用户去查看案例、文档、FAQ，应标 CaseRecommendation。
+8. 如果该轮与返回案例没有明显关系，也要正常按该轮动作本身判断。
+9. 你标的是“理论上当前轮最合适的动作”，不要求与现实客服原话完全一致。
+10. 你的判断要参考 query trajectory 与 trigger trajectory，但不能机械照抄。
+11. 历史 policy trajectory 只用于判断当前策略是否自然衔接，不能重新输出或修改历史轮次。
+
+---
+
+## query / trigger 与 policy 的关系
+
+你必须参考 query trajectory 和 trigger trajectory，但 policy 不是它们的直接翻译。
+
+请重点查看 query trajectory 和 trigger trajectory 中与【当前目标轮 turn_id】对应的那一项。
+
+请遵循以下原则：
+
+1. 当前轮 trigger = false 时，常见动作包括：
+
+   * AskMissingSlot
+   * AskClarification
+   * ProcessAcknowledgement
+   * ExplainedResponse（若无需知识链路也可解释）
+
+2. 当前轮 trigger = true 时，常见动作包括：
+
+   * ExplainedResponse
+   * CaseRecommendation
+   * Handoff
+
+   但也可能先做 AskMissingSlot / AskClarification，如果知识链路已开但仍缺关键执行条件。
+
+3. 有案例返回，不等于一定是 CaseRecommendation。
+
+4. 有案例返回且当前轮主要是在自己解释，应标 ExplainedResponse。
+
+5. 只有当当前轮主要作用是“把案例/文档给用户参考”时，才标 CaseRecommendation。
+
+6. Handoff 只在当前轮核心动作是转交处理时使用。
+
+---
+
+## 历史 policy trajectory 的使用方式
+
+你会看到当前目标轮之前已经确定的历史 policy trajectory。
+
+请遵循以下原则：
+
+1. 历史 policy trajectory 只作为上下文参考。
+2. 不要重新判断历史轮次。
+3. 不要输出历史轮次。
+4. 当前轮标签应与历史策略自然衔接。
+5. 如果历史轮主要在收集信息，当前轮可以在信息足够后进入 ExplainedResponse / CaseRecommendation / Handoff。
+6. 如果用户明确切换问题，当前轮策略可以重新开始新的处理链。
+7. 不要无故在 AskMissingSlot、AskClarification、ExplainedResponse、CaseRecommendation、Handoff 之间跳变。
+
+---
+
+## 易混规则
+
+### AskMissingSlot vs AskClarification
+
+* 如果是在索取客观事实、材料、参数、截图、报错信息等，标 AskMissingSlot
+* 如果是在澄清用户到底是什么意思、指什么、想问什么，标 AskClarification
+
+### ExplainedResponse vs CaseRecommendation
+
+* 如果主要价值来自客服自己的解释、判断、建议，标 ExplainedResponse
+* 如果主要价值来自推荐外部案例/FAQ/文档，标 CaseRecommendation
+* 即使返回了案例，只要当前轮主要是在“自己讲清楚”，仍标 ExplainedResponse
+
+### Handoff vs ProcessAcknowledgement
+
+* 如果明确是转交给其他人/团队/系统处理，标 Handoff
+* 如果只是说“我帮您查一下/核实一下/记录一下/请稍等”，标 ProcessAcknowledgement
+
+---
+
+## 推荐优先级
+
+当当前轮中多个标签都像时，按以下顺序优先判断：
+
+Handoff > CaseRecommendation > ExplainedResponse > AskMissingSlot > AskClarification > ProcessAcknowledgement
+
+补充说明：
+
+* 若当前轮中明确以“请参考案例/文档”为核心动作，优先标 CaseRecommendation
+* 若当前轮中虽然出现案例，但核心是基于案例进行解释，则标 ExplainedResponse
+
+---
+
+## 输出要求
+
+1. 只输出合法 JSON，不要输出任何额外解释文字。
+2. 不要输出 markdown 代码块。
+3. trajectory 数组必须只包含当前目标轮这 1 个元素。
+4. turn_id 必须严格等于输入的【当前目标轮 turn_id】。
+5. 不要输出历史轮次。
+6. 不要输出未来轮次。
+7. 不要遗漏字段，不要新增字段。
