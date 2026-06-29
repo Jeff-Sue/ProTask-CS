@@ -1,247 +1,76 @@
-import json
-import re
-import numpy as np
-from collections import defaultdict
-from typing import Dict, List, Tuple, Any
-
-
-# =========================================================
-# 1. Regex
-# =========================================================
-CASE_PATTERN = re.compile(r"案例链接[:：]\s*\[?([A-Z0-9]+)\]?")
-
-
-def extract_case_ids(text: str) -> List[str]:
-    if not text:
-        return []
-    return CASE_PATTERN.findall(text)
-
-
-# =========================================================
-# 2. GOLD event extraction
-# =========================================================
-def build_gold_events(gold_map: Dict[str, Any]) -> List[Tuple[str, int, str]]:
-    """
-    return:
-        (dialog_id, turn_id, case_id)
-    """
-    events = []
-
-    for dialog_id, gold_dialog in gold_map.items():
-
-        turns = gold_dialog["text"]
-
-        for t_id, t in enumerate(turns):
-
-            if "客服" not in t:
-                continue
-
-            text = t["客服"]
-            case_ids = extract_case_ids(text)
-
-            for cid in case_ids:
-                events.append((dialog_id, t_id + 1, cid))
-
-    return events
-
-
-# =========================================================
-# 3. PRED event extraction
-# =========================================================
-def build_pred_events(preds: List[Dict]) -> List[Tuple[str, int, str]]:
-
-    events = []
-
-    for item in preds:
-
-        dialog_id = item["dialog_id"]
-        turn_id = item["turn_id"]
-
-        response = item.get("response_output", {}).get("response", "")
-
-        case_ids = extract_case_ids(response)
-
-        for cid in case_ids:
-            events.append((dialog_id, turn_id, cid))
-
-    return events
-
-
-# =========================================================
-# 4. Retrieval metrics
-# =========================================================
-def retrieval_hit(gold_id: str, retrieved_cases: List[Dict]):
-
-    ids = [c.get("case_id", "") for c in retrieved_cases]
-
-    return {
-        "hit@1": gold_id in ids[:1],
-        "hit@3": gold_id in ids[:3],
-        "hit@5": gold_id in ids[:5],
-    }
-
-
-# =========================================================
-# 5. Event-level evaluation
-# =========================================================
-def eval_event_alignment(gold_events, pred_events):
-
-    gold_set = set(gold_events)
-    pred_set = set(pred_events)
-
-    hit = len(gold_set & pred_set) / len(gold_set) if gold_set else 0.0
-    precision = len(gold_set & pred_set) / len(pred_set) if pred_set else 0.0
-    recall = len(gold_set & pred_set) / len(gold_set) if gold_set else 0.0
-
-    return {
-        "event_accuracy": hit,
-        "event_precision": precision,
-        "event_recall": recall
-    }
-
-
-# =========================================================
-# 6. Latency
-# =========================================================
-def collect_latency(latency: Dict[str, Any]):
-    keys = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
-    return {k: latency.get(k, 0) for k in keys}
-
-
-# =========================================================
-# 7. MAIN EVAL
-# =========================================================
-def evaluate(pred_path: str, gold_path: str):
-
-    with open(pred_path, "r", encoding="utf-8") as f:
-        preds = json.load(f)
-
-    with open(gold_path, "r", encoding="utf-8") as f:
-        golds = json.load(f)
-
-    # gold map
-    gold_map = golds
+def run_retrieval_global_batched(
+    all_prefix_samples: List[PrefixSample],
+    query_outputs: List[QueryTrajectoryOutput],
+    retriever_batch_fn,
+) -> List[RetrievalOutput]:
 
     # =========================
-    # containers
+    # 1. flatten inputs
     # =========================
-    grounding_acc = []
+    query_text_list = []
+    dialogue_history_list = []
 
-    hit1_list, hit3_list, hit5_list = [], [], []
+    valid_flags = []  # 标记是否需要检索
 
-    latency_stats = defaultdict(list)
+    for prefix_sample, query_output in zip(all_prefix_samples, query_outputs):
+
+        last_query = query_output.trajectory[-1]
+
+        # 判断是否需要检索
+        need_retrieval = (
+            last_query.query_mode != "none"
+            and last_query.query_text.strip() != ""
+        )
+
+        valid_flags.append(need_retrieval)
+
+        if need_retrieval:
+            query_text_list.append(last_query.query_text.strip())
+
+            # flatten dialogue history
+            dialogue_history = ""
+            for msg in prefix_sample.history:
+                role = "用户" if msg["role"] == "user" else "客服"
+                dialogue_history += f"{role}: {msg['text']}\n"
+
+            dialogue_history_list.append(dialogue_history)
+        else:
+            query_text_list.append("")
+            dialogue_history_list.append("")
 
     # =========================
-    # build global events
+    # 2. batch call RAG
     # =========================
-    gold_events = build_gold_events(gold_map)
-    pred_events = build_pred_events(preds)
-
-    event_metrics = eval_event_alignment(gold_events, pred_events)
+    batch_outputs = retriever_batch_fn(
+        dialogue_history_list,
+        query_text_list
+    )
 
     # =========================
-    # per-dialog evaluation
+    # 3. map back
     # =========================
-    for item in preds:
+    retrieval_outputs: List[RetrievalOutput] = []
 
-        dialog_id = item["dialog_id"]
+    for i, flag in enumerate(valid_flags):
 
-        if dialog_id not in gold_map:
+        if not flag:
+            retrieval_outputs.append(RetrievalOutput(retrieved_cases=[]))
             continue
 
-        gold_dialog = gold_map[dialog_id]
-        turns = gold_dialog["text"]
+        raw_cases = batch_outputs[i]
 
-        # -------------------------
-        # gold case sequence
-        # -------------------------
-        gold_seq = []
-        for t in turns:
-            if "客服" in t:
-                gold_seq.extend(extract_case_ids(t["客服"]))
+        cases = []
+        for c in raw_cases:
+            cases.append(
+                RetrievalCase(
+                    case_id=str(c.get("case_id", "")),
+                    title=str(c.get("title", "")),
+                    content=str(c.get("content", "")),
+                )
+            )
 
-        if not gold_seq:
-            continue
+        retrieval_outputs.append(
+            RetrievalOutput(retrieved_cases=cases)
+        )
 
-        gold_first_case = gold_seq[0]
-
-        # -------------------------
-        # pred response
-        # -------------------------
-        pred_response = item.get("response_output", {}).get("response", "")
-        pred_seq = extract_case_ids(pred_response)
-
-        # -------------------------
-        # case grounding
-        # -------------------------
-        grounding_acc.append(len(set(gold_seq) & set(pred_seq)) > 0)
-
-        # -------------------------
-        # retrieval
-        # -------------------------
-        retrieval = item.get("retrieval_output", {}).get("retrieved_cases", [])
-
-        ids = [c.get("case_id", "") for c in retrieval]
-
-        hit1_list.append(gold_first_case in ids[:1])
-        hit3_list.append(gold_first_case in ids[:3])
-        hit5_list.append(gold_first_case in ids[:5])
-
-        # -------------------------
-        # latency
-        # -------------------------
-        latency = item.get("latency", {})
-        for k, v in collect_latency(latency).items():
-            latency_stats[k].append(v)
-
-    # =========================
-    # aggregation
-    # =========================
-    def mean(x):
-        return float(np.mean(x)) if len(x) > 0 else 0.0
-
-    result = {
-        # =========================
-        # event-level (核心新增)
-        # =========================
-        "event_accuracy": event_metrics["event_accuracy"],
-        "event_precision": event_metrics["event_precision"],
-        "event_recall": event_metrics["event_recall"],
-
-        # =========================
-        # response grounding
-        # =========================
-        "case_grounding_accuracy": mean(grounding_acc),
-
-        # =========================
-        # retrieval
-        # =========================
-        "retrieval_hit@1": mean(hit1_list),
-        "retrieval_hit@3": mean(hit3_list),
-        "retrieval_hit@5": mean(hit5_list),
-
-        # =========================
-        # latency
-        # =========================
-        "avg_query_ms": mean(latency_stats["query_ms"]),
-        "avg_retrieval_ms": mean(latency_stats["retrieval_ms"]),
-        "avg_trigger_ms": mean(latency_stats["trigger_ms"]),
-        "avg_policy_ms": mean(latency_stats["policy_ms"]),
-        "avg_response_ms": mean(latency_stats["response_ms"]),
-        "avg_total_ms": mean(latency_stats["total_ms"]),
-    }
-
-    return result
-
-
-# =========================================================
-# 8. RUN
-# =========================================================
-if __name__ == "__main__":
-
-    pred_path = "pred.json"
-    gold_path = "gold.json"
-
-    metrics = evaluate(pred_path, gold_path)
-
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    return retrieval_outputs
