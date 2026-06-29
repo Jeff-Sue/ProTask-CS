@@ -1,3 +1,12 @@
-"[案例链接: KT00370519]。\n您好目前还不支持的。"
-
-从这里面抽取出KT00370519 通过re
+    dialogue_ids_all = []
+    turn_ids_all = []
+    gold_case_all = []
+    for dialog_id, gold_dialog in gold_map:
+        turns = gold_dialog["text"]
+        for t_id, t in enumerate(turns):
+            if "客服" in t:
+                ids = extract_case_ids(t["客服"])
+                if ids:
+                    dialogue_ids_all.extend(dialog_id)
+                    turn_ids_all.extend(int((t_id + 1) / 2))
+                    gold_case_all.extend(ids)
