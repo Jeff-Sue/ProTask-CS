@@ -1,244 +1,351 @@
-def chunk_list(items: List[Any], batch_size: int) -> List[List[Any]]:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
-
-
-def safe_json_loads_from_llm_output(output: Any) -> Dict[str, Any]:
-    text = _extract_text_from_parallel_result(output)
-    text = strip_code_fence(text)
-    return json.loads(text)
-
-
-def build_query_messages(prefix_sample: PrefixSample) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-
-    query_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "query_mode": '"<none|reuse|refine|rewrite>"',
-            "query_text": '""',
-            "reason": '""'
-        }
-    )
-
-    user_prompt = f"""
-下面是当前 prefix，对应的是“当前客服回复之前”的完整对话历史。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 query trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来轮次
-7. 你的任务是“对固定轮次做标注”，不是“预测未来对话”或“补全轨迹”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-
-【对话历史】
-{dialogue_prefix}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{query_output_schema}
-
-若输出 turn 数不等于 target_turn_count，答案视为无效；请自行修正后再输出。
-""".strip()
-
-    return [
-        {"role": "system", "content": QUERY_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_trigger_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    retrieved_evidence = format_retrieved_cases(retrieval_output.retrieved_cases)
-
-    trigger_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "trigger": '<true_or_false>',
-            "evidence_mode": '"<no_evidence_needed|retrieve_new_evidence|reuse_existing_evidence>"',
-            "reason": '""'
-        }
-    )
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory，以及当前 prefix 可用的候选 evidence。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 trigger trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来知识链路变化
-7. 你的任务是“对固定轮次做标注”，不是“推演知识链路会如何发展”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-- 少写任何一个 turn 或多写任何一个 turn 都是错误的
-
-【对话历史】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【当前 prefix 可用的候选 evidence】
-{retrieved_evidence}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{trigger_output_schema}
-""".strip()
-
-    return [
-        {"role": "system", "content": TRIGGER_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_policy_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-    trigger_output: TriggerTrajectoryOutput,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    trigger_trajectory = format_trigger_trajectory(trigger_output)
-    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
-
-    policy_output_schema = build_turn_skeleton(
-        turn_count=prefix_sample.turn_id,
-        fields={
-            "label": '"<AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement>"',
-            "case_id": '""',
-            "reason": '""'
-        }
-    )
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory，以及当前 prefix 可用的返回案例内容。
-
-请你只对这个 prefix 中**已经形成的固定客服应答点**做标注，输出 policy trajectory。
-
-【重要约束】
-1. 当前 prefix 的固定客服目标轮数为：{prefix_sample.turn_id}
-2. 你必须且只能输出 turn_id = 1 到 turn_id = {prefix_sample.turn_id}
-3. 不能新增任何 turn_id
-4. 不能遗漏任何 turn_id
-5. 不能只输出最后一个 turn_id
-6. 不能脑补未来用户发言、未来客服回复或未来策略变化
-7. 你的任务是“对固定轮次做标注”，不是“预测后续客服会怎么做”
-
-【特别提醒】
-- 当 target_turn_count = 1 时，即使输入中还没有出现任何客服文本，也必须输出 turn_id = 1
-- 当 target_turn_count = 2 时，必须完整输出 turn_id = 1 和 turn_id = 2，不能只输出 turn_id = 2
-- 当 target_turn_count = N 时，你要重新标注从 1 到 N 的完整 trajectory，而不是只标最后一轮
-- 少写任何一个 turn 或多写任何一个 turn 都是错误的
-
-【对话上下文】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【trigger trajectory】
-{trigger_trajectory}
-
-【返回案例】
-{retrieved_cases}
-
-**【请严格按照下面的 JSON 模板填写，不要改动字段名，不要新增字段，不要输出模板外内容，不要遗忘字段】**
-{policy_output_schema}
-""".strip()
-
-    return [
-        {"role": "system", "content": POLICY_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def build_response_messages(
-    prefix_sample: PrefixSample,
-    query_output: QueryTrajectoryOutput,
-    retrieval_output: RetrievalOutput,
-    trigger_output: TriggerTrajectoryOutput,
-    policy_output: PolicyTrajectoryOutput,
-) -> List[Dict[str, str]]:
-    dialogue_prefix = format_history_with_turn_ids(prefix_sample)
-    query_trajectory = format_query_trajectory(query_output)
-    trigger_trajectory = format_trigger_trajectory(trigger_output)
-    policy_trajectory = format_policy_trajectory(policy_output)
-    retrieved_cases = format_retrieved_cases(retrieval_output.retrieved_cases)
-
-    user_prompt = f"""
-下面是当前 prefix、该 prefix 对应的 query trajectory、trigger trajectory、policy trajectory，以及当前 prefix 可用的返回案例内容。
-
-请你只为 policy trajectory 最后一轮所对应的当前客服目标轮，生成一条自然、合理、符合策略的客服回复。
-
-【历史对话】
-{dialogue_prefix}
-
-【query trajectory】
-{query_trajectory}
-
-【trigger trajectory】
-{trigger_trajectory}
-
-【policy trajectory】
-{policy_trajectory}
-
-【返回的案例内容】
-{retrieved_cases}
-""".strip()
-
-    return [
-        {"role": "system", "content": RESPONSE_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
-
-
-def run_parallel_inference_batched(
-    items: List[Dict[str, Any]],
-    batch_size: int,
-    desc: str,
-) -> List[Any]:
+def run_dataset_global_batched(
+    dialogues: List[Dialogue],
+    output_path: str = "multi_turn_output.json",
+    retriever: Callable[[str, int], List[Dict[str, str]]] = default_retriever,
+    retrieval_top_k: int = 5,
+    batch_size: int = 16,
+) -> None:
     """
-    真正使用 parallel_inference 的 batch 能力。
-    输入 items: [{"messages": [...]}, ...]
-    输出顺序必须与输入顺序一致。
+    极致版本：
+    1. 所有 dialogue 先展开成 all_prefix_samples；
+    2. 全局 Query batch；
+    3. 全局 Retrieval；
+    4. 全局 Trigger batch；
+    5. 全局 Policy batch；
+    6. 全局 Response batch；
+    7. 最后 assemble 成原来的 PrefixResult 结构并保存。
+
+    输出结构不变：List[PrefixResult] -> asdict -> json。
     """
-    if parallel_inference is None:
-        raise RuntimeError("parallel_inference is unavailable.")
 
-    outputs: List[Any] = []
+    logger.info("Processing dataset with %s dialogues using GLOBAL batch_size=%s", len(dialogues), batch_size)
 
-    for batch in tqdm(chunk_list(items, batch_size), desc=desc):
-        batch_outputs = parallel_inference(batch)
+    total_start = time.time()
 
-        if len(batch_outputs) != len(batch):
-            raise ValueError(
-                f"{desc} output length mismatch: "
-                f"expected={len(batch)}, got={len(batch_outputs)}"
+    # =========================================================
+    # 0. Flatten all dialogues into all prefix samples
+    # =========================================================
+    all_prefix_samples: List[PrefixSample] = []
+
+    for dialogue in dialogues:
+        try:
+            prefix_samples = build_prefix_samples(dialogue)
+            all_prefix_samples.extend(prefix_samples)
+        except Exception:
+            logger.exception("Failed to build prefix samples for dialogue %s", dialogue.dialog_id)
+            continue
+
+    logger.info("Built %s prefix samples from %s dialogues", len(all_prefix_samples), len(dialogues))
+
+    if not all_prefix_samples:
+        logger.warning("No prefix samples found. Save empty result.")
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+        return
+
+    # 每个 prefix 的模块耗时。全局 batch 下，很难准确拆到单样本，
+    # 所以这里记录的是 batch 平均耗时。
+    query_ms_list = [0 for _ in all_prefix_samples]
+    retrieval_ms_list = [0 for _ in all_prefix_samples]
+    trigger_ms_list = [0 for _ in all_prefix_samples]
+    policy_ms_list = [0 for _ in all_prefix_samples]
+    response_ms_list = [0 for _ in all_prefix_samples]
+    total_ms_list = [0 for _ in all_prefix_samples]
+
+    # =========================================================
+    # 1. Query global batch
+    # =========================================================
+    query_stage_start = time.time()
+
+    query_items = [
+        {"messages": build_query_messages(prefix_sample)}
+        for prefix_sample in all_prefix_samples
+    ]
+
+    query_raw_outputs = run_parallel_inference_batched(
+        items=query_items,
+        batch_size=batch_size,
+        desc="Query global batch",
+    )
+
+    query_stage_ms = int((time.time() - query_stage_start) * 1000)
+    query_avg_ms = int(query_stage_ms / max(len(all_prefix_samples), 1))
+    query_ms_list = [query_avg_ms for _ in all_prefix_samples]
+
+    query_outputs: List[QueryTrajectoryOutput] = []
+
+    for idx, raw_output in enumerate(query_raw_outputs):
+        prefix_sample = all_prefix_samples[idx]
+        try:
+            raw_json = safe_json_loads_from_llm_output(raw_output)
+            parsed = parse_query_output(raw_json, expected_turns=prefix_sample.turn_id)
+            query_outputs.append(parsed)
+        except Exception:
+            logger.exception(
+                "Query parse failed: dialog_id=%s, turn_id=%s",
+                prefix_sample.dialog_id,
+                prefix_sample.turn_id,
             )
+            # 保底：失败样本给一个 none trajectory，避免整个 pipeline 崩
+            fallback = QueryTrajectoryOutput(
+                trajectory=[
+                    QueryTrajectoryStep(
+                        turn_id=i,
+                        query_mode="none",
+                        query_text="",
+                        reason="query parse failed"
+                    )
+                    for i in range(1, prefix_sample.turn_id + 1)
+                ]
+            )
+            query_outputs.append(fallback)
 
-        outputs.extend(batch_outputs)
+    logger.info("Query stage completed: %sms", query_stage_ms)
 
-    return outputs
+    # =========================================================
+    # 2. Retrieval global stage
+    # =========================================================
+    retrieval_stage_start = time.time()
+
+    retrieval_outputs: List[RetrievalOutput] = []
+
+    for prefix_sample, query_output in tqdm(
+        list(zip(all_prefix_samples, query_outputs)),
+        desc="Retrieval global stage",
+    ):
+        try:
+            retrieval_output, retrieval_ms = run_retrieval_model(
+                prefix_sample=prefix_sample,
+                query_output=query_output,
+                retriever=retriever,
+                top_k=retrieval_top_k,
+            )
+            retrieval_outputs.append(retrieval_output)
+        except Exception:
+            logger.exception(
+                "Retrieval failed: dialog_id=%s, turn_id=%s",
+                prefix_sample.dialog_id,
+                prefix_sample.turn_id,
+            )
+            retrieval_outputs.append(RetrievalOutput(retrieved_cases=[]))
+
+    retrieval_stage_ms = int((time.time() - retrieval_stage_start) * 1000)
+    retrieval_avg_ms = int(retrieval_stage_ms / max(len(all_prefix_samples), 1))
+    retrieval_ms_list = [retrieval_avg_ms for _ in all_prefix_samples]
+
+    logger.info("Retrieval stage completed: %sms", retrieval_stage_ms)
+
+    # =========================================================
+    # 3. Trigger global batch
+    # =========================================================
+    trigger_stage_start = time.time()
+
+    trigger_items = [
+        {
+            "messages": build_trigger_messages(
+                prefix_sample=prefix_sample,
+                query_output=query_output,
+                retrieval_output=retrieval_output,
+            )
+        }
+        for prefix_sample, query_output, retrieval_output in zip(
+            all_prefix_samples,
+            query_outputs,
+            retrieval_outputs,
+        )
+    ]
+
+    trigger_raw_outputs = run_parallel_inference_batched(
+        items=trigger_items,
+        batch_size=batch_size,
+        desc="Trigger global batch",
+    )
+
+    trigger_stage_ms = int((time.time() - trigger_stage_start) * 1000)
+    trigger_avg_ms = int(trigger_stage_ms / max(len(all_prefix_samples), 1))
+    trigger_ms_list = [trigger_avg_ms for _ in all_prefix_samples]
+
+    trigger_outputs: List[TriggerTrajectoryOutput] = []
+
+    for idx, raw_output in enumerate(trigger_raw_outputs):
+        prefix_sample = all_prefix_samples[idx]
+        try:
+            raw_json = safe_json_loads_from_llm_output(raw_output)
+            parsed = parse_trigger_output(raw_json, expected_turns=prefix_sample.turn_id)
+            trigger_outputs.append(parsed)
+        except Exception:
+            logger.exception(
+                "Trigger parse failed: dialog_id=%s, turn_id=%s",
+                prefix_sample.dialog_id,
+                prefix_sample.turn_id,
+            )
+            fallback = TriggerTrajectoryOutput(
+                trajectory=[
+                    TriggerTrajectoryStep(
+                        turn_id=i,
+                        trigger=False,
+                        evidence_mode="no_evidence_needed",
+                        reason="trigger parse failed"
+                    )
+                    for i in range(1, prefix_sample.turn_id + 1)
+                ]
+            )
+            trigger_outputs.append(fallback)
+
+    logger.info("Trigger stage completed: %sms", trigger_stage_ms)
+
+    # =========================================================
+    # 4. Policy global batch
+    # =========================================================
+    policy_stage_start = time.time()
+
+    policy_items = [
+        {
+            "messages": build_policy_messages(
+                prefix_sample=prefix_sample,
+                query_output=query_output,
+                retrieval_output=retrieval_output,
+                trigger_output=trigger_output,
+            )
+        }
+        for prefix_sample, query_output, retrieval_output, trigger_output in zip(
+            all_prefix_samples,
+            query_outputs,
+            retrieval_outputs,
+            trigger_outputs,
+        )
+    ]
+
+    policy_raw_outputs = run_parallel_inference_batched(
+        items=policy_items,
+        batch_size=batch_size,
+        desc="Policy global batch",
+    )
+
+    policy_stage_ms = int((time.time() - policy_stage_start) * 1000)
+    policy_avg_ms = int(policy_stage_ms / max(len(all_prefix_samples), 1))
+    policy_ms_list = [policy_avg_ms for _ in all_prefix_samples]
+
+    policy_outputs: List[PolicyTrajectoryOutput] = []
+
+    for idx, raw_output in enumerate(policy_raw_outputs):
+        prefix_sample = all_prefix_samples[idx]
+        try:
+            raw_json = safe_json_loads_from_llm_output(raw_output)
+            parsed = parse_policy_output(raw_json, expected_turns=prefix_sample.turn_id)
+            policy_outputs.append(parsed)
+        except Exception:
+            logger.exception(
+                "Policy parse failed: dialog_id=%s, turn_id=%s",
+                prefix_sample.dialog_id,
+                prefix_sample.turn_id,
+            )
+            fallback = PolicyTrajectoryOutput(
+                trajectory=[
+                    PolicyTrajectoryStep(
+                        turn_id=i,
+                        label="ProcessAcknowledgement",
+                        case_id="",
+                        reason="policy parse failed"
+                    )
+                    for i in range(1, prefix_sample.turn_id + 1)
+                ]
+            )
+            policy_outputs.append(fallback)
+
+    logger.info("Policy stage completed: %sms", policy_stage_ms)
+
+    # =========================================================
+    # 5. Response global batch
+    # =========================================================
+    response_stage_start = time.time()
+
+    response_items = [
+        {
+            "messages": build_response_messages(
+                prefix_sample=prefix_sample,
+                query_output=query_output,
+                retrieval_output=retrieval_output,
+                trigger_output=trigger_output,
+                policy_output=policy_output,
+            )
+        }
+        for prefix_sample, query_output, retrieval_output, trigger_output, policy_output in zip(
+            all_prefix_samples,
+            query_outputs,
+            retrieval_outputs,
+            trigger_outputs,
+            policy_outputs,
+        )
+    ]
+
+    response_raw_outputs = run_parallel_inference_batched(
+        items=response_items,
+        batch_size=batch_size,
+        desc="Response global batch",
+    )
+
+    response_stage_ms = int((time.time() - response_stage_start) * 1000)
+    response_avg_ms = int(response_stage_ms / max(len(all_prefix_samples), 1))
+    response_ms_list = [response_avg_ms for _ in all_prefix_samples]
+
+    response_outputs: List[ResponseOutput] = []
+
+    for idx, raw_output in enumerate(response_raw_outputs):
+        prefix_sample = all_prefix_samples[idx]
+        try:
+            response_text = _extract_text_from_parallel_result(raw_output).strip()
+            response_outputs.append(ResponseOutput(response=response_text))
+        except Exception:
+            logger.exception(
+                "Response parse failed: dialog_id=%s, turn_id=%s",
+                prefix_sample.dialog_id,
+                prefix_sample.turn_id,
+            )
+            response_outputs.append(ResponseOutput(response=""))
+
+    logger.info("Response stage completed: %sms", response_stage_ms)
+
+    # =========================================================
+    # 6. Assemble original PrefixResult structure
+    # =========================================================
+    total_ms = int((time.time() - total_start) * 1000)
+    total_avg_ms = int(total_ms / max(len(all_prefix_samples), 1))
+    total_ms_list = [total_avg_ms for _ in all_prefix_samples]
+
+    all_results: List[PrefixResult] = []
+
+    for idx, prefix_sample in enumerate(all_prefix_samples):
+        all_results.append(
+            PrefixResult(
+                dialog_id=prefix_sample.dialog_id,
+                turn_id=prefix_sample.turn_id,
+                prefix_sample=prefix_sample,
+                query_output=query_outputs[idx],
+                retrieval_output=retrieval_outputs[idx],
+                trigger_output=trigger_outputs[idx],
+                policy_output=policy_outputs[idx],
+                response_output=response_outputs[idx],
+                latency=Latency(
+                    query_ms=query_ms_list[idx],
+                    retrieval_ms=retrieval_ms_list[idx],
+                    trigger_ms=trigger_ms_list[idx],
+                    policy_ms=policy_ms_list[idx],
+                    response_ms=response_ms_list[idx],
+                    total_ms=total_ms_list[idx],
+                ),
+            )
+        )
+
+    results_dict = [asdict(result) for result in all_results]
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(results_dict, f, ensure_ascii=False, indent=2)
+
+    logger.info(
+        "GLOBAL batch dataset completed: dialogues=%s, prefixes=%s, total_ms=%s, saved=%s",
+        len(dialogues),
+        len(all_prefix_samples),
+        total_ms,
+        output_path,
+    )
