@@ -103,6 +103,7 @@ class TriggerTrajectoryOutput:
 class PolicyTrajectoryStep:
     turn_id: int
     label: str
+    case_id: str
     reason: str = ""
 
 @dataclass
@@ -386,6 +387,7 @@ def parse_policy_output(raw: Dict[str, Any], expected_turns: int) -> PolicyTraje
         step = PolicyTrajectoryStep(
             turn_id=int(item["turn_id"]),
             label=item["label"],
+            case_id=item['case_id'],
             reason=item.get("reason", "") or "",
         )
         if step.label not in ALLOWED_POLICY_LABELS:
@@ -866,7 +868,7 @@ def main() -> None:
     data_path= "/home/aarc/CuhkszTeam/nas1/RUNTIME/data_processing/案例推荐筛选/data/10/带caseID对话.json"
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-        data = list(data.items())[:10]
+        data = list(data.items())[:1]
         sample_dialogues = []
         for dialog_id, dialogue_content in tqdm(data):
             sample = {}
