@@ -1,32 +1,60 @@
-import re
 import json
+import re
 import numpy as np
 from collections import defaultdict
-from typing import Dict, Any, List
 
 
+# =========================
+# regex extractor
+# =========================
 CASE_PATTERN = re.compile(r"案例链接[:：]\s*\[?([A-Z0-9]+)\]?")
 
-
-def extract_case_ids(text: str) -> List[str]:
+def extract_case_ids(text: str):
     if not text:
         return []
     return CASE_PATTERN.findall(text)
 
-def compute_retrieval_hit(gold_id: str, retrieved_cases: List[Dict]):
 
-    retrieved_ids = [c.get("case_id", "") for c in retrieved_cases]
+# =========================
+# retrieval metrics
+# =========================
+def retrieval_hit(gold_id, retrieved_cases):
+
+    ids = [c.get("case_id", "") for c in retrieved_cases]
 
     return {
-        "hit@1": gold_id in retrieved_ids[:1],
-        "hit@3": gold_id in retrieved_ids[:3],
-        "hit@5": gold_id in retrieved_ids[:5],
+        "hit@1": gold_id in ids[:1],
+        "hit@3": gold_id in ids[:3],
+        "hit@5": gold_id in ids[:5],
     }
 
-def collect_latency(latency: Dict[str, Any]):
+
+# =========================
+# position accuracy
+# =========================
+def position_accuracy(gold_seq, pred_seq):
+
+    n = min(len(gold_seq), len(pred_seq))
+    if n == 0:
+        return 0.0
+
+    return sum(
+        1 if gold_seq[i] == pred_seq[i] else 0
+        for i in range(n)
+    ) / n
+
+
+# =========================
+# latency collector
+# =========================
+def collect_latency(latency: dict):
     keys = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
     return {k: latency.get(k, 0) for k in keys}
 
+
+# =========================
+# main eval
+# =========================
 def evaluate(pred_path: str, gold_path: str):
 
     with open(pred_path, "r", encoding="utf-8") as f:
@@ -35,19 +63,21 @@ def evaluate(pred_path: str, gold_path: str):
     with open(gold_path, "r", encoding="utf-8") as f:
         golds = json.load(f)
 
-    gold_map = {k: v for k, v in golds.items()}
+    gold_map = golds
 
     # =========================
-    # metrics containers
+    # containers
     # =========================
-    case_match = []
+    grounding_acc = []
 
     hit1_list, hit3_list, hit5_list = [], [], []
+
+    position_acc_list = []
 
     latency_stats = defaultdict(list)
 
     # =========================
-    # iterate predictions
+    # iterate preds
     # =========================
     for item in preds:
 
@@ -61,66 +91,84 @@ def evaluate(pred_path: str, gold_path: str):
         turns = gold_dialog["text"]
 
         # =====================================================
-        # find gold case (only assistant turns with link)
+        # GOLD CASE SEQUENCE (ordered)
         # =====================================================
-        gold_case_ids_all = []
-        gold_response_text = None
+        gold_seq = []
+        gold_case_all = []
 
         for t in turns:
             if "客服" in t:
-                text = t["客服"]
-                ids = extract_case_ids(text)
+                ids = extract_case_ids(t["客服"])
                 if ids:
-                    gold_case_ids_all.extend(ids)
-                    gold_response_text = text
+                    gold_seq.extend(ids)
+                    gold_case_all.extend(ids)
 
-        if not gold_case_ids_all:
+        if len(gold_seq) == 0:
             continue
 
-        gold_case_id = gold_case_ids_all[0]
+        gold_first_case = gold_seq[0]
 
         # =====================================================
-        # pred response extraction (IMPORTANT FIX)
+        # PRED CASE SEQUENCE (response-based)
         # =====================================================
         pred_response = item.get("response_output", {}).get("response", "")
-        pred_case_ids = extract_case_ids(pred_response)
-
-        case_match.append(gold_case_id in pred_case_ids)
+        pred_seq = extract_case_ids(pred_response)
 
         # =====================================================
-        # retrieval evaluation
+        # 1. case grounding accuracy (ANY match)
+        # =====================================================
+        grounding_acc.append(len(set(gold_seq) & set(pred_seq)) > 0)
+
+        # =====================================================
+        # 2. retrieval metrics
         # =====================================================
         retrieval = item.get("retrieval_output", {}).get("retrieved_cases", [])
 
-        r = compute_retrieval_hit(gold_case_id, retrieval)
+        r = retrieval_hit(gold_first_case, retrieval)
 
         hit1_list.append(r["hit@1"])
         hit3_list.append(r["hit@3"])
         hit5_list.append(r["hit@5"])
 
         # =====================================================
-        # latency
+        # 3. position-wise accuracy (your request)
+        # =====================================================
+        position_acc_list.append(position_accuracy(gold_seq, pred_seq))
+
+        # =====================================================
+        # 4. latency
         # =====================================================
         latency = item.get("latency", {})
         for k, v in collect_latency(latency).items():
             latency_stats[k].append(v)
 
     # =========================
-    # final aggregation
+    # aggregation
     # =========================
-    def mean(x): 
+    def mean(x):
         return float(np.mean(x)) if len(x) > 0 else 0.0
 
     result = {
-        # -------- case grounding --------
-        "case_grounding_accuracy": mean(case_match),
+        # -------------------------
+        # grounding
+        # -------------------------
+        "case_grounding_accuracy": mean(grounding_acc),
 
-        # -------- retrieval --------
+        # -------------------------
+        # retrieval
+        # -------------------------
         "retrieval_hit@1": mean(hit1_list),
         "retrieval_hit@3": mean(hit3_list),
         "retrieval_hit@5": mean(hit5_list),
 
-        # -------- latency --------
+        # -------------------------
+        # position alignment
+        # -------------------------
+        "case_position_accuracy": mean(position_acc_list),
+
+        # -------------------------
+        # latency
+        # -------------------------
         "avg_query_ms": mean(latency_stats["query_ms"]),
         "avg_retrieval_ms": mean(latency_stats["retrieval_ms"]),
         "avg_trigger_ms": mean(latency_stats["trigger_ms"]),
