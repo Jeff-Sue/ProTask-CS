@@ -1,4 +1,4 @@
-# Version: v2_case_selection_denominator_top5_policy
+# Version: v3_conditional_policy_hit_rate
 import json
 import re
 import numpy as np
@@ -299,7 +299,14 @@ def eval_case_recommendation_turns(
     top1_hits = []
     top3_hits = []
     top5_hits = []
-    policy_hits = 0
+
+    # 知识型策略命中率的分母：T ∩ R
+    # T = 系统进入知识链路
+    # R = retrieved top-5 包含 golden case
+    # P = policy 属于知识型策略
+    # policy_hit_rate = count(T ∩ R ∩ P) / count(T ∩ R)
+    policy_hit_after_trigger_top5_count = 0
+    trigger_top5_count = 0
 
     # 案例选择准确率的分母：
     # golden 案例推荐轮 ∩ retrieved top-5 包含 golden case ∩ policy 属于知识型策略。
@@ -332,8 +339,12 @@ def eval_case_recommendation_turns(
 
         policy_label = get_policy_label(item or {})
         policy_hit = policy_label in KNOWLEDGE_POLICIES
-        if policy_hit:
-            policy_hits += 1
+
+        # 条件知识型策略命中率：count(T ∩ R ∩ P) / count(T ∩ R)
+        if is_knowledge_triggered and top5_hit:
+            trigger_top5_count += 1
+            if policy_hit:
+                policy_hit_after_trigger_top5_count += 1
 
         pred_ids = get_pred_case_ids(item or {}, use_response_fallback=use_response_fallback)
 
@@ -361,8 +372,12 @@ def eval_case_recommendation_turns(
         "top3_effective_case_recall": mean(top3_hits),
         "top5_effective_case_recall": mean(top5_hits),
 
-        # 3. 知识型策略命中率
-        "knowledge_policy_hit_rate": safe_div(policy_hits, n_gold_case_turns),
+        # 3. 条件知识型策略命中率
+        # 分母：golden 案例推荐轮中，系统进入知识链路且 top-5 包含 golden case 的轮次。
+        "knowledge_policy_hit_denominator": "gold_case_turn AND knowledge_link_triggered AND top5_contains_gold",
+        "knowledge_policy_hit_eval_count": trigger_top5_count,
+        "knowledge_policy_hit_correct_count": policy_hit_after_trigger_top5_count,
+        "knowledge_policy_hit_rate": safe_div(policy_hit_after_trigger_top5_count, trigger_top5_count),
 
         # 4. 案例选择准确率
         # 分母：golden 案例推荐轮中，retrieved top-5 包含 golden case，
