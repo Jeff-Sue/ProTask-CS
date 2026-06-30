@@ -1,3 +1,4 @@
+# Version: v2_case_selection_denominator_top5_policy
 import json
 import re
 import numpy as np
@@ -299,7 +300,14 @@ def eval_case_recommendation_turns(
     top3_hits = []
     top5_hits = []
     policy_hits = 0
-    case_selection_hits_cond_policy = []
+
+    # 案例选择准确率的分母：
+    # golden 案例推荐轮 ∩ retrieved top-5 包含 golden case ∩ policy 属于知识型策略。
+    # 注意：这里不再把“policy 属于知识型策略但 top5 没有 golden”的轮次计入分母，
+    # 因为那是 retrieval 召回失败，不应该归因给 case selection。
+    case_selection_hits_cond_top5_policy = []
+    case_selection_top5_policy_correct_count = 0
+
     final_case_hits = 0
 
     triggered_count_for_retrieval = 0
@@ -308,25 +316,35 @@ def eval_case_recommendation_turns(
         item = pred_by_key.get(key)
         gold_ids = gold_turn_cases[key]
 
+        retrieved_ids = get_retrieved_case_ids(item or {})
+        top1_hit = bool(gold_ids & set(retrieved_ids[:1]))
+        top3_hit = bool(gold_ids & set(retrieved_ids[:3]))
+        top5_hit = bool(gold_ids & set(retrieved_ids[:5]))
+
         is_knowledge_triggered = knowledge_link_triggered(item)
         if is_knowledge_triggered:
             knowledge_trigger_hits += 1
             triggered_count_for_retrieval += 1
 
-            retrieved_ids = get_retrieved_case_ids(item or {})
-            top1_hits.append(bool(gold_ids & set(retrieved_ids[:1])))
-            top3_hits.append(bool(gold_ids & set(retrieved_ids[:3])))
-            top5_hits.append(bool(gold_ids & set(retrieved_ids[:5])))
+            top1_hits.append(top1_hit)
+            top3_hits.append(top3_hit)
+            top5_hits.append(top5_hit)
 
         policy_label = get_policy_label(item or {})
         policy_hit = policy_label in KNOWLEDGE_POLICIES
         if policy_hit:
             policy_hits += 1
 
-            pred_ids = get_pred_case_ids(item or {}, use_response_fallback=use_response_fallback)
-            case_selection_hits_cond_policy.append(bool(gold_ids & pred_ids))
-
         pred_ids = get_pred_case_ids(item or {}, use_response_fallback=use_response_fallback)
+
+        # 只有当 top-5 已经包含 golden case，且系统进入知识型策略时，
+        # 才评价 policy 是否从候选案例里选中了正确 case_id。
+        if top5_hit and policy_hit:
+            selection_correct = bool(gold_ids & pred_ids)
+            case_selection_hits_cond_top5_policy.append(selection_correct)
+            if selection_correct:
+                case_selection_top5_policy_correct_count += 1
+
         if gold_ids & pred_ids:
             final_case_hits += 1
 
@@ -347,9 +365,12 @@ def eval_case_recommendation_turns(
         "knowledge_policy_hit_rate": safe_div(policy_hits, n_gold_case_turns),
 
         # 4. 案例选择准确率
-        # 分母：golden 案例推荐轮中，系统 policy 属于知识型策略的轮次
-        "case_selection_eval_count": len(case_selection_hits_cond_policy),
-        "case_selection_accuracy": mean(case_selection_hits_cond_policy),
+        # 分母：golden 案例推荐轮中，retrieved top-5 包含 golden case，
+        # 且系统 policy 属于知识型策略的轮次。
+        "case_selection_denominator": "gold_case_turn AND top5_contains_gold AND policy_in_{CaseRecommendation,ExplainedResponse}",
+        "case_selection_eval_count": len(case_selection_hits_cond_top5_policy),
+        "case_selection_correct_count": case_selection_top5_policy_correct_count,
+        "case_selection_accuracy": mean(case_selection_hits_cond_top5_policy),
 
         # 5. 最终案例推荐准确率
         # 分母：所有 golden 案例推荐轮
@@ -690,54 +711,53 @@ def evaluate(
     gold_turn_cases, gold_all_turn_keys, gold_events, dialog_gold_cases = build_gold_maps(gold_map)
 
     # =========================
-    # Evaluate
+    # Evaluate by metric groups
     # =========================
-    result: Dict[str, Any] = {}
-
-    result.update(
-        eval_case_recommendation_turns(
-            pred_by_key=pred_by_key,
-            gold_turn_cases=gold_turn_cases,
-            use_response_fallback=use_response_fallback,
-        )
+    case_recommendation_turn_metrics = eval_case_recommendation_turns(
+        pred_by_key=pred_by_key,
+        gold_turn_cases=gold_turn_cases,
+        use_response_fallback=use_response_fallback,
     )
 
-    result.update(
-        eval_all_turn_timing(
-            pred_by_key=pred_by_key,
-            gold_all_turn_keys=gold_all_turn_keys,
-            gold_turn_cases=gold_turn_cases,
-            use_response_fallback=use_response_fallback,
-        )
+    all_turn_timing_metrics = eval_all_turn_timing(
+        pred_by_key=pred_by_key,
+        gold_all_turn_keys=gold_all_turn_keys,
+        gold_turn_cases=gold_turn_cases,
+        use_response_fallback=use_response_fallback,
     )
 
-    result.update(
-        eval_recommendation_offset_and_dialog_success(
-            pred_by_key=pred_by_key,
-            gold_events=gold_events,
-            dialog_gold_cases=dialog_gold_cases,
-            use_response_fallback=use_response_fallback,
-        )
+    offset_and_dialog_success_metrics = eval_recommendation_offset_and_dialog_success(
+        pred_by_key=pred_by_key,
+        gold_events=gold_events,
+        dialog_gold_cases=dialog_gold_cases,
+        use_response_fallback=use_response_fallback,
     )
 
-    result.update(
-        eval_internal_diagnostics(
-            pred_by_key=pred_by_key,
-            gold_all_turn_keys=gold_all_turn_keys,
-            gold_turn_cases=gold_turn_cases,
-            use_response_fallback=use_response_fallback,
-        )
+    internal_diagnostic_metrics = eval_internal_diagnostics(
+        pred_by_key=pred_by_key,
+        gold_all_turn_keys=gold_all_turn_keys,
+        gold_turn_cases=gold_turn_cases,
+        use_response_fallback=use_response_fallback,
     )
 
-    result.update(eval_latency(preds))
+    latency_metrics = eval_latency(preds)
 
-    # =========================
-    # Basic counts
-    # =========================
-    result["pred_prefix_count"] = len(preds)
-    result["gold_dialog_count"] = len(gold_map)
-    result["gold_event_count"] = len(gold_events)
-    result["gold_turn_count"] = len(gold_all_turn_keys)
+    basic_counts = {
+        "pred_prefix_count": len(preds),
+        "gold_dialog_count": len(gold_map),
+        "gold_event_count": len(gold_events),
+        "gold_turn_count": len(gold_all_turn_keys),
+    }
+
+    # 分组展示，避免结果字典过长。
+    result: Dict[str, Any] = {
+        "basic_counts": basic_counts,
+        "case_recommendation_turn_metrics": case_recommendation_turn_metrics,
+        "all_turn_timing_metrics": all_turn_timing_metrics,
+        "offset_and_dialog_success_metrics": offset_and_dialog_success_metrics,
+        "internal_diagnostic_metrics": internal_diagnostic_metrics,
+        "latency_metrics": latency_metrics,
+    }
 
     return result
 
