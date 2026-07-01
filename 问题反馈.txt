@@ -1,657 +1,772 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Evaluation script for the new static multi-turn prediction format.
-
-Expected prediction sample format:
-{
-  "dialogue_id": 1,
-  "dialogue_input": {
-    "current_turn": "客服: ...",
-    "dialogue_history": ["用户: ..."]
-  },
-  "golden_response": "客服: ...",
-  "query": {"query": "..."},
-  "retriever": {
-    "selected_case_ids": ["KT...", ...],
-    "evidence": "case_id: KT...\n..."
-  },
-  "trigger": {"should_trigger": true},
-  "policy": {"dialogue_action": "ExplainedResponse", "case_id": "KT..."},
-  "response": {"response": "..."},
-  "latency": {"query_ms": 0, "retrieval_ms": 0, ...}
-}
-
-This script keeps the original metric set only:
-1) Case recommendation turn metrics
-2) All-turn recommendation timing metrics
-3) Offset and dialogue-level success metrics
-4) Internal diagnostic metrics
-5) Latency metrics
-
-It does not require external gold files because golden_response is embedded in each sample.
-If turn_id is absent, it infers turn_id by the order of samples within each dialogue_id.
-"""
+# static_multiturn/core/schema.py
 
 from __future__ import annotations
 
-import argparse
-import json
-import re
-from collections import Counter, defaultdict
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 
 
-# =========================
-# Constants
-# =========================
+# =========================================================
+# Basic Types
+# =========================================================
 
-KNOWLEDGE_POLICIES = {"CaseRecommendation", "ExplainedResponse"}
-CASE_RECOMMEND_POLICY = "CaseRecommendation"
+Role = Literal["user", "assistant"]
 
-# The strict KT-pattern is the safest fallback for Huawei case ids.
-KT_PATTERN = re.compile(r"\bKT\d{8}\b", re.IGNORECASE)
-CASE_ID_FIELD_PATTERN = re.compile(
-    r"(?:case[_\s-]*id|案例链接|案例ID|案例编号)\s*[:：]\s*\[?\s*([A-Za-z]{2}\d{8})\s*\]?",
-    re.IGNORECASE,
-)
+QueryMode = Literal["none", "reuse", "refine", "rewrite"]
 
+EvidenceMode = Literal[
+    "no_evidence_needed",
+    "retrieve_new_evidence",
+    "reuse_existing_evidence",
+]
 
-# =========================
-# Basic utilities
-# =========================
-
-def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    """Load a JSON list, a single JSON object, or JSONL records."""
-    path = Path(path)
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-
-    try:
-        obj = json.loads(text)
-        if isinstance(obj, list):
-            return [x for x in obj if isinstance(x, dict)]
-        if isinstance(obj, dict):
-            # Support either a single sample or a wrapper like {"predictions": [...]}.
-            for key in ("predictions", "data", "results", "items"):
-                if isinstance(obj.get(key), list):
-                    return [x for x in obj[key] if isinstance(x, dict)]
-            return [obj]
-    except json.JSONDecodeError:
-        pass
-
-    # JSONL fallback.
-    records: List[Dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # tolerate trailing comma in copied JSON fragments
-        if line.endswith(","):
-            line = line[:-1]
-        try:
-            obj = json.loads(line)
-            if isinstance(obj, dict):
-                records.append(obj)
-        except json.JSONDecodeError:
-            continue
-    if records:
-        return records
-
-    # Last-resort fallback for a copied list whose final item has a trailing comma.
-    repaired = re.sub(r",\s*([}\]])", r"\1", text)
-    try:
-        obj = json.loads(repaired)
-        if isinstance(obj, list):
-            return [x for x in obj if isinstance(x, dict)]
-        if isinstance(obj, dict):
-            return [obj]
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Cannot parse prediction file as JSON/JSONL: {path}") from exc
-
-    return []
+PolicyLabel = Literal[
+    "AskMissingSlot",
+    "AskClarification",
+    "ExplainedResponse",
+    "CaseRecommendation",
+    "Handoff",
+    "ProcessAcknowledgement",
+]
 
 
-def safe_div(num: float, den: float) -> float:
-    return float(num) / float(den) if den else 0.0
+ALLOWED_QUERY_MODES = {"none", "reuse", "refine", "rewrite"}
+
+ALLOWED_EVIDENCE_MODES = {
+    "no_evidence_needed",
+    "retrieve_new_evidence",
+    "reuse_existing_evidence",
+}
+
+ALLOWED_POLICY_LABELS = {
+    "AskMissingSlot",
+    "AskClarification",
+    "ExplainedResponse",
+    "CaseRecommendation",
+    "Handoff",
+    "ProcessAcknowledgement",
+}
 
 
-def mean(values: Sequence[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
+# =========================================================
+# Dialogue Schemas
+# =========================================================
 
-
-def prf(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
-    p = safe_div(tp, tp + fp)
-    r = safe_div(tp, tp + fn)
-    f1 = safe_div(2 * p * r, p + r)
-    return p, r, f1
-
-
-def normalize_case_id(case_id: Any) -> str:
-    if case_id is None:
-        return ""
-    s = str(case_id).strip().strip("[](){}'\"")
-    return s.upper()
-
-
-def normalize_dialogue_id(dialogue_id: Any) -> str:
-    if dialogue_id is None:
-        return ""
-    return str(dialogue_id).strip()
-
-
-def to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return value != 0
-    s = str(value).strip().lower()
-    return s in {"true", "1", "yes", "y", "是", "需要", "trigger"}
-
-
-def extract_case_ids(text: Any) -> Set[str]:
-    """Extract case ids from golden response or free text."""
-    if text is None:
-        return set()
-    s = str(text)
-    ids: Set[str] = set()
-    for m in CASE_ID_FIELD_PATTERN.finditer(s):
-        cid = normalize_case_id(m.group(1))
-        if cid:
-            ids.add(cid)
-    for m in KT_PATTERN.finditer(s):
-        cid = normalize_case_id(m.group(0))
-        if cid:
-            ids.add(cid)
-    return ids
-
-
-def first_non_empty(*values: Any) -> Any:
-    for v in values:
-        if v is not None and v != "":
-            return v
-    return None
-
-
-# =========================
-# Field extraction for new format
-# =========================
-
-def get_dialogue_id(item: Dict[str, Any]) -> str:
-    return normalize_dialogue_id(first_non_empty(item.get("dialogue_id"), item.get("dialog_id"), item.get("id")))
-
-
-def get_turn_id(item: Dict[str, Any]) -> Optional[int]:
-    for key in ("turn_id", "target_turn_id", "target_turn_index", "assistant_turn_id"):
-        if key in item and item[key] is not None:
-            try:
-                return int(item[key])
-            except (TypeError, ValueError):
-                continue
-    return None
-
-
-def get_golden_response(item: Dict[str, Any]) -> str:
-    # current_turn is a fallback only. golden_response is the true gold field.
-    dialogue_input = item.get("dialogue_input") or {}
-    return str(first_non_empty(item.get("golden_response"), dialogue_input.get("current_turn"), ""))
-
-
-def get_gold_case_ids(item: Dict[str, Any]) -> Set[str]:
-    return extract_case_ids(get_golden_response(item))
-
-
-def get_query_text(item: Dict[str, Any]) -> str:
-    q = item.get("query") or {}
-    if isinstance(q, dict):
-        return str(first_non_empty(q.get("query"), q.get("query_text"), "")).strip()
-    return str(q).strip()
-
-
-def get_selected_case_ids(item: Dict[str, Any]) -> List[str]:
-    retriever = item.get("retriever") or {}
-    if not isinstance(retriever, dict):
-        return []
-
-    selected = retriever.get("selected_case_ids")
-    if isinstance(selected, list):
-        ids = [normalize_case_id(x) for x in selected]
-        return [x for x in ids if x]
-
-    # Fallback 1: evidence text.
-    evidence = retriever.get("evidence", "")
-    ids = list(extract_case_ids(evidence))
-    if ids:
-        # Preserve evidence order if possible.
-        ordered: List[str] = []
-        seen: Set[str] = set()
-        for m in KT_PATTERN.finditer(str(evidence)):
-            cid = normalize_case_id(m.group(0))
-            if cid and cid not in seen:
-                ordered.append(cid)
-                seen.add(cid)
-        return ordered
-
-    # Fallback 2: case_diagnostics.
-    diagnostics = retriever.get("case_diagnostics")
-    if isinstance(diagnostics, list):
-        out: List[str] = []
-        for c in diagnostics:
-            if isinstance(c, dict):
-                cid = normalize_case_id(c.get("case_id"))
-                if cid:
-                    out.append(cid)
-        return out
-
-    return []
-
-
-def get_trigger_bool(item: Dict[str, Any]) -> bool:
-    trigger = item.get("trigger") or {}
-    if isinstance(trigger, dict) and "should_trigger" in trigger:
-        return to_bool(trigger.get("should_trigger"))
-    # If trigger is missing, use query existence as a weak fallback.
-    return bool(get_query_text(item))
-
-
-def get_policy_action(item: Dict[str, Any]) -> str:
-    policy = item.get("policy") or {}
-    if isinstance(policy, dict):
-        return str(first_non_empty(policy.get("dialogue_action"), policy.get("label"), "")).strip()
-    return ""
-
-
-def get_policy_case_id(item: Dict[str, Any]) -> str:
-    policy = item.get("policy") or {}
-    if isinstance(policy, dict):
-        return normalize_case_id(first_non_empty(policy.get("case_id"), policy.get("case"), ""))
-    return ""
-
-
-def get_pred_case_ids(item: Dict[str, Any]) -> Set[str]:
-    cid = get_policy_case_id(item)
-    return {cid} if cid else set()
-
-
-def explicit_case_recommendation(item: Dict[str, Any]) -> bool:
-    return get_policy_action(item) == CASE_RECOMMEND_POLICY and bool(get_policy_case_id(item))
-
-
-def knowledge_use_prediction(item: Dict[str, Any]) -> bool:
-    return get_policy_action(item) in KNOWLEDGE_POLICIES and bool(get_policy_case_id(item))
-
-
-def knowledge_link_triggered(item: Dict[str, Any]) -> bool:
-    return get_trigger_bool(item)
-
-
-# =========================
-# Preprocessing
-# =========================
-
-def assign_inferred_turn_ids(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+@dataclass
+class DialogueTurn:
     """
-    Ensure each item has an internal _eval_turn_id.
-    If turn_id is absent, infer it by input order within the same dialogue_id.
+    A normalized dialogue turn.
+
+    role:
+        - "user"
+        - "assistant"
+
+    text:
+        Raw utterance text.
     """
-    counters: Dict[str, int] = defaultdict(int)
-    processed: List[Dict[str, Any]] = []
-
-    for global_index, item in enumerate(items):
-        copied = dict(item)
-        did = get_dialogue_id(copied)
-        if not did:
-            did = f"__missing_dialogue_id_{global_index}"
-            copied["dialogue_id"] = did
-
-        explicit_turn_id = get_turn_id(copied)
-        if explicit_turn_id is None:
-            counters[did] += 1
-            turn_id = counters[did]
-        else:
-            turn_id = explicit_turn_id
-            counters[did] = max(counters[did], turn_id)
-
-        copied["_eval_dialogue_id"] = did
-        copied["_eval_turn_id"] = int(turn_id)
-        copied["_eval_global_index"] = global_index
-        processed.append(copied)
-
-    return processed
-
-
-def group_by_dialogue(items: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for item in items:
-        grouped[item["_eval_dialogue_id"]].append(item)
-    for did in grouped:
-        grouped[did].sort(key=lambda x: (x["_eval_turn_id"], x["_eval_global_index"]))
-    return dict(grouped)
-
-
-# =========================
-# Metric group 1: case recommendation turn metrics
-# =========================
-
-def eval_case_recommendation_turns(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    gold_case_items = [x for x in items if get_gold_case_ids(x)]
-    gold_case_turn_count = len(gold_case_items)
-
-    knowledge_trigger_hits = 0
-    retrieval_eval_count = 0
-    top1_hits = 0
-    top3_hits = 0
-    top5_hits = 0
-    knowledge_policy_hits = 0
-    case_selection_eval_count = 0
-    case_selection_hits = 0
-    final_case_hits = 0
-
-    for item in gold_case_items:
-        gold_ids = get_gold_case_ids(item)
-        pred_ids = get_pred_case_ids(item)
-        selected = get_selected_case_ids(item)
-        action = get_policy_action(item)
-
-        if knowledge_link_triggered(item):
-            knowledge_trigger_hits += 1
-            retrieval_eval_count += 1
-            if gold_ids.intersection(selected[:1]):
-                top1_hits += 1
-            if gold_ids.intersection(selected[:3]):
-                top3_hits += 1
-            if gold_ids.intersection(selected[:5]):
-                top5_hits += 1
-
-        if action in KNOWLEDGE_POLICIES:
-            knowledge_policy_hits += 1
-
-        if pred_ids:
-            case_selection_eval_count += 1
-            if gold_ids.intersection(pred_ids):
-                case_selection_hits += 1
-
-        if gold_ids.intersection(pred_ids):
-            final_case_hits += 1
-
-    return {
-        "gold_case_turn_count": gold_case_turn_count,
-        "knowledge_link_trigger_rate": safe_div(knowledge_trigger_hits, gold_case_turn_count),
-        "retrieval_eval_count": retrieval_eval_count,
-        "top1_effective_case_recall": safe_div(top1_hits, retrieval_eval_count),
-        "top3_effective_case_recall": safe_div(top3_hits, retrieval_eval_count),
-        "top5_effective_case_recall": safe_div(top5_hits, retrieval_eval_count),
-        "knowledge_policy_hit_rate": safe_div(knowledge_policy_hits, gold_case_turn_count),
-        "case_selection_eval_count": case_selection_eval_count,
-        "case_selection_accuracy": safe_div(case_selection_hits, case_selection_eval_count),
-        "final_case_recommendation_accuracy": safe_div(final_case_hits, gold_case_turn_count),
-    }
-
-
-# =========================
-# Metric group 2: all-turn timing metrics
-# =========================
-
-def eval_all_turn_timing(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    case_rec_tp = case_rec_fp = case_rec_fn = 0
-    knowledge_tp = knowledge_fp = knowledge_fn = 0
-    early_count = 0
-    missed_count = 0
-    gold_positive_count = 0
-    gold_negative_count = 0
-
-    for item in items:
-        gold_positive = bool(get_gold_case_ids(item))
-        pred_has_case = bool(get_pred_case_ids(item))
-        pred_case_rec = explicit_case_recommendation(item)
-        pred_knowledge_use = knowledge_use_prediction(item)
-
-        if gold_positive:
-            gold_positive_count += 1
-        else:
-            gold_negative_count += 1
-
-        # Explicit case recommendation timing: CaseRecommendation + case_id.
-        if pred_case_rec and gold_positive:
-            case_rec_tp += 1
-        elif pred_case_rec and not gold_positive:
-            case_rec_fp += 1
-        elif (not pred_case_rec) and gold_positive:
-            case_rec_fn += 1
-
-        # Knowledge-use timing: {CaseRecommendation, ExplainedResponse} + case_id.
-        if pred_knowledge_use and gold_positive:
-            knowledge_tp += 1
-        elif pred_knowledge_use and not gold_positive:
-            knowledge_fp += 1
-        elif (not pred_knowledge_use) and gold_positive:
-            knowledge_fn += 1
-
-        # Original early/missed recommendation definitions use case_id existence.
-        if (not gold_positive) and pred_has_case:
-            early_count += 1
-        if gold_positive and (not pred_has_case):
-            missed_count += 1
-
-    case_p, case_r, case_f1 = prf(case_rec_tp, case_rec_fp, case_rec_fn)
-    knowledge_p, knowledge_r, knowledge_f1 = prf(knowledge_tp, knowledge_fp, knowledge_fn)
-
-    return {
-        "all_turn_count": len(items),
-        "gold_positive_turn_count": gold_positive_count,
-        "gold_negative_turn_count": gold_negative_count,
-        "case_recommend_timing_precision": case_p,
-        "case_recommend_timing_recall": case_r,
-        "case_recommend_timing_f1": case_f1,
-        "case_recommend_timing_tp": case_rec_tp,
-        "case_recommend_timing_fp": case_rec_fp,
-        "case_recommend_timing_fn": case_rec_fn,
-        "knowledge_use_timing_precision": knowledge_p,
-        "knowledge_use_timing_recall": knowledge_r,
-        "knowledge_use_timing_f1": knowledge_f1,
-        "knowledge_use_timing_tp": knowledge_tp,
-        "knowledge_use_timing_fp": knowledge_fp,
-        "knowledge_use_timing_fn": knowledge_fn,
-        "early_recommendation_rate": safe_div(early_count, gold_negative_count),
-        "missed_recommendation_rate": safe_div(missed_count, gold_positive_count),
-    }
-
-
-# =========================
-# Metric group 3: offset and dialogue success
-# =========================
-
-def eval_offset_and_dialog_success(grouped: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-    gold_event_count = 0
-    matched_offsets: List[int] = []
-    dialog_success_eval_count = 0
-    dialog_success_count = 0
-
-    for did, turns in grouped.items():
-        gold_events: List[Tuple[int, str]] = []
-        pred_events: List[Tuple[int, str]] = []
-
-        for item in turns:
-            tid = int(item["_eval_turn_id"])
-            for cid in get_gold_case_ids(item):
-                gold_events.append((tid, cid))
-            for cid in get_pred_case_ids(item):
-                pred_events.append((tid, cid))
-
-        if gold_events:
-            dialog_success_eval_count += 1
-            gold_case_set = {cid for _, cid in gold_events}
-            pred_case_set = {cid for _, cid in pred_events}
-            if gold_case_set.intersection(pred_case_set):
-                dialog_success_count += 1
-
-        for gold_tid, gold_cid in gold_events:
-            gold_event_count += 1
-            candidate_offsets = [pred_tid - gold_tid for pred_tid, pred_cid in pred_events if pred_cid == gold_cid]
-            if candidate_offsets:
-                best_offset = min(candidate_offsets, key=lambda x: (abs(x), x))
-                matched_offsets.append(best_offset)
-
-    matched_count = len(matched_offsets)
-    exact = sum(1 for x in matched_offsets if x == 0)
-    early = sum(1 for x in matched_offsets if x < 0)
-    delayed = sum(1 for x in matched_offsets if x > 0)
-
-    return {
-        "recommendation_offset_eval_count": gold_event_count,
-        "recommendation_offset_coverage": safe_div(matched_count, gold_event_count),
-        "avg_abs_recommendation_offset": mean([abs(x) for x in matched_offsets]),
-        "avg_signed_recommendation_offset": mean(matched_offsets),
-        "exact_timing_ratio_among_matched": safe_div(exact, matched_count),
-        "early_timing_ratio_among_matched": safe_div(early, matched_count),
-        "delayed_timing_ratio_among_matched": safe_div(delayed, matched_count),
-        "dialog_success_eval_count": dialog_success_eval_count,
-        "dialog_level_final_success_rate": safe_div(dialog_success_count, dialog_success_eval_count),
-    }
-
-
-# =========================
-# Metric group 4: internal diagnostics
-# =========================
-
-def eval_internal_diagnostics(items: List[Dict[str, Any]], grouped: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-    pred_case_output_count = 0
-    invalid_case_count = 0
-    over_trigger_count = 0
-    gold_negative_count = 0
-
-    for item in items:
-        gold_positive = bool(get_gold_case_ids(item))
-        if not gold_positive:
-            gold_negative_count += 1
-            if knowledge_link_triggered(item):
-                over_trigger_count += 1
-
-        selected = set(get_selected_case_ids(item))
-        for cid in get_pred_case_ids(item):
-            pred_case_output_count += 1
-            if cid not in selected:
-                invalid_case_count += 1
-
-    duplicate_pred_count = 0
-    total_pred_case_events = 0
-    state_switch_count = 0
-    state_pair_count = 0
-
-    for did, turns in grouped.items():
-        case_counter: Counter[str] = Counter()
-        states: List[bool] = []
-
-        for item in turns:
-            states.append(knowledge_link_triggered(item))
-            for cid in get_pred_case_ids(item):
-                case_counter[cid] += 1
-                total_pred_case_events += 1
-
-        duplicate_pred_count += sum(max(0, count - 1) for count in case_counter.values())
-
-        for prev, cur in zip(states, states[1:]):
-            state_pair_count += 1
-            if prev != cur:
-                state_switch_count += 1
-
-    return {
-        "pred_case_output_count": pred_case_output_count,
-        "invalid_case_id_rate": safe_div(invalid_case_count, pred_case_output_count),
-        "over_knowledge_trigger_rate": safe_div(over_trigger_count, gold_negative_count),
-        "repeated_recommendation_rate": safe_div(duplicate_pred_count, total_pred_case_events),
-        "state_jitter_rate": safe_div(state_switch_count, state_pair_count),
-    }
-
-
-# =========================
-# Metric group 5: latency
-# =========================
-
-def eval_latency(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    fields = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
-    values: Dict[str, List[float]] = {field: [] for field in fields}
-
-    for item in items:
-        latency = item.get("latency") or {}
-        if not isinstance(latency, dict):
-            continue
-        for field in fields:
-            v = latency.get(field)
-            if isinstance(v, (int, float)):
-                values[field].append(float(v))
-            else:
-                try:
-                    values[field].append(float(v))
-                except (TypeError, ValueError):
-                    pass
-
-    return {f"avg_{field}": mean(values[field]) for field in fields}
-
-
-# =========================
-# Main evaluation
-# =========================
-
-def evaluate(pred_path: str | Path, max_dialogues: Optional[int] = None) -> Dict[str, Any]:
-    raw_items = load_json_or_jsonl(pred_path)
-    items = assign_inferred_turn_ids(raw_items)
-
-    if max_dialogues is not None and max_dialogues > 0:
-        allowed_dialogues: Set[str] = set()
-        filtered: List[Dict[str, Any]] = []
-        for item in items:
-            did = item["_eval_dialogue_id"]
-            if did not in allowed_dialogues:
-                if len(allowed_dialogues) >= max_dialogues:
-                    continue
-                allowed_dialogues.add(did)
-            filtered.append(item)
-        items = filtered
-
-    grouped = group_by_dialogue(items)
-
-    gold_turn_count = len(items)
-    gold_event_count = sum(len(get_gold_case_ids(x)) for x in items)
-
-    return {
-        "basic_counts": {
-            "pred_prefix_count": len(items),
-            "dialogue_count": len(grouped),
-            "gold_event_count": gold_event_count,
-            "gold_turn_count": gold_turn_count,
-        },
-        "case_recommendation_turn_metrics": eval_case_recommendation_turns(items),
-        "all_turn_timing_metrics": eval_all_turn_timing(items),
-        "offset_and_dialog_success_metrics": eval_offset_and_dialog_success(grouped),
-        "internal_diagnostic_metrics": eval_internal_diagnostics(items, grouped),
-        "latency_metrics": eval_latency(items),
-    }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate new static multi-turn prediction format.")
-    parser.add_argument("--pred_path", required=True, help="Path to prediction JSON/JSONL file.")
-    parser.add_argument("--output_path", default="", help="Optional path to save evaluation JSON.")
-    parser.add_argument("--max_dialogues", type=int, default=0, help="Optional max dialogue count. 0 means all.")
-    parser.add_argument("--indent", type=int, default=2, help="JSON output indent.")
-    args = parser.parse_args()
-
-    result = evaluate(
-        pred_path=args.pred_path,
-        max_dialogues=args.max_dialogues if args.max_dialogues > 0 else None,
-    )
-
-    text = json.dumps(result, ensure_ascii=False, indent=args.indent)
-    print(text)
-
-    if args.output_path:
-        Path(args.output_path).write_text(text + "\n", encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()
+
+    role: Role
+    text: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Dialogue:
+    """
+    A full human-human dialogue.
+
+    turns should already be normalized into DialogueTurn.
+    """
+
+    dialog_id: str
+    turns: List[DialogueTurn]
+
+    def assistant_turn_count(self) -> int:
+        return sum(1 for t in self.turns if t.role == "assistant")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PrefixSample:
+    """
+    A static multi-turn prefix sample.
+
+    For assistant target turn n:
+
+        history =
+            user_1, assistant_1, ..., user_{n-1}, assistant_{n-1}, user_n
+
+        gold_response =
+            assistant_n
+
+    The current gold_response must NOT be included in history.
+    """
+
+    dialog_id: str
+    turn_id: int
+    history: List[DialogueTurn]
+    target_role: Role
+    gold_response: str
+    target_turn_index: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class StaticPrefixInput:
+    """
+    A clearer split of PrefixSample for static prefix PE.
+
+    completed_history:
+        Fully completed golden history before the current user input:
+        user_1, assistant_1, ..., user_{n-1}, assistant_{n-1}
+
+    current_user_input:
+        The user utterance before current assistant target turn n.
+
+    golden_response:
+        The current assistant_n response, used only for evaluation.
+    """
+
+    dialog_id: str
+    turn_id: int
+    completed_history: List[DialogueTurn]
+    current_user_input: str
+    golden_response: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Query Schemas
+# =========================================================
+
+@dataclass
+class QueryTrajectoryStep:
+    """
+    One query decision step for a specific assistant target turn.
+    """
+
+    turn_id: int
+    query_mode: str
+    query_text: str = ""
+    reason: str = ""
+
+    def is_active(self) -> bool:
+        return self.query_mode != "none" and bool(self.query_text.strip())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class QueryTrajectoryOutput:
+    """
+    A query trajectory.
+
+    In full-dialogue annotation:
+        trajectory = turn 1...T
+
+    In static prefix PE:
+        trajectory = turn 1...n
+        where turn 1...n-1 are reconstructed history states,
+        and turn n is current prediction.
+
+    In prediction-only mode:
+        trajectory may contain only one step, i.e. turn n.
+    """
+
+    trajectory: List[QueryTrajectoryStep] = field(default_factory=list)
+
+    def get_step(self, turn_id: int) -> Optional[QueryTrajectoryStep]:
+        for step in self.trajectory:
+            if step.turn_id == turn_id:
+                return step
+        return None
+
+    def last_step(self) -> Optional[QueryTrajectoryStep]:
+        if not self.trajectory:
+            return None
+        return self.trajectory[-1]
+
+    def current_step(self, turn_id: int) -> Optional[QueryTrajectoryStep]:
+        return self.get_step(turn_id)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Retrieval Schemas
+# =========================================================
+
+@dataclass
+class RetrievalCase:
+    """
+    A normalized retrieved case.
+    """
+
+    case_id: str
+    title: str = ""
+    content: str = ""
+    keywords: List[str] = field(default_factory=list)
+    score: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RetrievalOutput:
+    """
+    Retrieval result for one target turn.
+    """
+
+    retrieved_cases: List[RetrievalCase] = field(default_factory=list)
+
+    raw_evidence: str = ""
+    selected_case_ids: List[str] = field(default_factory=list)
+    dropped_case_ids: List[str] = field(default_factory=list)
+    selection_relevances: Dict[str, str] = field(default_factory=dict)
+    selection_failed: bool = False
+    diagnostics: List[Dict[str, Any]] = field(default_factory=list)
+
+    def case_ids(self) -> List[str]:
+        if self.selected_case_ids:
+            return self.selected_case_ids
+        return [case.case_id for case in self.retrieved_cases if case.case_id]
+
+    def contains_case(self, case_id: str) -> bool:
+        return case_id in set(self.case_ids())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RetrievalByTurn:
+    """
+    Retrieval results indexed by assistant target turn id.
+
+    Used mainly for full-dialogue annotation, where each historical
+    query step may have its own retrieval evidence.
+    """
+
+    by_turn: Dict[int, RetrievalOutput] = field(default_factory=dict)
+
+    def get(self, turn_id: int) -> RetrievalOutput:
+        return self.by_turn.get(turn_id, RetrievalOutput())
+
+    def set(self, turn_id: int, output: RetrievalOutput) -> None:
+        self.by_turn[turn_id] = output
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            str(turn_id): output.to_dict()
+            for turn_id, output in self.by_turn.items()
+        }
+
+
+# =========================================================
+# Trigger Schemas
+# =========================================================
+
+@dataclass
+class TriggerTrajectoryStep:
+    """
+    One trigger / evidence-use decision step.
+    """
+
+    turn_id: int
+    trigger: bool
+    evidence_mode: str
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class TriggerTrajectoryOutput:
+    """
+    Trigger trajectory.
+
+    Same usage pattern as QueryTrajectoryOutput.
+    """
+
+    trajectory: List[TriggerTrajectoryStep] = field(default_factory=list)
+
+    def get_step(self, turn_id: int) -> Optional[TriggerTrajectoryStep]:
+        for step in self.trajectory:
+            if step.turn_id == turn_id:
+                return step
+        return None
+
+    def last_step(self) -> Optional[TriggerTrajectoryStep]:
+        if not self.trajectory:
+            return None
+        return self.trajectory[-1]
+
+    def current_step(self, turn_id: int) -> Optional[TriggerTrajectoryStep]:
+        return self.get_step(turn_id)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Policy Schemas
+# =========================================================
+
+@dataclass
+class PolicyTrajectoryStep:
+    """
+    One policy decision step.
+    """
+
+    turn_id: int
+    label: str
+    case_id: str = ""
+    reason: str = ""
+
+    def uses_case(self) -> bool:
+        return bool(self.case_id.strip())
+
+    def is_knowledge_policy(self) -> bool:
+        return self.label in {"CaseRecommendation", "ExplainedResponse"}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class PolicyTrajectoryOutput:
+    """
+    Policy trajectory.
+
+    Same usage pattern as QueryTrajectoryOutput.
+    """
+
+    trajectory: List[PolicyTrajectoryStep] = field(default_factory=list)
+
+    def get_step(self, turn_id: int) -> Optional[PolicyTrajectoryStep]:
+        for step in self.trajectory:
+            if step.turn_id == turn_id:
+                return step
+        return None
+
+    def last_step(self) -> Optional[PolicyTrajectoryStep]:
+        if not self.trajectory:
+            return None
+        return self.trajectory[-1]
+
+    def current_step(self, turn_id: int) -> Optional[PolicyTrajectoryStep]:
+        return self.get_step(turn_id)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Response Schema
+# =========================================================
+
+@dataclass
+class ResponseOutput:
+    """
+    Generated assistant response for the current target turn.
+    """
+
+    response: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Latency Schema
+# =========================================================
+
+@dataclass
+class Latency:
+    """
+    Latency record.
+
+    In global batch mode, these values may be amortized average latency.
+    In single-sample mode, they can be real per-sample latency.
+    """
+
+    query_ms: int = 0
+    retrieval_ms: int = 0
+    trigger_ms: int = 0
+    policy_ms: int = 0
+    response_ms: int = 0
+    total_ms: int = 0
+
+    selection_ms: int = 0
+    compress_ms: int = 0
+    keywords_ms: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Prompt Bundle Schemas
+# =========================================================
+
+@dataclass
+class AnnotationPromptBundle:
+    """
+    Prompts for annotation / reconstruction.
+
+    Used for:
+        1. full-dialogue annotation
+        2. prefix history reconstruction in static PE
+
+    Input:
+        already happened dialogue segment
+
+    Output:
+        trajectory for all completed assistant turns in that segment.
+    """
+
+    query: str
+    trigger: str
+    policy: str
+
+
+@dataclass
+class PredictionPromptBundle:
+    """
+    Prompts for next-step prediction.
+
+    Used for:
+        1. static prefix PE current turn prediction
+        2. later dynamic multi-turn prediction
+        3. SFT data generation format
+
+    Input:
+        completed history dialogue
+        historical trajectories
+        current user input
+        current retrieval evidence
+
+    Output:
+        current target turn query / trigger / policy / response.
+    """
+
+    query: str
+    trigger: str
+    policy: str
+    response: str
+
+
+@dataclass
+class PromptBundle:
+    """
+    Combined prompt bundle.
+    """
+
+    annotation: AnnotationPromptBundle
+    prediction: PredictionPromptBundle
+
+
+# =========================================================
+# Full-dialogue Annotation Output
+# =========================================================
+
+@dataclass
+class FullDialogueAnnotation:
+    """
+    Full-dialogue reference trajectory.
+
+    This is used for training data construction.
+
+    It is NOT directly used as static PE prediction result.
+    """
+
+    dialog_id: str
+    turn_count: int
+    dialogue: Dialogue
+
+    query_trajectory: QueryTrajectoryOutput
+    retrieval_by_turn: RetrievalByTurn
+    trigger_trajectory: TriggerTrajectoryOutput
+    policy_trajectory: PolicyTrajectoryOutput
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Static Prefix PE Output
+# =========================================================
+
+@dataclass
+class HistoryState:
+    """
+    Reconstructed state memory from completed golden history.
+
+    For predicting turn n+1, this contains trajectories for turn 1...n.
+    """
+
+    query_trajectory: QueryTrajectoryOutput = field(default_factory=QueryTrajectoryOutput)
+    retrieval_by_turn: RetrievalByTurn = field(default_factory=RetrievalByTurn)
+    trigger_trajectory: TriggerTrajectoryOutput = field(default_factory=TriggerTrajectoryOutput)
+    policy_trajectory: PolicyTrajectoryOutput = field(default_factory=PolicyTrajectoryOutput)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CurrentTurnPrediction:
+    """
+    Prediction for one current target assistant turn.
+
+    This should contain only the current target turn decision.
+    """
+
+    turn_id: int
+
+    query: Optional[QueryTrajectoryStep] = None
+    retrieval: RetrievalOutput = field(default_factory=RetrievalOutput)
+    trigger: Optional[TriggerTrajectoryStep] = None
+    policy: Optional[PolicyTrajectoryStep] = None
+    response: ResponseOutput = field(default_factory=ResponseOutput)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class StaticPrefixPEResult:
+    """
+    Static prefix-level PE result.
+
+    For target assistant turn n:
+
+        history_state:
+            reconstructed from completed golden history before current user input.
+
+        current_prediction:
+            predicted for target turn n.
+
+        golden_response:
+            assistant_n, used only for evaluation.
+    """
+
+    dialog_id: str
+    turn_id: int
+
+    dialogue_input: StaticPrefixInput
+    history_state: HistoryState
+    current_prediction: CurrentTurnPrediction
+
+    golden_response: str
+    latency: Latency = field(default_factory=Latency)
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Legacy-compatible Prefix Result
+# =========================================================
+
+@dataclass
+class PrefixResult:
+    """
+    Legacy-compatible prefix result.
+
+    This matches the older style:
+
+        query_output: trajectory 1...n
+        retrieval_output: retrieval for current turn n
+        trigger_output: trajectory 1...n
+        policy_output: trajectory 1...n
+        response_output: response for current turn n
+
+    Keep this for compatibility with older evaluators.
+    """
+
+    dialog_id: str
+    turn_id: int
+    prefix_sample: PrefixSample
+
+    query_output: QueryTrajectoryOutput
+    retrieval_output: RetrievalOutput
+    trigger_output: TriggerTrajectoryOutput
+    policy_output: PolicyTrajectoryOutput
+    response_output: ResponseOutput
+
+    latency: Latency = field(default_factory=Latency)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def current_query_step(self) -> Optional[QueryTrajectoryStep]:
+        return self.query_output.get_step(self.turn_id)
+
+    def current_trigger_step(self) -> Optional[TriggerTrajectoryStep]:
+        return self.trigger_output.get_step(self.turn_id)
+
+    def current_policy_step(self) -> Optional[PolicyTrajectoryStep]:
+        return self.policy_output.get_step(self.turn_id)
+
+    def to_static_prefix_pe_result(self) -> StaticPrefixPEResult:
+        """
+        Convert legacy PrefixResult into the clearer StaticPrefixPEResult format.
+
+        Since legacy format does not explicitly split completed_history and
+        current_user_input, this method uses best-effort reconstruction.
+        The caller should prefer building StaticPrefixInput directly in prefix.py.
+        """
+
+        current_query = self.current_query_step()
+        current_trigger = self.current_trigger_step()
+        current_policy = self.current_policy_step()
+
+        history_state = HistoryState(
+            query_trajectory=QueryTrajectoryOutput(
+                trajectory=[
+                    step
+                    for step in self.query_output.trajectory
+                    if step.turn_id < self.turn_id
+                ]
+            ),
+            trigger_trajectory=TriggerTrajectoryOutput(
+                trajectory=[
+                    step
+                    for step in self.trigger_output.trajectory
+                    if step.turn_id < self.turn_id
+                ]
+            ),
+            policy_trajectory=PolicyTrajectoryOutput(
+                trajectory=[
+                    step
+                    for step in self.policy_output.trajectory
+                    if step.turn_id < self.turn_id
+                ]
+            ),
+        )
+
+        current_prediction = CurrentTurnPrediction(
+            turn_id=self.turn_id,
+            query=current_query,
+            retrieval=self.retrieval_output,
+            trigger=current_trigger,
+            policy=current_policy,
+            response=self.response_output,
+        )
+
+        dialogue_input = StaticPrefixInput(
+            dialog_id=self.dialog_id,
+            turn_id=self.turn_id,
+            completed_history=[],
+            current_user_input="",
+            golden_response=self.prefix_sample.gold_response,
+        )
+
+        return StaticPrefixPEResult(
+            dialog_id=self.dialog_id,
+            turn_id=self.turn_id,
+            dialogue_input=dialogue_input,
+            history_state=history_state,
+            current_prediction=current_prediction,
+            golden_response=self.prefix_sample.gold_response,
+            latency=self.latency,
+            metadata=self.metadata,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# SFT Dataset Schemas
+# =========================================================
+
+@dataclass
+class ModuleSFTExample:
+    """
+    Generic module-level SFT example.
+
+    module:
+        query / trigger / policy / response
+
+    input:
+        Serialized or structured input.
+
+    output:
+        Structured label or response text.
+    """
+
+    example_id: str
+    dialog_id: str
+    turn_id: int
+    module: str
+
+    instruction: str
+    input: Dict[str, Any]
+    output: Any
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class TrajectorySFTExample:
+    """
+    Trajectory-level SFT example.
+
+    Used for training a model to output multiple module states jointly
+    or to produce a structured current-turn decision.
+    """
+
+    example_id: str
+    dialog_id: str
+    turn_id: int
+
+    instruction: str
+    input: Dict[str, Any]
+    output: Dict[str, Any]
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# =========================================================
+# Utility Serialization
+# =========================================================
+
+def dataclass_to_dict(obj: Any) -> Dict[str, Any]:
+    """
+    Convert dataclass object to dict.
+
+    This is a thin wrapper so other modules do not need to import asdict.
+    """
+
+    return asdict(obj)
+
+
+def list_to_dict(items: List[Any]) -> List[Dict[str, Any]]:
+    """
+    Convert a list of dataclass objects to list of dicts.
+    """
+
+    return [asdict(item) for item in items]
