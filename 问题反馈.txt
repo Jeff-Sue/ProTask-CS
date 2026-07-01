@@ -1,795 +1,657 @@
-# Version: v3_conditional_policy_hit_rate
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Evaluation script for the new static multi-turn prediction format.
+
+Expected prediction sample format:
+{
+  "dialogue_id": 1,
+  "dialogue_input": {
+    "current_turn": "客服: ...",
+    "dialogue_history": ["用户: ..."]
+  },
+  "golden_response": "客服: ...",
+  "query": {"query": "..."},
+  "retriever": {
+    "selected_case_ids": ["KT...", ...],
+    "evidence": "case_id: KT...\n..."
+  },
+  "trigger": {"should_trigger": true},
+  "policy": {"dialogue_action": "ExplainedResponse", "case_id": "KT..."},
+  "response": {"response": "..."},
+  "latency": {"query_ms": 0, "retrieval_ms": 0, ...}
+}
+
+This script keeps the original metric set only:
+1) Case recommendation turn metrics
+2) All-turn recommendation timing metrics
+3) Offset and dialogue-level success metrics
+4) Internal diagnostic metrics
+5) Latency metrics
+
+It does not require external gold files because golden_response is embedded in each sample.
+If turn_id is absent, it infers turn_id by the order of samples within each dialogue_id.
+"""
+
+from __future__ import annotations
+
+import argparse
 import json
 import re
-import numpy as np
-from collections import defaultdict, Counter
-from typing import Dict, List, Tuple, Any, Set, Optional
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-# =========================================================
-# 1. Regex and basic utilities
-# =========================================================
+# =========================
+# Constants
+# =========================
 
-# 兼容：
-# 案例链接: [ABC123]
-# 案例链接：ABC123
-# case_id: ABC123
-CASE_PATTERNS = [
-    re.compile(r"案例链接[:：]\s*\[?([A-Za-z0-9_\-]+)\]?", re.I),
-    re.compile(r"case[_\s-]*id[:：]\s*\[?([A-Za-z0-9_\-]+)\]?", re.I),
-]
-
-
-KNOWLEDGE_QUERY_MODES = {"rewrite", "refine", "reuse"}
 KNOWLEDGE_POLICIES = {"CaseRecommendation", "ExplainedResponse"}
+CASE_RECOMMEND_POLICY = "CaseRecommendation"
+
+# The strict KT-pattern is the safest fallback for Huawei case ids.
+KT_PATTERN = re.compile(r"\bKT\d{8}\b", re.IGNORECASE)
+CASE_ID_FIELD_PATTERN = re.compile(
+    r"(?:case[_\s-]*id|案例链接|案例ID|案例编号)\s*[:：]\s*\[?\s*([A-Za-z]{2}\d{8})\s*\]?",
+    re.IGNORECASE,
+)
 
 
-def normalize_case_id(case_id: Any) -> str:
-    """统一 case_id 格式，便于比较。"""
-    if case_id is None:
-        return ""
-    text = str(case_id).strip()
-    text = text.strip("[](){}，,。;； ")
-    return text.upper()
+# =========================
+# Basic utilities
+# =========================
 
-
-def extract_case_ids(text: str) -> List[str]:
-    """从客服文本中抽取 case_id。"""
+def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
+    """Load a JSON list, a single JSON object, or JSONL records."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8").strip()
     if not text:
         return []
 
-    ids: List[str] = []
-    for pattern in CASE_PATTERNS:
-        ids.extend(pattern.findall(text))
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+        if isinstance(obj, dict):
+            # Support either a single sample or a wrapper like {"predictions": [...]}.
+            for key in ("predictions", "data", "results", "items"):
+                if isinstance(obj.get(key), list):
+                    return [x for x in obj[key] if isinstance(x, dict)]
+            return [obj]
+    except json.JSONDecodeError:
+        pass
 
-    # 去重但保序
-    seen = set()
-    normalized = []
-    for cid in ids:
-        cid = normalize_case_id(cid)
-        if cid and cid not in seen:
-            seen.add(cid)
-            normalized.append(cid)
-    return normalized
+    # JSONL fallback.
+    records: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # tolerate trailing comma in copied JSON fragments
+        if line.endswith(","):
+            line = line[:-1]
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                records.append(obj)
+        except json.JSONDecodeError:
+            continue
+    if records:
+        return records
+
+    # Last-resort fallback for a copied list whose final item has a trailing comma.
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    try:
+        obj = json.loads(repaired)
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+        if isinstance(obj, dict):
+            return [obj]
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Cannot parse prediction file as JSON/JSONL: {path}") from exc
+
+    return []
 
 
 def safe_div(num: float, den: float) -> float:
-    return float(num / den) if den else 0.0
+    return float(num) / float(den) if den else 0.0
 
 
-def mean(values: List[Any]) -> float:
-    return float(np.mean(values)) if values else 0.0
+def mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
 
 
-def prf(tp: int, fp: int, fn: int) -> Dict[str, float]:
-    precision = safe_div(tp, tp + fp)
-    recall = safe_div(tp, tp + fn)
-    f1 = safe_div(2 * precision * recall, precision + recall)
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "tp": int(tp),
-        "fp": int(fp),
-        "fn": int(fn),
-    }
+def prf(tp: int, fp: int, fn: int) -> Tuple[float, float, float]:
+    p = safe_div(tp, tp + fp)
+    r = safe_div(tp, tp + fn)
+    f1 = safe_div(2 * p * r, p + r)
+    return p, r, f1
 
 
-# =========================================================
-# 2. GOLD extraction
-# =========================================================
-
-def iter_gold_assistant_turns(gold_dialog: Dict[str, Any]):
-    """
-    Yield:
-        (turn_id, assistant_text)
-
-    兼容 gold_dialog["text"] = [{"用户": ...}, {"客服": ...}, ...]
-    也兼容 [{"role": "assistant", "text": "..."}]
-    """
-    turns = gold_dialog.get("text", gold_dialog.get("turns", []))
-    assistant_turn_id = 0
-
-    for item in turns:
-        if not isinstance(item, dict):
-            continue
-
-        if "客服" in item:
-            assistant_turn_id += 1
-            yield assistant_turn_id, str(item.get("客服", ""))
-            continue
-
-        role = str(item.get("role", "")).strip()
-        if role in {"assistant", "客服", "bot", "system"}:
-            assistant_turn_id += 1
-            yield assistant_turn_id, str(item.get("text", ""))
+def normalize_case_id(case_id: Any) -> str:
+    if case_id is None:
+        return ""
+    s = str(case_id).strip().strip("[](){}'\"")
+    return s.upper()
 
 
-def build_gold_maps(gold_map: Dict[str, Any]):
-    """
-    Returns:
-        gold_turn_cases:
-            {(dialog_id, turn_id): set(case_id)}
-        gold_all_turn_keys:
-            {(dialog_id, turn_id)}
-        gold_events:
-            [(dialog_id, turn_id, case_id)]
-        dialog_gold_cases:
-            {dialog_id: set(case_id)}
-    """
-    gold_turn_cases: Dict[Tuple[str, int], Set[str]] = defaultdict(set)
-    gold_all_turn_keys: Set[Tuple[str, int]] = set()
-    gold_events: List[Tuple[str, int, str]] = []
-    dialog_gold_cases: Dict[str, Set[str]] = defaultdict(set)
-
-    for dialog_id, gold_dialog in gold_map.items():
-        for turn_id, assistant_text in iter_gold_assistant_turns(gold_dialog):
-            key = (dialog_id, turn_id)
-            gold_all_turn_keys.add(key)
-
-            case_ids = extract_case_ids(assistant_text)
-            for cid in case_ids:
-                gold_turn_cases[key].add(cid)
-                gold_events.append((dialog_id, turn_id, cid))
-                dialog_gold_cases[dialog_id].add(cid)
-
-    return gold_turn_cases, gold_all_turn_keys, gold_events, dialog_gold_cases
+def normalize_dialogue_id(dialogue_id: Any) -> str:
+    if dialogue_id is None:
+        return ""
+    return str(dialogue_id).strip()
 
 
-# =========================================================
-# 3. PRED extraction
-# =========================================================
-
-def index_preds(preds: List[Dict[str, Any]]) -> Dict[Tuple[str, int], Dict[str, Any]]:
-    """将预测结果按 (dialog_id, turn_id) 建索引。"""
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]] = {}
-
-    for item in preds:
-        try:
-            dialog_id = str(item["dialog_id"])
-            turn_id = int(item["turn_id"])
-            pred_by_key[(dialog_id, turn_id)] = item
-        except Exception:
-            continue
-
-    return pred_by_key
-
-
-def get_current_step(item: Dict[str, Any], output_key: str) -> Dict[str, Any]:
-    """
-    从 query_output / trigger_output / policy_output 里取当前 turn 的 step。
-    增量式结果中 trajectory 是 accumulated trajectory，因此优先按 item["turn_id"] 找；
-    找不到则取最后一项。
-    """
-    turn_id = int(item.get("turn_id", -1))
-    output = item.get(output_key, {}) or {}
-    trajectory = output.get("trajectory", []) or []
-
-    if not isinstance(trajectory, list) or not trajectory:
-        return {}
-
-    for step in trajectory:
-        try:
-            if int(step.get("turn_id", -999)) == turn_id:
-                return step
-        except Exception:
-            continue
-
-    return trajectory[-1] if isinstance(trajectory[-1], dict) else {}
-
-
-def get_query_mode(item: Dict[str, Any]) -> str:
-    step = get_current_step(item, "query_output")
-    return str(step.get("query_mode", "") or "").strip()
-
-
-def get_trigger(item: Dict[str, Any]) -> bool:
-    step = get_current_step(item, "trigger_output")
-    value = step.get("trigger", False)
-
+def to_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes", "是"}
-
-    return bool(value)
-
-
-def get_evidence_mode(item: Dict[str, Any]) -> str:
-    step = get_current_step(item, "trigger_output")
-    return str(step.get("evidence_mode", "") or "").strip()
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    s = str(value).strip().lower()
+    return s in {"true", "1", "yes", "y", "是", "需要", "trigger"}
 
 
-def get_policy_label(item: Dict[str, Any]) -> str:
-    step = get_current_step(item, "policy_output")
-    return str(step.get("label", "") or "").strip()
+def extract_case_ids(text: Any) -> Set[str]:
+    """Extract case ids from golden response or free text."""
+    if text is None:
+        return set()
+    s = str(text)
+    ids: Set[str] = set()
+    for m in CASE_ID_FIELD_PATTERN.finditer(s):
+        cid = normalize_case_id(m.group(1))
+        if cid:
+            ids.add(cid)
+    for m in KT_PATTERN.finditer(s):
+        cid = normalize_case_id(m.group(0))
+        if cid:
+            ids.add(cid)
+    return ids
+
+
+def first_non_empty(*values: Any) -> Any:
+    for v in values:
+        if v is not None and v != "":
+            return v
+    return None
+
+
+# =========================
+# Field extraction for new format
+# =========================
+
+def get_dialogue_id(item: Dict[str, Any]) -> str:
+    return normalize_dialogue_id(first_non_empty(item.get("dialogue_id"), item.get("dialog_id"), item.get("id")))
+
+
+def get_turn_id(item: Dict[str, Any]) -> Optional[int]:
+    for key in ("turn_id", "target_turn_id", "target_turn_index", "assistant_turn_id"):
+        if key in item and item[key] is not None:
+            try:
+                return int(item[key])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def get_golden_response(item: Dict[str, Any]) -> str:
+    # current_turn is a fallback only. golden_response is the true gold field.
+    dialogue_input = item.get("dialogue_input") or {}
+    return str(first_non_empty(item.get("golden_response"), dialogue_input.get("current_turn"), ""))
+
+
+def get_gold_case_ids(item: Dict[str, Any]) -> Set[str]:
+    return extract_case_ids(get_golden_response(item))
+
+
+def get_query_text(item: Dict[str, Any]) -> str:
+    q = item.get("query") or {}
+    if isinstance(q, dict):
+        return str(first_non_empty(q.get("query"), q.get("query_text"), "")).strip()
+    return str(q).strip()
+
+
+def get_selected_case_ids(item: Dict[str, Any]) -> List[str]:
+    retriever = item.get("retriever") or {}
+    if not isinstance(retriever, dict):
+        return []
+
+    selected = retriever.get("selected_case_ids")
+    if isinstance(selected, list):
+        ids = [normalize_case_id(x) for x in selected]
+        return [x for x in ids if x]
+
+    # Fallback 1: evidence text.
+    evidence = retriever.get("evidence", "")
+    ids = list(extract_case_ids(evidence))
+    if ids:
+        # Preserve evidence order if possible.
+        ordered: List[str] = []
+        seen: Set[str] = set()
+        for m in KT_PATTERN.finditer(str(evidence)):
+            cid = normalize_case_id(m.group(0))
+            if cid and cid not in seen:
+                ordered.append(cid)
+                seen.add(cid)
+        return ordered
+
+    # Fallback 2: case_diagnostics.
+    diagnostics = retriever.get("case_diagnostics")
+    if isinstance(diagnostics, list):
+        out: List[str] = []
+        for c in diagnostics:
+            if isinstance(c, dict):
+                cid = normalize_case_id(c.get("case_id"))
+                if cid:
+                    out.append(cid)
+        return out
+
+    return []
+
+
+def get_trigger_bool(item: Dict[str, Any]) -> bool:
+    trigger = item.get("trigger") or {}
+    if isinstance(trigger, dict) and "should_trigger" in trigger:
+        return to_bool(trigger.get("should_trigger"))
+    # If trigger is missing, use query existence as a weak fallback.
+    return bool(get_query_text(item))
+
+
+def get_policy_action(item: Dict[str, Any]) -> str:
+    policy = item.get("policy") or {}
+    if isinstance(policy, dict):
+        return str(first_non_empty(policy.get("dialogue_action"), policy.get("label"), "")).strip()
+    return ""
 
 
 def get_policy_case_id(item: Dict[str, Any]) -> str:
-    step = get_current_step(item, "policy_output")
-    return normalize_case_id(step.get("case_id", ""))
+    policy = item.get("policy") or {}
+    if isinstance(policy, dict):
+        return normalize_case_id(first_non_empty(policy.get("case_id"), policy.get("case"), ""))
+    return ""
 
 
-def get_pred_case_ids(item: Dict[str, Any], use_response_fallback: bool = False) -> Set[str]:
+def get_pred_case_ids(item: Dict[str, Any]) -> Set[str]:
+    cid = get_policy_case_id(item)
+    return {cid} if cid else set()
+
+
+def explicit_case_recommendation(item: Dict[str, Any]) -> bool:
+    return get_policy_action(item) == CASE_RECOMMEND_POLICY and bool(get_policy_case_id(item))
+
+
+def knowledge_use_prediction(item: Dict[str, Any]) -> bool:
+    return get_policy_action(item) in KNOWLEDGE_POLICIES and bool(get_policy_case_id(item))
+
+
+def knowledge_link_triggered(item: Dict[str, Any]) -> bool:
+    return get_trigger_bool(item)
+
+
+# =========================
+# Preprocessing
+# =========================
+
+def assign_inferred_turn_ids(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    默认只用 policy_output 当前轮 case_id。
-    如果 use_response_fallback=True，则 policy 没给 case_id 时，从 response 文本中抽取。
+    Ensure each item has an internal _eval_turn_id.
+    If turn_id is absent, infer it by input order within the same dialogue_id.
     """
-    ids: Set[str] = set()
+    counters: Dict[str, int] = defaultdict(int)
+    processed: List[Dict[str, Any]] = []
 
-    policy_case_id = get_policy_case_id(item)
-    if policy_case_id:
-        ids.add(policy_case_id)
+    for global_index, item in enumerate(items):
+        copied = dict(item)
+        did = get_dialogue_id(copied)
+        if not did:
+            did = f"__missing_dialogue_id_{global_index}"
+            copied["dialogue_id"] = did
 
-    if use_response_fallback and not ids:
-        response = item.get("response_output", {}).get("response", "")
-        ids.update(extract_case_ids(response))
+        explicit_turn_id = get_turn_id(copied)
+        if explicit_turn_id is None:
+            counters[did] += 1
+            turn_id = counters[did]
+        else:
+            turn_id = explicit_turn_id
+            counters[did] = max(counters[did], turn_id)
 
-    return ids
+        copied["_eval_dialogue_id"] = did
+        copied["_eval_turn_id"] = int(turn_id)
+        copied["_eval_global_index"] = global_index
+        processed.append(copied)
 
-
-def get_retrieved_case_ids(item: Dict[str, Any]) -> List[str]:
-    retrieval = item.get("retrieval_output", {}) or {}
-    cases = retrieval.get("retrieved_cases", []) or []
-
-    ids: List[str] = []
-    for case in cases:
-        if not isinstance(case, dict):
-            continue
-        cid = normalize_case_id(
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseID")
-            or case.get("caseId")
-            or ""
-        )
-        if cid:
-            ids.append(cid)
-
-    return ids
+    return processed
 
 
-def knowledge_link_triggered(item: Optional[Dict[str, Any]]) -> bool:
-    if not item:
-        return False
-    return get_trigger(item) or get_query_mode(item) in KNOWLEDGE_QUERY_MODES
+def group_by_dialogue(items: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        grouped[item["_eval_dialogue_id"]].append(item)
+    for did in grouped:
+        grouped[did].sort(key=lambda x: (x["_eval_turn_id"], x["_eval_global_index"]))
+    return dict(grouped)
 
 
-def explicit_case_recommendation(item: Optional[Dict[str, Any]], use_response_fallback: bool = False) -> bool:
-    if not item:
-        return False
-    return get_policy_label(item) == "CaseRecommendation" and bool(
-        get_pred_case_ids(item, use_response_fallback=use_response_fallback)
-    )
+# =========================
+# Metric group 1: case recommendation turn metrics
+# =========================
 
-
-def knowledge_use_prediction(item: Optional[Dict[str, Any]], use_response_fallback: bool = False) -> bool:
-    if not item:
-        return False
-    return get_policy_label(item) in KNOWLEDGE_POLICIES and bool(
-        get_pred_case_ids(item, use_response_fallback=use_response_fallback)
-    )
-
-
-# =========================================================
-# 4. Latency
-# =========================================================
-
-def collect_latency(latency: Dict[str, Any]):
-    keys = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
-    return {k: latency.get(k, 0) for k in keys}
-
-
-# =========================================================
-# 5. Case recommendation turn evaluation
-# =========================================================
-
-def eval_case_recommendation_turns(
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]],
-    gold_turn_cases: Dict[Tuple[str, int], Set[str]],
-    use_response_fallback: bool = False,
-) -> Dict[str, Any]:
-    """
-    分母：golden 中出现案例链接 / case_id 的轮次。
-    """
-    gold_case_turns = sorted(gold_turn_cases.keys())
-    n_gold_case_turns = len(gold_case_turns)
+def eval_case_recommendation_turns(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    gold_case_items = [x for x in items if get_gold_case_ids(x)]
+    gold_case_turn_count = len(gold_case_items)
 
     knowledge_trigger_hits = 0
-    top1_hits = []
-    top3_hits = []
-    top5_hits = []
-
-    # 知识型策略命中率的分母：T ∩ R
-    # T = 系统进入知识链路
-    # R = retrieved top-5 包含 golden case
-    # P = policy 属于知识型策略
-    # policy_hit_rate = count(T ∩ R ∩ P) / count(T ∩ R)
-    policy_hit_after_trigger_top5_count = 0
-    trigger_top5_count = 0
-
-    # 案例选择准确率的分母：
-    # golden 案例推荐轮 ∩ retrieved top-5 包含 golden case ∩ policy 属于知识型策略。
-    # 注意：这里不再把“policy 属于知识型策略但 top5 没有 golden”的轮次计入分母，
-    # 因为那是 retrieval 召回失败，不应该归因给 case selection。
-    case_selection_hits_cond_top5_policy = []
-    case_selection_top5_policy_correct_count = 0
-
+    retrieval_eval_count = 0
+    top1_hits = 0
+    top3_hits = 0
+    top5_hits = 0
+    knowledge_policy_hits = 0
+    case_selection_eval_count = 0
+    case_selection_hits = 0
     final_case_hits = 0
 
-    triggered_count_for_retrieval = 0
+    for item in gold_case_items:
+        gold_ids = get_gold_case_ids(item)
+        pred_ids = get_pred_case_ids(item)
+        selected = get_selected_case_ids(item)
+        action = get_policy_action(item)
 
-    for key in gold_case_turns:
-        item = pred_by_key.get(key)
-        gold_ids = gold_turn_cases[key]
-
-        retrieved_ids = get_retrieved_case_ids(item or {})
-        top1_hit = bool(gold_ids & set(retrieved_ids[:1]))
-        top3_hit = bool(gold_ids & set(retrieved_ids[:3]))
-        top5_hit = bool(gold_ids & set(retrieved_ids[:5]))
-
-        is_knowledge_triggered = knowledge_link_triggered(item)
-        if is_knowledge_triggered:
+        if knowledge_link_triggered(item):
             knowledge_trigger_hits += 1
-            triggered_count_for_retrieval += 1
+            retrieval_eval_count += 1
+            if gold_ids.intersection(selected[:1]):
+                top1_hits += 1
+            if gold_ids.intersection(selected[:3]):
+                top3_hits += 1
+            if gold_ids.intersection(selected[:5]):
+                top5_hits += 1
 
-            top1_hits.append(top1_hit)
-            top3_hits.append(top3_hit)
-            top5_hits.append(top5_hit)
+        if action in KNOWLEDGE_POLICIES:
+            knowledge_policy_hits += 1
 
-        policy_label = get_policy_label(item or {})
-        policy_hit = policy_label in KNOWLEDGE_POLICIES
+        if pred_ids:
+            case_selection_eval_count += 1
+            if gold_ids.intersection(pred_ids):
+                case_selection_hits += 1
 
-        # 条件知识型策略命中率：count(T ∩ R ∩ P) / count(T ∩ R)
-        if is_knowledge_triggered and top5_hit:
-            trigger_top5_count += 1
-            if policy_hit:
-                policy_hit_after_trigger_top5_count += 1
-
-        pred_ids = get_pred_case_ids(item or {}, use_response_fallback=use_response_fallback)
-
-        # 只有当 top-5 已经包含 golden case，且系统进入知识型策略时，
-        # 才评价 policy 是否从候选案例里选中了正确 case_id。
-        if top5_hit and policy_hit:
-            selection_correct = bool(gold_ids & pred_ids)
-            case_selection_hits_cond_top5_policy.append(selection_correct)
-            if selection_correct:
-                case_selection_top5_policy_correct_count += 1
-
-        if gold_ids & pred_ids:
+        if gold_ids.intersection(pred_ids):
             final_case_hits += 1
 
     return {
-        "gold_case_turn_count": n_gold_case_turns,
-
-        # 1. 知识链路触发率
-        "knowledge_link_trigger_rate": safe_div(knowledge_trigger_hits, n_gold_case_turns),
-
-        # 2. Top-k 有效案例召回率
-        # 分母：golden 案例推荐轮中，系统进入知识链路的轮次
-        "retrieval_eval_count": triggered_count_for_retrieval,
-        "top1_effective_case_recall": mean(top1_hits),
-        "top3_effective_case_recall": mean(top3_hits),
-        "top5_effective_case_recall": mean(top5_hits),
-
-        # 3. 条件知识型策略命中率
-        # 分母：golden 案例推荐轮中，系统进入知识链路且 top-5 包含 golden case 的轮次。
-        "knowledge_policy_hit_denominator": "gold_case_turn AND knowledge_link_triggered AND top5_contains_gold",
-        "knowledge_policy_hit_eval_count": trigger_top5_count,
-        "knowledge_policy_hit_correct_count": policy_hit_after_trigger_top5_count,
-        "knowledge_policy_hit_rate": safe_div(policy_hit_after_trigger_top5_count, trigger_top5_count),
-
-        # 4. 案例选择准确率
-        # 分母：golden 案例推荐轮中，retrieved top-5 包含 golden case，
-        # 且系统 policy 属于知识型策略的轮次。
-        "case_selection_denominator": "gold_case_turn AND top5_contains_gold AND policy_in_{CaseRecommendation,ExplainedResponse}",
-        "case_selection_eval_count": len(case_selection_hits_cond_top5_policy),
-        "case_selection_correct_count": case_selection_top5_policy_correct_count,
-        "case_selection_accuracy": mean(case_selection_hits_cond_top5_policy),
-
-        # 5. 最终案例推荐准确率
-        # 分母：所有 golden 案例推荐轮
-        "final_case_recommendation_accuracy": safe_div(final_case_hits, n_gold_case_turns),
+        "gold_case_turn_count": gold_case_turn_count,
+        "knowledge_link_trigger_rate": safe_div(knowledge_trigger_hits, gold_case_turn_count),
+        "retrieval_eval_count": retrieval_eval_count,
+        "top1_effective_case_recall": safe_div(top1_hits, retrieval_eval_count),
+        "top3_effective_case_recall": safe_div(top3_hits, retrieval_eval_count),
+        "top5_effective_case_recall": safe_div(top5_hits, retrieval_eval_count),
+        "knowledge_policy_hit_rate": safe_div(knowledge_policy_hits, gold_case_turn_count),
+        "case_selection_eval_count": case_selection_eval_count,
+        "case_selection_accuracy": safe_div(case_selection_hits, case_selection_eval_count),
+        "final_case_recommendation_accuracy": safe_div(final_case_hits, gold_case_turn_count),
     }
 
 
-# =========================================================
-# 6. All-turn timing evaluation
-# =========================================================
+# =========================
+# Metric group 2: all-turn timing metrics
+# =========================
 
-def eval_all_turn_timing(
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]],
-    gold_all_turn_keys: Set[Tuple[str, int]],
-    gold_turn_cases: Dict[Tuple[str, int], Set[str]],
-    use_response_fallback: bool = False,
-) -> Dict[str, Any]:
-    """
-    分母：所有客服目标轮。
-    """
-    keys = sorted(gold_all_turn_keys)
-    gold_positive_keys = {k for k in keys if gold_turn_cases.get(k)}
-    gold_negative_keys = set(keys) - gold_positive_keys
-
-    # 1. 案例推荐时机 P/R/F1
-    case_tp = case_fp = case_fn = 0
-
-    # 2. 知识使用时机 P/R/F1
+def eval_all_turn_timing(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    case_rec_tp = case_rec_fp = case_rec_fn = 0
     knowledge_tp = knowledge_fp = knowledge_fn = 0
+    early_count = 0
+    missed_count = 0
+    gold_positive_count = 0
+    gold_negative_count = 0
 
-    # 3. 过早推荐率
-    early_recommend_count = 0
+    for item in items:
+        gold_positive = bool(get_gold_case_ids(item))
+        pred_has_case = bool(get_pred_case_ids(item))
+        pred_case_rec = explicit_case_recommendation(item)
+        pred_knowledge_use = knowledge_use_prediction(item)
 
-    # 4. 漏推荐率
-    missed_recommend_count = 0
+        if gold_positive:
+            gold_positive_count += 1
+        else:
+            gold_negative_count += 1
 
-    for key in keys:
-        item = pred_by_key.get(key)
-        gold_positive = key in gold_positive_keys
+        # Explicit case recommendation timing: CaseRecommendation + case_id.
+        if pred_case_rec and gold_positive:
+            case_rec_tp += 1
+        elif pred_case_rec and not gold_positive:
+            case_rec_fp += 1
+        elif (not pred_case_rec) and gold_positive:
+            case_rec_fn += 1
 
-        pred_case_positive = explicit_case_recommendation(item, use_response_fallback=use_response_fallback)
-        pred_knowledge_positive = knowledge_use_prediction(item, use_response_fallback=use_response_fallback)
-
-        # 案例推荐时机
-        if pred_case_positive and gold_positive:
-            case_tp += 1
-        elif pred_case_positive and not gold_positive:
-            case_fp += 1
-        elif (not pred_case_positive) and gold_positive:
-            case_fn += 1
-
-        # 知识使用时机
-        if pred_knowledge_positive and gold_positive:
+        # Knowledge-use timing: {CaseRecommendation, ExplainedResponse} + case_id.
+        if pred_knowledge_use and gold_positive:
             knowledge_tp += 1
-        elif pred_knowledge_positive and not gold_positive:
+        elif pred_knowledge_use and not gold_positive:
             knowledge_fp += 1
-        elif (not pred_knowledge_positive) and gold_positive:
+        elif (not pred_knowledge_use) and gold_positive:
             knowledge_fn += 1
 
-        pred_has_case = bool(get_pred_case_ids(item or {}, use_response_fallback=use_response_fallback))
-
+        # Original early/missed recommendation definitions use case_id existence.
         if (not gold_positive) and pred_has_case:
-            early_recommend_count += 1
-
+            early_count += 1
         if gold_positive and (not pred_has_case):
-            missed_recommend_count += 1
+            missed_count += 1
 
-    case_prf = prf(case_tp, case_fp, case_fn)
-    knowledge_prf = prf(knowledge_tp, knowledge_fp, knowledge_fn)
+    case_p, case_r, case_f1 = prf(case_rec_tp, case_rec_fp, case_rec_fn)
+    knowledge_p, knowledge_r, knowledge_f1 = prf(knowledge_tp, knowledge_fp, knowledge_fn)
 
     return {
-        "all_turn_count": len(keys),
-        "gold_positive_turn_count": len(gold_positive_keys),
-        "gold_negative_turn_count": len(gold_negative_keys),
-
-        # 1. 案例推荐时机 Precision / Recall / F1
-        "case_recommend_timing_precision": case_prf["precision"],
-        "case_recommend_timing_recall": case_prf["recall"],
-        "case_recommend_timing_f1": case_prf["f1"],
-        "case_recommend_timing_tp": case_prf["tp"],
-        "case_recommend_timing_fp": case_prf["fp"],
-        "case_recommend_timing_fn": case_prf["fn"],
-
-        # 2. 知识使用时机 Precision / Recall / F1
-        "knowledge_use_timing_precision": knowledge_prf["precision"],
-        "knowledge_use_timing_recall": knowledge_prf["recall"],
-        "knowledge_use_timing_f1": knowledge_prf["f1"],
-        "knowledge_use_timing_tp": knowledge_prf["tp"],
-        "knowledge_use_timing_fp": knowledge_prf["fp"],
-        "knowledge_use_timing_fn": knowledge_prf["fn"],
-
-        # 3. 过早推荐率
-        "early_recommendation_rate": safe_div(early_recommend_count, len(gold_negative_keys)),
-
-        # 4. 漏推荐率
-        "missed_recommendation_rate": safe_div(missed_recommend_count, len(gold_positive_keys)),
+        "all_turn_count": len(items),
+        "gold_positive_turn_count": gold_positive_count,
+        "gold_negative_turn_count": gold_negative_count,
+        "case_recommend_timing_precision": case_p,
+        "case_recommend_timing_recall": case_r,
+        "case_recommend_timing_f1": case_f1,
+        "case_recommend_timing_tp": case_rec_tp,
+        "case_recommend_timing_fp": case_rec_fp,
+        "case_recommend_timing_fn": case_rec_fn,
+        "knowledge_use_timing_precision": knowledge_p,
+        "knowledge_use_timing_recall": knowledge_r,
+        "knowledge_use_timing_f1": knowledge_f1,
+        "knowledge_use_timing_tp": knowledge_tp,
+        "knowledge_use_timing_fp": knowledge_fp,
+        "knowledge_use_timing_fn": knowledge_fn,
+        "early_recommendation_rate": safe_div(early_count, gold_negative_count),
+        "missed_recommendation_rate": safe_div(missed_count, gold_positive_count),
     }
 
 
-# =========================================================
-# 7. Recommendation offset and dialogue-level success
-# =========================================================
+# =========================
+# Metric group 3: offset and dialogue success
+# =========================
 
-def build_pred_dialog_case_turns(
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]],
-    use_response_fallback: bool = False,
-) -> Dict[str, Dict[str, List[int]]]:
-    """
-    Returns:
-        {dialog_id: {case_id: [turn_id, ...]}}
-    """
-    result: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+def eval_offset_and_dialog_success(grouped: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    gold_event_count = 0
+    matched_offsets: List[int] = []
+    dialog_success_eval_count = 0
+    dialog_success_count = 0
 
-    for (dialog_id, turn_id), item in pred_by_key.items():
-        pred_ids = get_pred_case_ids(item, use_response_fallback=use_response_fallback)
-        for cid in pred_ids:
-            result[dialog_id][cid].append(turn_id)
+    for did, turns in grouped.items():
+        gold_events: List[Tuple[int, str]] = []
+        pred_events: List[Tuple[int, str]] = []
 
-    for dialog_id in result:
-        for cid in result[dialog_id]:
-            result[dialog_id][cid] = sorted(result[dialog_id][cid])
+        for item in turns:
+            tid = int(item["_eval_turn_id"])
+            for cid in get_gold_case_ids(item):
+                gold_events.append((tid, cid))
+            for cid in get_pred_case_ids(item):
+                pred_events.append((tid, cid))
 
-    return result
+        if gold_events:
+            dialog_success_eval_count += 1
+            gold_case_set = {cid for _, cid in gold_events}
+            pred_case_set = {cid for _, cid in pred_events}
+            if gold_case_set.intersection(pred_case_set):
+                dialog_success_count += 1
 
+        for gold_tid, gold_cid in gold_events:
+            gold_event_count += 1
+            candidate_offsets = [pred_tid - gold_tid for pred_tid, pred_cid in pred_events if pred_cid == gold_cid]
+            if candidate_offsets:
+                best_offset = min(candidate_offsets, key=lambda x: (abs(x), x))
+                matched_offsets.append(best_offset)
 
-def eval_recommendation_offset_and_dialog_success(
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]],
-    gold_events: List[Tuple[str, int, str]],
-    dialog_gold_cases: Dict[str, Set[str]],
-    use_response_fallback: bool = False,
-) -> Dict[str, Any]:
-    pred_dialog_case_turns = build_pred_dialog_case_turns(
-        pred_by_key,
-        use_response_fallback=use_response_fallback,
-    )
-
-    # 5. 推荐轮偏移距离
-    abs_offsets = []
-    signed_offsets = []
-
-    for dialog_id, gold_turn_id, gold_case_id in gold_events:
-        pred_turns = pred_dialog_case_turns.get(dialog_id, {}).get(gold_case_id, [])
-        if not pred_turns:
-            continue
-
-        # 找距离 golden turn 最近的预测轮
-        best_pred_turn = min(pred_turns, key=lambda x: abs(x - gold_turn_id))
-        signed = best_pred_turn - gold_turn_id
-
-        signed_offsets.append(signed)
-        abs_offsets.append(abs(signed))
-
-    early = sum(1 for x in signed_offsets if x < 0)
-    delayed = sum(1 for x in signed_offsets if x > 0)
-    exact = sum(1 for x in signed_offsets if x == 0)
-
-    # 6. 对话级最终成功率
-    success_count = 0
-    eval_dialog_count = 0
-
-    for dialog_id, gold_ids in dialog_gold_cases.items():
-        if not gold_ids:
-            continue
-
-        eval_dialog_count += 1
-        pred_ids = set(pred_dialog_case_turns.get(dialog_id, {}).keys())
-
-        if gold_ids & pred_ids:
-            success_count += 1
+    matched_count = len(matched_offsets)
+    exact = sum(1 for x in matched_offsets if x == 0)
+    early = sum(1 for x in matched_offsets if x < 0)
+    delayed = sum(1 for x in matched_offsets if x > 0)
 
     return {
-        # 推荐轮偏移距离
-        "recommendation_offset_eval_count": len(abs_offsets),
-        "recommendation_offset_coverage": safe_div(len(abs_offsets), len(gold_events)),
-        "avg_abs_recommendation_offset": mean(abs_offsets),
-        "avg_signed_recommendation_offset": mean(signed_offsets),
-        "exact_timing_ratio_among_matched": safe_div(exact, len(signed_offsets)),
-        "early_timing_ratio_among_matched": safe_div(early, len(signed_offsets)),
-        "delayed_timing_ratio_among_matched": safe_div(delayed, len(signed_offsets)),
-
-        # 对话级最终成功率
-        "dialog_success_eval_count": eval_dialog_count,
-        "dialog_level_final_success_rate": safe_div(success_count, eval_dialog_count),
+        "recommendation_offset_eval_count": gold_event_count,
+        "recommendation_offset_coverage": safe_div(matched_count, gold_event_count),
+        "avg_abs_recommendation_offset": mean([abs(x) for x in matched_offsets]),
+        "avg_signed_recommendation_offset": mean(matched_offsets),
+        "exact_timing_ratio_among_matched": safe_div(exact, matched_count),
+        "early_timing_ratio_among_matched": safe_div(early, matched_count),
+        "delayed_timing_ratio_among_matched": safe_div(delayed, matched_count),
+        "dialog_success_eval_count": dialog_success_eval_count,
+        "dialog_level_final_success_rate": safe_div(dialog_success_count, dialog_success_eval_count),
     }
 
 
-# =========================================================
-# 8. Internal diagnostic metrics
-# =========================================================
+# =========================
+# Metric group 4: internal diagnostics
+# =========================
 
-def eval_internal_diagnostics(
-    pred_by_key: Dict[Tuple[str, int], Dict[str, Any]],
-    gold_all_turn_keys: Set[Tuple[str, int]],
-    gold_turn_cases: Dict[Tuple[str, int], Set[str]],
-    use_response_fallback: bool = False,
-) -> Dict[str, Any]:
-    keys = sorted(gold_all_turn_keys)
-
-    # 1. 无效 case_id 率
+def eval_internal_diagnostics(items: List[Dict[str, Any]], grouped: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
     pred_case_output_count = 0
-    invalid_case_id_count = 0
+    invalid_case_count = 0
+    over_trigger_count = 0
+    gold_negative_count = 0
 
-    # 2. 过度知识触发率
-    gold_negative_keys = {k for k in keys if not gold_turn_cases.get(k)}
-    over_knowledge_trigger_count = 0
+    for item in items:
+        gold_positive = bool(get_gold_case_ids(item))
+        if not gold_positive:
+            gold_negative_count += 1
+            if knowledge_link_triggered(item):
+                over_trigger_count += 1
 
-    # 3. 重复推荐率
-    dialog_case_counts: Dict[str, Counter] = defaultdict(Counter)
-
-    # 4. 状态抖动率
-    dialog_knowledge_states: Dict[str, List[bool]] = defaultdict(list)
-
-    for key in keys:
-        dialog_id, _turn_id = key
-        item = pred_by_key.get(key)
-
-        if item is None:
-            dialog_knowledge_states[dialog_id].append(False)
-            continue
-
-        pred_ids = get_pred_case_ids(item, use_response_fallback=use_response_fallback)
-        retrieved_ids = set(get_retrieved_case_ids(item))
-
-        for cid in pred_ids:
+        selected = set(get_selected_case_ids(item))
+        for cid in get_pred_case_ids(item):
             pred_case_output_count += 1
-            dialog_case_counts[dialog_id][cid] += 1
+            if cid not in selected:
+                invalid_case_count += 1
 
-            if cid not in retrieved_ids:
-                invalid_case_id_count += 1
+    duplicate_pred_count = 0
+    total_pred_case_events = 0
+    state_switch_count = 0
+    state_pair_count = 0
 
-        if key in gold_negative_keys and knowledge_link_triggered(item):
-            over_knowledge_trigger_count += 1
+    for did, turns in grouped.items():
+        case_counter: Counter[str] = Counter()
+        states: List[bool] = []
 
-        dialog_knowledge_states[dialog_id].append(knowledge_link_triggered(item))
+        for item in turns:
+            states.append(knowledge_link_triggered(item))
+            for cid in get_pred_case_ids(item):
+                case_counter[cid] += 1
+                total_pred_case_events += 1
 
-    # 重复推荐率：重复出现次数 / 总推荐次数
-    total_recommend_occurrences = 0
-    repeated_extra_occurrences = 0
+        duplicate_pred_count += sum(max(0, count - 1) for count in case_counter.values())
 
-    for _dialog_id, counter in dialog_case_counts.items():
-        total_recommend_occurrences += sum(counter.values())
-        repeated_extra_occurrences += sum(max(0, c - 1) for c in counter.values())
-
-    # 状态抖动率：出现 A-B-A 型切换的比例
-    # 例如 false -> true -> false 或 true -> false -> true
-    flip_back_count = 0
-    possible_flip_back_count = 0
-
-    # 额外记录知识状态切换率
-    switch_count = 0
-    possible_switch_count = 0
-
-    for _dialog_id, states in dialog_knowledge_states.items():
-        if len(states) >= 2:
-            possible_switch_count += len(states) - 1
-            switch_count += sum(states[i] != states[i - 1] for i in range(1, len(states)))
-
-        if len(states) >= 3:
-            possible_flip_back_count += len(states) - 2
-            for i in range(2, len(states)):
-                if states[i] == states[i - 2] and states[i] != states[i - 1]:
-                    flip_back_count += 1
+        for prev, cur in zip(states, states[1:]):
+            state_pair_count += 1
+            if prev != cur:
+                state_switch_count += 1
 
     return {
-        # 1. 无效 case_id 率
         "pred_case_output_count": pred_case_output_count,
-        "invalid_case_id_rate": safe_div(invalid_case_id_count, pred_case_output_count),
-
-        # 2. 过度知识触发率
-        "over_knowledge_trigger_rate": safe_div(over_knowledge_trigger_count, len(gold_negative_keys)),
-
-        # 3. 重复推荐率
-        "repeated_recommendation_rate": safe_div(repeated_extra_occurrences, total_recommend_occurrences),
-
-        # 4. 状态抖动率
-        "state_jitter_rate": safe_div(flip_back_count, possible_flip_back_count),
-        "knowledge_state_switch_rate": safe_div(switch_count, possible_switch_count),
+        "invalid_case_id_rate": safe_div(invalid_case_count, pred_case_output_count),
+        "over_knowledge_trigger_rate": safe_div(over_trigger_count, gold_negative_count),
+        "repeated_recommendation_rate": safe_div(duplicate_pred_count, total_pred_case_events),
+        "state_jitter_rate": safe_div(state_switch_count, state_pair_count),
     }
 
 
-# =========================================================
-# 9. Latency aggregation
-# =========================================================
+# =========================
+# Metric group 5: latency
+# =========================
 
-def eval_latency(preds: List[Dict[str, Any]]) -> Dict[str, float]:
-    latency_stats = defaultdict(list)
+def eval_latency(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    fields = ["query_ms", "retrieval_ms", "trigger_ms", "policy_ms", "response_ms", "total_ms"]
+    values: Dict[str, List[float]] = {field: [] for field in fields}
 
-    for item in preds:
-        latency = item.get("latency", {}) or {}
-        for key, value in collect_latency(latency).items():
-            latency_stats[key].append(value)
+    for item in items:
+        latency = item.get("latency") or {}
+        if not isinstance(latency, dict):
+            continue
+        for field in fields:
+            v = latency.get(field)
+            if isinstance(v, (int, float)):
+                values[field].append(float(v))
+            else:
+                try:
+                    values[field].append(float(v))
+                except (TypeError, ValueError):
+                    pass
+
+    return {f"avg_{field}": mean(values[field]) for field in fields}
+
+
+# =========================
+# Main evaluation
+# =========================
+
+def evaluate(pred_path: str | Path, max_dialogues: Optional[int] = None) -> Dict[str, Any]:
+    raw_items = load_json_or_jsonl(pred_path)
+    items = assign_inferred_turn_ids(raw_items)
+
+    if max_dialogues is not None and max_dialogues > 0:
+        allowed_dialogues: Set[str] = set()
+        filtered: List[Dict[str, Any]] = []
+        for item in items:
+            did = item["_eval_dialogue_id"]
+            if did not in allowed_dialogues:
+                if len(allowed_dialogues) >= max_dialogues:
+                    continue
+                allowed_dialogues.add(did)
+            filtered.append(item)
+        items = filtered
+
+    grouped = group_by_dialogue(items)
+
+    gold_turn_count = len(items)
+    gold_event_count = sum(len(get_gold_case_ids(x)) for x in items)
 
     return {
-        "avg_query_ms": mean(latency_stats["query_ms"]),
-        "avg_retrieval_ms": mean(latency_stats["retrieval_ms"]),
-        "avg_trigger_ms": mean(latency_stats["trigger_ms"]),
-        "avg_policy_ms": mean(latency_stats["policy_ms"]),
-        "avg_response_ms": mean(latency_stats["response_ms"]),
-        "avg_total_ms": mean(latency_stats["total_ms"]),
+        "basic_counts": {
+            "pred_prefix_count": len(items),
+            "dialogue_count": len(grouped),
+            "gold_event_count": gold_event_count,
+            "gold_turn_count": gold_turn_count,
+        },
+        "case_recommendation_turn_metrics": eval_case_recommendation_turns(items),
+        "all_turn_timing_metrics": eval_all_turn_timing(items),
+        "offset_and_dialog_success_metrics": eval_offset_and_dialog_success(grouped),
+        "internal_diagnostic_metrics": eval_internal_diagnostics(items, grouped),
+        "latency_metrics": eval_latency(items),
     }
 
 
-# =========================================================
-# 10. MAIN EVAL
-# =========================================================
-
-def evaluate(
-    pred_path: str,
-    gold_path: str,
-    max_dialogues: Optional[int] = 300,
-    use_response_fallback: bool = False,
-) -> Dict[str, Any]:
-    with open(pred_path, "r", encoding="utf-8") as f:
-        preds = json.load(f)
-
-    with open(gold_path, "r", encoding="utf-8") as f:
-        golds = json.load(f)
-
-    if isinstance(golds, dict):
-        gold_items = list(golds.items())
-        if max_dialogues is not None:
-            gold_items = gold_items[:max_dialogues]
-        gold_map = dict(gold_items)
-    elif isinstance(golds, list):
-        gold_map = {}
-        for idx, item in enumerate(golds):
-            if max_dialogues is not None and idx >= max_dialogues:
-                break
-            if not isinstance(item, dict):
-                continue
-            dialog_id = str(item.get("dialog_id", f"dialog_{idx}"))
-            gold_map[dialog_id] = item
-    else:
-        raise ValueError(f"Unsupported gold format: {type(golds)}")
-
-    pred_by_key = index_preds(preds)
-
-    gold_turn_cases, gold_all_turn_keys, gold_events, dialog_gold_cases = build_gold_maps(gold_map)
-
-    # =========================
-    # Evaluate by metric groups
-    # =========================
-    case_recommendation_turn_metrics = eval_case_recommendation_turns(
-        pred_by_key=pred_by_key,
-        gold_turn_cases=gold_turn_cases,
-        use_response_fallback=use_response_fallback,
-    )
-
-    all_turn_timing_metrics = eval_all_turn_timing(
-        pred_by_key=pred_by_key,
-        gold_all_turn_keys=gold_all_turn_keys,
-        gold_turn_cases=gold_turn_cases,
-        use_response_fallback=use_response_fallback,
-    )
-
-    offset_and_dialog_success_metrics = eval_recommendation_offset_and_dialog_success(
-        pred_by_key=pred_by_key,
-        gold_events=gold_events,
-        dialog_gold_cases=dialog_gold_cases,
-        use_response_fallback=use_response_fallback,
-    )
-
-    internal_diagnostic_metrics = eval_internal_diagnostics(
-        pred_by_key=pred_by_key,
-        gold_all_turn_keys=gold_all_turn_keys,
-        gold_turn_cases=gold_turn_cases,
-        use_response_fallback=use_response_fallback,
-    )
-
-    latency_metrics = eval_latency(preds)
-
-    basic_counts = {
-        "pred_prefix_count": len(preds),
-        "gold_dialog_count": len(gold_map),
-        "gold_event_count": len(gold_events),
-        "gold_turn_count": len(gold_all_turn_keys),
-    }
-
-    # 分组展示，避免结果字典过长。
-    result: Dict[str, Any] = {
-        "basic_counts": basic_counts,
-        "case_recommendation_turn_metrics": case_recommendation_turn_metrics,
-        "all_turn_timing_metrics": all_turn_timing_metrics,
-        "offset_and_dialog_success_metrics": offset_and_dialog_success_metrics,
-        "internal_diagnostic_metrics": internal_diagnostic_metrics,
-        "latency_metrics": latency_metrics,
-    }
-
-    return result
-
-
-# =========================================================
-# 11. RUN
-# =========================================================
-
-if __name__ == "__main__":
-    pred_path = "new_test2.json"
-    gold_path = "test_data.json"
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate new static multi-turn prediction format.")
+    parser.add_argument("--pred_path", required=True, help="Path to prediction JSON/JSONL file.")
+    parser.add_argument("--output_path", default="", help="Optional path to save evaluation JSON.")
+    parser.add_argument("--max_dialogues", type=int, default=0, help="Optional max dialogue count. 0 means all.")
+    parser.add_argument("--indent", type=int, default=2, help="JSON output indent.")
+    args = parser.parse_args()
 
     result = evaluate(
-        pred_path=pred_path,
-        gold_path=gold_path,
-        max_dialogues=300,
-        use_response_fallback=False,
+        pred_path=args.pred_path,
+        max_dialogues=args.max_dialogues if args.max_dialogues > 0 else None,
     )
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    text = json.dumps(result, ensure_ascii=False, indent=args.indent)
+    print(text)
+
+    if args.output_path:
+        Path(args.output_path).write_text(text + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
