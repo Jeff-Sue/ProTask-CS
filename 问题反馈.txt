@@ -1,158 +1,132 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Dict, List
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from .io_utils import read_prompt
-from .schema import Pair, format_pairs
-
-
-class PromptBank:
-    def __init__(self, prompt_dir: str | Path):
-        root = Path(prompt_dir)
-        self.annotation_query = read_prompt(root / "annotation" / "query.prompt")
-        self.annotation_trigger = read_prompt(root / "annotation" / "trigger.prompt")
-        self.annotation_policy = read_prompt(root / "annotation" / "policy.prompt")
-        self.prediction_query = read_prompt(root / "prediction" / "query.prompt")
-        self.prediction_trigger = read_prompt(root / "prediction" / "trigger.prompt")
-        self.prediction_policy = read_prompt(root / "prediction" / "policy.prompt")
-        self.prediction_response = read_prompt(root / "prediction" / "response.prompt")
+CASE_ID_RE = re.compile(r"KT\d{6,}", re.IGNORECASE)
 
 
-def _chat(system_prompt: str, user_content: str) -> List[Dict[str, str]]:
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
+@dataclass
+class Pair:
+    user: str
+    assistant: str
 
 
-def build_annotation_query_messages(bank: PromptBank, history_pairs: List[Pair]) -> List[Dict[str, str]]:
-    content = "【已完成历史对话】\n" + format_pairs(history_pairs)
-    return _chat(bank.annotation_query, content)
+@dataclass
+class TargetTurn:
+    dialog_id: str
+    turn_id: int
+    history_pairs: List[Pair]
+    current_user: str
+    golden_response: str
 
 
-def build_annotation_trigger_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    query_traj: List[Dict[str, Any]],
-) -> List[Dict[str, str]]:
-    content = (
-        "【已完成历史对话】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【Query Trajectory】\n"
-        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
-    )
-    return _chat(bank.annotation_trigger, content)
+def extract_case_ids(text: str) -> List[str]:
+    if not text:
+        return []
+    seen = set()
+    out: List[str] = []
+    for m in CASE_ID_RE.findall(text):
+        cid = m.upper()
+        if cid not in seen:
+            out.append(cid)
+            seen.add(cid)
+    return out
 
 
-def build_annotation_policy_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    query_traj: List[Dict[str, Any]],
-    trigger_traj: List[Dict[str, Any]],
-) -> List[Dict[str, str]]:
-    content = (
-        "【已完成历史对话】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【Query Trajectory】\n"
-        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
-        + "\n\n【Trigger Trajectory】\n"
-        + json.dumps({"trajectory": trigger_traj}, ensure_ascii=False, indent=2)
-    )
-    return _chat(bank.annotation_policy, content)
+def _role_of(msg: Dict[str, Any]) -> str:
+    role = str(msg.get("role") or msg.get("speaker") or msg.get("from") or "").lower()
+    if role in {"user", "human", "客户", "用户"}:
+        return "user"
+    if role in {"assistant", "客服", "agent", "system", "gpt"}:
+        return "assistant"
+    text = str(msg.get("text") or msg.get("content") or msg.get("value") or "")
+    if text.startswith("用户:") or text.startswith("用户："):
+        return "user"
+    if text.startswith("客服:") or text.startswith("客服："):
+        return "assistant"
+    return role
 
 
-def build_prediction_query_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    historical_query: List[Dict[str, Any]],
-    current_user: str,
-    turn_id: int,
-) -> List[Dict[str, str]]:
-    content = (
-        f"【当前 turn_id】\n{turn_id}\n\n"
-        "【已完成历史对话（不包含当前用户输入）】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【历史 Query Trajectory】\n"
-        + json.dumps({"trajectory": historical_query}, ensure_ascii=False, indent=2)
-        + "\n\n【当前用户输入】\n"
-        + current_user
-    )
-    return _chat(bank.prediction_query, content)
+def _text_of(msg: Any) -> str:
+    if isinstance(msg, str):
+        return msg.strip()
+    if isinstance(msg, dict):
+        return str(msg.get("text") or msg.get("content") or msg.get("value") or msg.get("utterance") or "").strip()
+    return str(msg).strip()
 
 
-def build_prediction_trigger_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    historical_state: Dict[str, List[Dict[str, Any]]],
-    current_user: str,
-    current_query: Dict[str, Any],
-    current_retrieval: Dict[str, Any],
-    turn_id: int,
-) -> List[Dict[str, str]]:
-    content = (
-        f"【当前 turn_id】\n{turn_id}\n\n"
-        "【已完成历史对话（不包含当前用户输入）】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【历史状态轨迹】\n"
-        + json.dumps(historical_state, ensure_ascii=False, indent=2)
-        + "\n\n【当前用户输入】\n"
-        + current_user
-        + "\n\n【当前 Query Step】\n"
-        + json.dumps(current_query, ensure_ascii=False, indent=2)
-        + "\n\n【当前检索结果】\n"
-        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
-    )
-    return _chat(bank.prediction_trigger, content)
+def _message_list(raw: Dict[str, Any]) -> List[Dict[str, str]]:
+    source = None
+    for key in ("messages", "turns", "dialogue", "conversation"):
+        if isinstance(raw.get(key), list):
+            source = raw[key]
+            break
+    if source is None and isinstance(raw.get("dialogue_history"), list):
+        source = raw["dialogue_history"]
+    if source is None:
+        raise ValueError("Cannot find message list. Expected messages/turns/dialogue/conversation.")
+
+    messages: List[Dict[str, str]] = []
+    for item in source:
+        if isinstance(item, str):
+            txt = item.strip()
+            if not txt:
+                continue
+            if txt.startswith("用户:") or txt.startswith("用户："):
+                messages.append({"role": "user", "text": txt})
+            elif txt.startswith("客服:") or txt.startswith("客服："):
+                messages.append({"role": "assistant", "text": txt})
+            else:
+                # Default unknown strings to user text to avoid dropping data.
+                messages.append({"role": "user", "text": txt})
+        elif isinstance(item, dict):
+            role = _role_of(item)
+            text = _text_of(item)
+            if text:
+                messages.append({"role": role, "text": text})
+    return messages
 
 
-def build_prediction_policy_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    historical_state: Dict[str, List[Dict[str, Any]]],
-    current_user: str,
-    current_query: Dict[str, Any],
-    current_retrieval: Dict[str, Any],
-    current_trigger: Dict[str, Any],
-    turn_id: int,
-) -> List[Dict[str, str]]:
-    content = (
-        f"【当前 turn_id】\n{turn_id}\n\n"
-        "【已完成历史对话（不包含当前用户输入）】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【历史状态轨迹】\n"
-        + json.dumps(historical_state, ensure_ascii=False, indent=2)
-        + "\n\n【当前用户输入】\n"
-        + current_user
-        + "\n\n【当前 Query Step】\n"
-        + json.dumps(current_query, ensure_ascii=False, indent=2)
-        + "\n\n【当前检索结果】\n"
-        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
-        + "\n\n【当前 Trigger Step】\n"
-        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
-    )
-    return _chat(bank.prediction_policy, content)
+def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
+    dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+    messages = _message_list(raw)
+    targets: List[TargetTurn] = []
+    completed_pairs: List[Pair] = []
+    user_buffer: List[str] = []
+    turn_id = 0
+
+    for msg in messages:
+        role, text = msg["role"], msg["text"]
+        if role == "user":
+            user_buffer.append(text)
+        elif role == "assistant":
+            if not user_buffer:
+                # Assistant without a preceding user is not a target customer-service turn.
+                continue
+            current_user = "\n".join(user_buffer).strip()
+            turn_id += 1
+            targets.append(
+                TargetTurn(
+                    dialog_id=dialog_id,
+                    turn_id=turn_id,
+                    history_pairs=list(completed_pairs),
+                    current_user=current_user,
+                    golden_response=text,
+                )
+            )
+            completed_pairs.append(Pair(user=current_user, assistant=text))
+            user_buffer = []
+    return targets
 
 
-def build_response_messages(
-    bank: PromptBank,
-    history_pairs: List[Pair],
-    current_user: str,
-    current_retrieval: Dict[str, Any],
-    current_trigger: Dict[str, Any],
-    current_policy: Dict[str, Any],
-) -> List[Dict[str, str]]:
-    content = (
-        "【已完成历史对话（不包含当前用户输入）】\n"
-        + format_pairs(history_pairs)
-        + "\n\n【当前用户输入】\n"
-        + current_user
-        + "\n\n【当前检索结果】\n"
-        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
-        + "\n\n【当前 Trigger Step】\n"
-        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
-        + "\n\n【当前 Policy Step】\n"
-        + json.dumps(current_policy, ensure_ascii=False, indent=2)
-    )
-    return _chat(bank.prediction_response, content)
+def format_pairs(pairs: List[Pair]) -> str:
+    if not pairs:
+        return "（无已完成历史轮）"
+    lines: List[str] = []
+    for idx, pair in enumerate(pairs, start=1):
+        lines.append(f"[历史轮 {idx}]")
+        lines.append(pair.user)
+        lines.append(pair.assistant)
+    return "\n".join(lines)
