@@ -1,52 +1,44 @@
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, List
 
 
-def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    path = Path(path)
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-    if text[0] in "[{":
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for key in ("data", "dialogues", "items", "records"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-            return [data]
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
+def prepare_imports(project_root: str | None = None) -> None:
+    if project_root:
+        root = str(Path(project_root).resolve())
+        if root not in sys.path:
+            sys.path.insert(0, root)
 
 
-def write_json(path: str | Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def get_parallel_inference(project_root: str | None = None):
+    prepare_imports(project_root)
+    try:
+        from utils.qwen_api import parallel_inference
+    except Exception as e:
+        raise ImportError(
+            "Cannot import utils.qwen_api.parallel_inference. Edit pe/external.py to match your project."
+        ) from e
+    return parallel_inference
 
 
-def write_jsonl(path: str | Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+def get_batch_rag(project_root: str | None = None):
+    prepare_imports(project_root)
+    try:
+        from utils.scu_rag import batch_zefeng_rag
+    except Exception as e:
+        raise ImportError(
+            "Cannot import utils.scu_rag.batch_zefeng_rag. Edit pe/external.py to match your project."
+        ) from e
+    return batch_zefeng_rag
 
 
-def read_prompt(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
+def run_llm_batch(parallel_inference, messages_list: List[List[dict]], batch_size: int = 8) -> List[str]:
+    # Assumes your parallel_inference accepts a list of chat-message lists.
+    return parallel_inference(messages_list, batch_size=batch_size)
 
 
-def chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    for i in range(0, len(items), batch_size):
-        yield items[i:i + batch_size]
+def run_rag_batch(batch_zefeng_rag, histories: List[str], queries: List[str]) -> List[Any]:
+    # Assumes current RAG API: batch_zefeng_rag(dialog_history_list, query_list)
+    return batch_zefeng_rag(histories, queries)
