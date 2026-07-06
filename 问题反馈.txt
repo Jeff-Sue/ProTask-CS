@@ -1,54 +1,7 @@
-def run_retrieval_for_all_dialogues_query_steps(
-    dialogues,
-    query_outputs,
-    retriever_batch_fn,
-    rag_batch_size=64,
-    top_k=5,
-):
-    retrieval_by_dialogue = [{} for _ in dialogues]
-
-    flat_dialogue_indices = []
-    flat_turn_ids = []
-    flat_histories = []
-    flat_queries = []
-
-    for dialog_idx, (dialogue, qout) in enumerate(zip(dialogues, query_outputs)):
-        histories_by_turn = build_histories_by_turn(dialogue)
-
-        for step in qout.trajectory:
-            if step.query_mode in {"rewrite", "refine", "reuse"} and step.query_text.strip():
-                flat_dialogue_indices.append(dialog_idx)
-                flat_turn_ids.append(step.turn_id)
-                flat_histories.append(histories_by_turn.get(step.turn_id, ""))
-                flat_queries.append(step.query_text.strip())
-            else:
-                retrieval_by_dialogue[dialog_idx][step.turn_id] = RetrievalOutput()
-
-    raw_outputs = []
-
-    paired = list(zip(flat_histories, flat_queries))
-    for batch in tqdm(chunk_list(paired, rag_batch_size), desc="Retrieval global all-steps batch"):
-        history_batch = [x[0] for x in batch]
-        query_batch = [x[1] for x in batch]
-
-        batch_outputs = retriever_batch_fn(history_batch, query_batch)
-
-        if not isinstance(batch_outputs, list):
-            if len(batch) == 1:
-                batch_outputs = [batch_outputs]
-            else:
-                raise ValueError(
-                    f"retriever_batch_fn must return list, got {type(batch_outputs)}"
-                )
-
-        if len(batch_outputs) != len(batch):
-            raise ValueError(
-                f"Retrieval output length mismatch: expected={len(batch)}, got={len(batch_outputs)}"
-            )
-
-        raw_outputs.extend(batch_outputs)
-
-    for dialog_idx, turn_id, raw in zip(flat_dialogue_indices, flat_turn_ids, raw_outputs):
-        retrieval_by_dialogue[dialog_idx][turn_id] = normalize_raw_cases(raw, top_k=top_k)
-
-    return retrieval_by_dialogue
+retrieval_by_dialogue = run_retrieval_for_all_dialogues_query_steps(
+    dialogues=dialogues,
+    query_outputs=query_outputs,
+    retriever_batch_fn=retriever_batch_fn,
+    rag_batch_size=rag_batch_size,
+    top_k=retrieval_top_k,
+)
