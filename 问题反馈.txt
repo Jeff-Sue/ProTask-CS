@@ -1,183 +1,158 @@
 from __future__ import annotations
 
 import json
-import re
+from pathlib import Path
 from typing import Any, Dict, List
 
-try:
-    from json_repair import repair_json
-except Exception:  # pragma: no cover
-    repair_json = None
+from .io_utils import read_prompt
+from .schema import Pair, format_pairs
 
 
-QUERY_MODES = {"none", "reuse", "refine", "rewrite"}
-POLICY_LABELS = {
-    "AskMissingSlot",
-    "AskClarification",
-    "ExplainedResponse",
-    "CaseRecommendation",
-    "Handoff",
-    "ProcessAcknowledgement",
-}
-EVIDENCE_MODES = {"no_evidence_needed", "retrieved_evidence", "insufficient_evidence"}
+class PromptBank:
+    def __init__(self, prompt_dir: str | Path):
+        root = Path(prompt_dir)
+        self.annotation_query = read_prompt(root / "annotation" / "query.prompt")
+        self.annotation_trigger = read_prompt(root / "annotation" / "trigger.prompt")
+        self.annotation_policy = read_prompt(root / "annotation" / "policy.prompt")
+        self.prediction_query = read_prompt(root / "prediction" / "query.prompt")
+        self.prediction_trigger = read_prompt(root / "prediction" / "trigger.prompt")
+        self.prediction_policy = read_prompt(root / "prediction" / "policy.prompt")
+        self.prediction_response = read_prompt(root / "prediction" / "response.prompt")
 
 
-def _extract_json_text(text: str) -> str:
-    text = str(text or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?", "", text, flags=re.I).strip()
-        text = re.sub(r"```$", "", text).strip()
-    start_obj, start_arr = text.find("{"), text.find("[")
-    starts = [x for x in (start_obj, start_arr) if x >= 0]
-    if not starts:
-        return text
-    start = min(starts)
-    end_obj, end_arr = text.rfind("}"), text.rfind("]")
-    end = max(end_obj, end_arr)
-    if end >= start:
-        return text[start:end + 1]
-    return text[start:]
+def _chat(system_prompt: str, user_content: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
 
 
-def parse_json_obj(text: str) -> Dict[str, Any]:
-    raw = _extract_json_text(text)
-    try:
-        obj = json.loads(raw)
-    except Exception:
-        if repair_json is None:
-            raise
-        obj = json.loads(repair_json(raw))
-    if isinstance(obj, list):
-        return {"trajectory": obj}
-    if not isinstance(obj, dict):
-        raise ValueError(f"Expected JSON object, got {type(obj)}")
-    return obj
+def build_annotation_query_messages(bank: PromptBank, history_pairs: List[Pair]) -> List[Dict[str, str]]:
+    content = "【已完成历史对话】\n" + format_pairs(history_pairs)
+    return _chat(bank.annotation_query, content)
 
 
-def normalize_query_step(obj: Dict[str, Any], turn_id: int) -> Dict[str, Any]:
-    mode = str(obj.get("query_mode") or "none").strip()
-    if mode not in QUERY_MODES:
-        mode = "none"
-    q = str(obj.get("query_text") or "").strip()
-    if mode == "none":
-        q = ""
-    return {
-        "turn_id": int(obj.get("turn_id") or turn_id),
-        "query_mode": mode,
-        "query_text": q,
-        "reason": str(obj.get("reason") or "").strip(),
-    }
+def build_annotation_trigger_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    query_traj: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【Query Trajectory】\n"
+        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_trigger, content)
 
 
-def normalize_trigger_step(obj: Dict[str, Any], turn_id: int) -> Dict[str, Any]:
-    trig = obj.get("trigger", False)
-    if isinstance(trig, str):
-        trig = trig.strip().lower() in {"true", "yes", "1", "是"}
-    evidence_mode = str(obj.get("evidence_mode") or "no_evidence_needed").strip()
-    if evidence_mode not in EVIDENCE_MODES:
-        evidence_mode = "retrieved_evidence" if trig else "no_evidence_needed"
-    return {
-        "turn_id": int(obj.get("turn_id") or turn_id),
-        "trigger": bool(trig),
-        "evidence_mode": evidence_mode,
-        "reason": str(obj.get("reason") or "").strip(),
-    }
+def build_annotation_policy_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    query_traj: List[Dict[str, Any]],
+    trigger_traj: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【Query Trajectory】\n"
+        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
+        + "\n\n【Trigger Trajectory】\n"
+        + json.dumps({"trajectory": trigger_traj}, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_policy, content)
 
 
-def normalize_policy_step(obj: Dict[str, Any], turn_id: int) -> Dict[str, Any]:
-    label = str(obj.get("label") or obj.get("policy") or "ProcessAcknowledgement").strip()
-    if label not in POLICY_LABELS:
-        label = "ProcessAcknowledgement"
-    return {
-        "turn_id": int(obj.get("turn_id") or turn_id),
-        "label": label,
-        "case_id": str(obj.get("case_id") or "").strip().upper(),
-        "reason": str(obj.get("reason") or "").strip(),
-    }
+def build_prediction_query_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_query: List[Dict[str, Any]],
+    current_user: str,
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史 Query Trajectory】\n"
+        + json.dumps({"trajectory": historical_query}, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+    )
+    return _chat(bank.prediction_query, content)
 
 
-def normalize_response(obj: Dict[str, Any] | str) -> str:
-    if isinstance(obj, dict):
-        return str(obj.get("response") or obj.get("text") or "").strip()
-    return str(obj or "").strip()
+def build_prediction_trigger_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_retrieval: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史状态轨迹】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前 Query Step】\n"
+        + json.dumps(current_query, ensure_ascii=False, indent=2)
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_trigger, content)
 
 
-def parse_trajectory(text: str, kind: str, expected_len: int) -> List[Dict[str, Any]]:
-    obj = parse_json_obj(text)
-    traj = obj.get("trajectory", [])
-    if not isinstance(traj, list):
-        traj = []
-    out: List[Dict[str, Any]] = []
-    for i in range(expected_len):
-        raw = traj[i] if i < len(traj) and isinstance(traj[i], dict) else {}
-        turn_id = i + 1
-        if kind == "query":
-            out.append(normalize_query_step(raw, turn_id))
-        elif kind == "trigger":
-            out.append(normalize_trigger_step(raw, turn_id))
-        elif kind == "policy":
-            out.append(normalize_policy_step(raw, turn_id))
-        else:
-            raise ValueError(f"Unknown trajectory kind: {kind}")
-    return out
+def build_prediction_policy_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_retrieval: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史状态轨迹】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前 Query Step】\n"
+        + json.dumps(current_query, ensure_ascii=False, indent=2)
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Trigger Step】\n"
+        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_policy, content)
 
 
-def parse_step(text: str, kind: str, turn_id: int) -> Dict[str, Any]:
-    obj = parse_json_obj(text)
-    if "trajectory" in obj and isinstance(obj["trajectory"], list) and obj["trajectory"]:
-        obj = obj["trajectory"][-1]
-    if kind == "query":
-        return normalize_query_step(obj, turn_id)
-    if kind == "trigger":
-        return normalize_trigger_step(obj, turn_id)
-    if kind == "policy":
-        return normalize_policy_step(obj, turn_id)
-    raise ValueError(f"Unknown step kind: {kind}")
-
-
-def normalize_retrieval(raw: Any, top_k: int = 5) -> Dict[str, Any]:
-    cases: List[Dict[str, Any]] = []
-    selected_case_ids: List[str] = []
-
-    if raw is None:
-        return {"selected_case_ids": [], "retrieved_cases": []}
-
-    if isinstance(raw, dict):
-        if isinstance(raw.get("selected_case_ids"), list):
-            selected_case_ids = [str(x).strip().upper() for x in raw.get("selected_case_ids", []) if str(x).strip()]
-        for key in ("retrieved_cases", "cases", "results", "data"):
-            if isinstance(raw.get(key), list):
-                cases = raw[key]
-                break
-        if not cases and isinstance(raw.get("case_diagnostics"), list):
-            cases = raw["case_diagnostics"]
-    elif isinstance(raw, list):
-        cases = raw
-
-    norm_cases: List[Dict[str, Any]] = []
-    for c in cases[:top_k]:
-        if isinstance(c, str):
-            cid = c.strip().upper()
-            norm_cases.append({"case_id": cid, "title": ""})
-            continue
-        if not isinstance(c, dict):
-            continue
-        cid = str(c.get("case_id") or c.get("id") or c.get("caseId") or c.get("caseID") or "").strip().upper()
-        title = str(c.get("title") or c.get("name") or c.get("case_title") or "").strip()
-        score = c.get("score", c.get("similarity", c.get("relevance")))
-        item = {"case_id": cid, "title": title}
-        if score is not None:
-            item["score"] = score
-        norm_cases.append(item)
-        if cid and cid not in selected_case_ids:
-            selected_case_ids.append(cid)
-
-    if not norm_cases and selected_case_ids:
-        norm_cases = [{"case_id": cid, "title": ""} for cid in selected_case_ids[:top_k]]
-    if not selected_case_ids:
-        selected_case_ids = [c["case_id"] for c in norm_cases if c.get("case_id")]
-
-    return {
-        "selected_case_ids": selected_case_ids[:top_k],
-        "retrieved_cases": norm_cases[:top_k],
-    }
+def build_response_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    current_user: str,
+    current_retrieval: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    current_policy: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Trigger Step】\n"
+        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Policy Step】\n"
+        + json.dumps(current_policy, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_response, content)
