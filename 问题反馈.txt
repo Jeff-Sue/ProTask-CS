@@ -1,20 +1,377 @@
-def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    path = Path(path)
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-    if text[0] in "[{":
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for key in ("data", "dialogues", "items", "records"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-            return [data]
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
+from __future__ import annotations
+
+import argparse
+import time
+from typing import Any, Dict, List, Tuple
+
+from tqdm import tqdm
+
+from .external import get_batch_rag, get_parallel_inference, run_llm_batch, run_rag_batch
+from .io_utils import chunked, load_json_or_jsonl, write_jsonl
+from .parsers import (
+    normalize_retrieval,
+    normalize_response,
+    parse_json_obj,
+    parse_step,
+    parse_trajectory,
+)
+from .prompt_builders import (
+    PromptBank,
+    build_annotation_policy_messages,
+    build_annotation_query_messages,
+    build_annotation_trigger_messages,
+    build_prediction_policy_messages,
+    build_prediction_query_messages,
+    build_prediction_trigger_messages,
+    build_response_messages,
+)
+from .schema import TargetTurn, build_target_turns, extract_case_ids, format_pairs
+
+
+EMPTY_STATE = {"query": [], "trigger": [], "policy": []}
+
+
+def _empty_state() -> Dict[str, List[Dict[str, Any]]]:
+    return {"query": [], "trigger": [], "policy": []}
+
+
+def _state_slice(state: Dict[str, List[Dict[str, Any]]], n: int) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "query": list(state.get("query", []))[:n],
+        "trigger": list(state.get("trigger", []))[:n],
+        "policy": list(state.get("policy", []))[:n],
+    }
+
+
+def _state_copy(state: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    return _state_slice(state, max(len(state.get("query", [])), len(state.get("trigger", [])), len(state.get("policy", []))))
+
+
+def _needs_retrieval(query_step: Dict[str, Any]) -> bool:
+    return query_step.get("query_mode") in {"rewrite", "refine", "reuse"} and bool(query_step.get("query_text"))
+
+
+def _make_output_row(
+    target: TargetTurn,
+    state_source: str,
+    golden_annotation: Dict[str, List[Dict[str, Any]]],
+    query_step: Dict[str, Any],
+    retrieval: Dict[str, Any],
+    trigger_step: Dict[str, Any],
+    policy_step: Dict[str, Any],
+    response: str,
+    latency_ms: Dict[str, int],
+) -> Dict[str, Any]:
+    return {
+        "dialog_id": target.dialog_id,
+        "turn_id": target.turn_id,
+        "state_source": state_source,
+        "current_user_input": target.current_user,
+        "golden_response": target.golden_response,
+        "gold_case_ids": extract_case_ids(target.golden_response),
+        "golden_annotation": _state_copy(golden_annotation),
+        "current": {
+            "query": query_step,
+            "retrieval": retrieval,
+            "trigger": trigger_step,
+            "policy": policy_step,
+            "response": response,
+        },
+        "latency_ms": latency_ms,
+    }
+
+
+def build_all_targets(raw_dialogues: List[Dict[str, Any]]) -> List[TargetTurn]:
+    targets: List[TargetTurn] = []
+    for raw in raw_dialogues:
+        targets.extend(build_target_turns(raw))
+    return targets
+
+
+def annotate_histories_gold_state(
+    targets: List[TargetTurn],
+    bank: PromptBank,
+    parallel_inference,
+    batch_size: int,
+) -> Dict[Tuple[str, int], Dict[str, List[Dict[str, Any]]]]:
+    """Parse only completed historical pairs for each target.
+
+    Key is (dialog_id, history_len). history_len = target.turn_id - 1.
+    The current user input is never included here.
+    """
+    unique: Dict[Tuple[str, int], List[Any]] = {}
+    for t in targets:
+        n = len(t.history_pairs)
+        if n == 0:
+            continue
+        unique[(t.dialog_id, n)] = t.history_pairs
+
+    states: Dict[Tuple[str, int], Dict[str, List[Dict[str, Any]]]] = {
+        (t.dialog_id, 0): _empty_state() for t in targets if len(t.history_pairs) == 0
+    }
+    if not unique:
+        return states
+
+    keys = list(unique.keys())
+    histories = [unique[k] for k in keys]
+
+    # Query annotation.
+    q_messages = [build_annotation_query_messages(bank, h) for h in histories]
+    q_raw: List[str] = []
+    for batch in tqdm(list(chunked(q_messages, batch_size)), desc="Annotate historical query"):
+        q_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
+    q_trajs = [parse_trajectory(x, "query", expected_len=len(histories[i])) for i, x in enumerate(q_raw)]
+
+    # Trigger annotation, conditioned on query trajectory.
+    trig_messages = [
+        build_annotation_trigger_messages(bank, histories[i], q_trajs[i])
+        for i in range(len(histories))
+    ]
+    trig_raw: List[str] = []
+    for batch in tqdm(list(chunked(trig_messages, batch_size)), desc="Annotate historical trigger"):
+        trig_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
+    trig_trajs = [parse_trajectory(x, "trigger", expected_len=len(histories[i])) for i, x in enumerate(trig_raw)]
+
+    # Policy annotation, conditioned on query/trigger trajectory.
+    pol_messages = [
+        build_annotation_policy_messages(bank, histories[i], q_trajs[i], trig_trajs[i])
+        for i in range(len(histories))
+    ]
+    pol_raw: List[str] = []
+    for batch in tqdm(list(chunked(pol_messages, batch_size)), desc="Annotate historical policy"):
+        pol_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
+    pol_trajs = [parse_trajectory(x, "policy", expected_len=len(histories[i])) for i, x in enumerate(pol_raw)]
+
+    for i, key in enumerate(keys):
+        states[key] = {"query": q_trajs[i], "trigger": trig_trajs[i], "policy": pol_trajs[i]}
+    return states
+
+
+def run_retrieval_for_query_steps(
+    targets: List[TargetTurn],
+    query_steps: List[Dict[str, Any]],
+    batch_zefeng_rag,
+    rag_batch_size: int,
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    retrievals = [{"selected_case_ids": [], "retrieved_cases": []} for _ in targets]
+    idxs: List[int] = []
+    histories: List[str] = []
+    queries: List[str] = []
+
+    for i, (t, q) in enumerate(zip(targets, query_steps)):
+        if _needs_retrieval(q):
+            idxs.append(i)
+            histories.append(format_pairs(t.history_pairs) + "\n" + t.current_user)
+            queries.append(q["query_text"])
+
+    for batch_indices in tqdm(list(chunked(list(range(len(idxs))), rag_batch_size)), desc="Retrieval global batch"):
+        h_batch = [histories[j] for j in batch_indices]
+        q_batch = [queries[j] for j in batch_indices]
+        raw_batch = run_rag_batch(batch_zefeng_rag, h_batch, q_batch)
+        if not isinstance(raw_batch, list):
+            raw_batch = [raw_batch]
+        if len(raw_batch) != len(batch_indices):
+            raise ValueError(f"RAG output length mismatch: expected {len(batch_indices)}, got {len(raw_batch)}")
+        for local_j, raw in zip(batch_indices, raw_batch):
+            retrievals[idxs[local_j]] = normalize_retrieval(raw, top_k=top_k)
+    return retrievals
+
+
+def run_gold_state_pe(args) -> List[Dict[str, Any]]:
+    raw_dialogues = load_json_or_jsonl(args.data_path)
+    targets = build_all_targets(raw_dialogues)
+    bank = PromptBank(args.prompt_dir)
+    parallel_inference = get_parallel_inference(args.project_root)
+    batch_zefeng_rag = get_batch_rag(args.project_root)
+
+    history_states = annotate_histories_gold_state(targets, bank, parallel_inference, args.batch_size)
+
+    rows: List[Dict[str, Any]] = []
+    start_total = time.time()
+
+    # Current query prediction, batched globally.
+    q_messages = []
+    states_for_target = []
+    for t in targets:
+        hist_state = history_states.get((t.dialog_id, len(t.history_pairs)), _empty_state())
+        states_for_target.append(hist_state)
+        q_messages.append(build_prediction_query_messages(bank, t.history_pairs, hist_state["query"], t.current_user, t.turn_id))
+
+    t0 = time.time()
+    q_raw: List[str] = []
+    for batch in tqdm(list(chunked(q_messages, args.batch_size)), desc="Predict current query"):
+        q_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
+    query_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+    query_steps = [parse_step(x, "query", t.turn_id) for x, t in zip(q_raw, targets)]
+
+    # Retrieval, batched globally.
+    t0 = time.time()
+    retrievals = run_retrieval_for_query_steps(targets, query_steps, batch_zefeng_rag, args.rag_batch_size, args.top_k)
+    retrieval_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+
+    # Trigger prediction.
+    trig_messages = [
+        build_prediction_trigger_messages(
+            bank, t.history_pairs, states_for_target[i], t.current_user, query_steps[i], retrievals[i], t.turn_id
+        )
+        for i, t in enumerate(targets)
+    ]
+    t0 = time.time()
+    trig_raw: List[str] = []
+    for batch in tqdm(list(chunked(trig_messages, args.batch_size)), desc="Predict current trigger"):
+        trig_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
+    trigger_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+    trigger_steps = [parse_step(x, "trigger", t.turn_id) for x, t in zip(trig_raw, targets)]
+
+    # Policy prediction.
+    pol_messages = [
+        build_prediction_policy_messages(
+            bank,
+            t.history_pairs,
+            states_for_target[i],
+            t.current_user,
+            query_steps[i],
+            retrievals[i],
+            trigger_steps[i],
+            t.turn_id,
+        )
+        for i, t in enumerate(targets)
+    ]
+    t0 = time.time()
+    pol_raw: List[str] = []
+    for batch in tqdm(list(chunked(pol_messages, args.batch_size)), desc="Predict current policy"):
+        pol_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
+    policy_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+    policy_steps = [parse_step(x, "policy", t.turn_id) for x, t in zip(pol_raw, targets)]
+
+    # Response generation.
+    resp_messages = [
+        build_response_messages(bank, t.history_pairs, t.current_user, retrievals[i], trigger_steps[i], policy_steps[i])
+        for i, t in enumerate(targets)
+    ]
+    t0 = time.time()
+    resp_raw: List[str] = []
+    for batch in tqdm(list(chunked(resp_messages, args.batch_size)), desc="Generate current response"):
+        resp_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
+    response_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+    responses = [normalize_response(parse_json_obj(x)) for x in resp_raw]
+
+    total_ms = int((time.time() - start_total) * 1000 / max(len(targets), 1))
+    for i, t in enumerate(targets):
+        rows.append(
+            _make_output_row(
+                t,
+                "gold_state",
+                states_for_target[i],
+                query_steps[i],
+                retrievals[i],
+                trigger_steps[i],
+                policy_steps[i],
+                responses[i],
+                {
+                    "query": query_ms,
+                    "retrieval": retrieval_ms,
+                    "trigger": trigger_ms,
+                    "policy": policy_ms,
+                    "response": response_ms,
+                    "total": total_ms,
+                },
+            )
+        )
     return rows
+
+
+def run_pred_state_pe(args) -> List[Dict[str, Any]]:
+    raw_dialogues = load_json_or_jsonl(args.data_path)
+    bank = PromptBank(args.prompt_dir)
+    parallel_inference = get_parallel_inference(args.project_root)
+    batch_zefeng_rag = get_batch_rag(args.project_root)
+    rows: List[Dict[str, Any]] = []
+
+    # Golden annotation is saved for analysis only.
+    # Pred-state prediction still uses accumulated predicted state as input.
+    all_targets = build_all_targets(raw_dialogues)
+    gold_history_states = annotate_histories_gold_state(all_targets, bank, parallel_inference, args.batch_size)
+
+    for raw in tqdm(raw_dialogues, desc="Pred-state dialogues"):
+        targets = build_target_turns(raw)
+        state = _empty_state()
+        for t in targets:
+            start = time.time()
+
+            t0 = time.time()
+            q_msg = build_prediction_query_messages(bank, t.history_pairs, state["query"], t.current_user, t.turn_id)
+            q_raw = run_llm_batch(parallel_inference, [q_msg], batch_size=1)[0]
+            query_ms = int((time.time() - t0) * 1000)
+            q_step = parse_step(q_raw, "query", t.turn_id)
+
+            t0 = time.time()
+            if _needs_retrieval(q_step):
+                hist = format_pairs(t.history_pairs) + "\n" + t.current_user
+                raw_ret = run_rag_batch(batch_zefeng_rag, [hist], [q_step["query_text"]])
+                if isinstance(raw_ret, list) and raw_ret:
+                    raw_ret = raw_ret[0]
+                retrieval = normalize_retrieval(raw_ret, top_k=args.top_k)
+            else:
+                retrieval = {"selected_case_ids": [], "retrieved_cases": []}
+            retrieval_ms = int((time.time() - t0) * 1000)
+
+            t0 = time.time()
+            trig_msg = build_prediction_trigger_messages(bank, t.history_pairs, state, t.current_user, q_step, retrieval, t.turn_id)
+            trig_raw = run_llm_batch(parallel_inference, [trig_msg], batch_size=1)[0]
+            trigger_ms = int((time.time() - t0) * 1000)
+            trig_step = parse_step(trig_raw, "trigger", t.turn_id)
+
+            t0 = time.time()
+            pol_msg = build_prediction_policy_messages(bank, t.history_pairs, state, t.current_user, q_step, retrieval, trig_step, t.turn_id)
+            pol_raw = run_llm_batch(parallel_inference, [pol_msg], batch_size=1)[0]
+            policy_ms = int((time.time() - t0) * 1000)
+            pol_step = parse_step(pol_raw, "policy", t.turn_id)
+
+            t0 = time.time()
+            resp_msg = build_response_messages(bank, t.history_pairs, t.current_user, retrieval, trig_step, pol_step)
+            resp_raw = run_llm_batch(parallel_inference, [resp_msg], batch_size=1)[0]
+            response_ms = int((time.time() - t0) * 1000)
+            response = normalize_response(parse_json_obj(resp_raw))
+
+            latency = {
+                "query": query_ms,
+                "retrieval": retrieval_ms,
+                "trigger": trigger_ms,
+                "policy": policy_ms,
+                "response": response_ms,
+                "total": int((time.time() - start) * 1000),
+            }
+            gold_ann = gold_history_states.get((t.dialog_id, len(t.history_pairs)), _empty_state())
+            rows.append(_make_output_row(t, "pred_state", gold_ann, q_step, retrieval, trig_step, pol_step, response, latency))
+
+            # Accumulate only current predicted steps as next historical state.
+            state["query"].append(q_step)
+            state["trigger"].append(trig_step)
+            state["policy"].append(pol_step)
+    return rows
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--state_source", choices=["gold_state", "pred_state"], default="gold_state")
+    parser.add_argument("--prompt_dir", default="prompts")
+    parser.add_argument("--project_root", default=".")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--rag_batch_size", type=int, default=64)
+    parser.add_argument("--top_k", type=int, default=5)
+    args = parser.parse_args()
+
+    if args.state_source == "gold_state":
+        rows = run_gold_state_pe(args)
+    else:
+        rows = run_pred_state_pe(args)
+    write_jsonl(args.output_path, rows)
+    print(f"Saved {len(rows)} rows to {args.output_path}")
+
+
+if __name__ == "__main__":
+    main()
