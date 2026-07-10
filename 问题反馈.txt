@@ -1,8 +1,170 @@
-#!/usr/bin/env bash
-set -euo pipefail
-python -m pe.golden_annotation \
-  --data_path "${1:-data/dialogues.json}" \
-  --output_path "${2:-outputs/incremental_golden_annotation.jsonl}" \
-  --prompt_dir prompts \
-  --project_root . \
-  --continue_on_error
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List
+
+CASE_ID_RE = re.compile(r"KT\d{6,}", re.IGNORECASE)
+
+
+@dataclass
+class Pair:
+    user: str
+    assistant: str
+
+
+@dataclass
+class TargetTurn:
+    dialog_id: str
+    turn_id: int
+    history_pairs: List[Pair]
+    current_user: str
+    golden_response: str
+
+
+def extract_case_ids(text: str) -> List[str]:
+    if not text:
+        return []
+    seen = set()
+    out: List[str] = []
+    for m in CASE_ID_RE.findall(str(text)):
+        cid = m.upper()
+        if cid not in seen:
+            out.append(cid)
+            seen.add(cid)
+    return out
+
+
+def normalize_case_ids(case_ids: Any) -> List[str]:
+    """Normalize case ids from sample['caseId'] or text fields."""
+    if case_ids is None:
+        return []
+    if isinstance(case_ids, str):
+        vals = extract_case_ids(case_ids) or [case_ids]
+    elif isinstance(case_ids, list):
+        vals = []
+        for x in case_ids:
+            vals.extend(extract_case_ids(str(x)) or [str(x)])
+    else:
+        vals = extract_case_ids(str(case_ids)) or [str(case_ids)]
+    seen = set()
+    out = []
+    for x in vals:
+        cid = str(x).strip().upper()
+        if cid and cid not in seen:
+            out.append(cid)
+            seen.add(cid)
+    return out
+
+
+def _role_of(msg: Dict[str, Any]) -> str:
+    # Native Huawei sample format: {"用户": "..."} / {"客服": "..."}
+    if "用户" in msg:
+        return "user"
+    if "客服" in msg:
+        return "assistant"
+
+    role = str(msg.get("role") or msg.get("speaker") or msg.get("from") or "").lower()
+    if role in {"user", "human", "客户", "用户"}:
+        return "user"
+    if role in {"assistant", "客服", "agent", "system", "gpt"}:
+        return "assistant"
+    text = str(msg.get("text") or msg.get("content") or msg.get("value") or "")
+    if text.startswith("用户:") or text.startswith("用户："):
+        return "user"
+    if text.startswith("客服:") or text.startswith("客服："):
+        return "assistant"
+    return role
+
+
+def _text_of(msg: Any) -> str:
+    if isinstance(msg, str):
+        txt = msg.strip()
+        # Remove role prefix when present.
+        txt = re.sub(r"^(用户|客服)[:：]\s*", "", txt).strip()
+        return txt
+    if isinstance(msg, dict):
+        if "用户" in msg:
+            return str(msg.get("用户") or "").strip()
+        if "客服" in msg:
+            return str(msg.get("客服") or "").strip()
+        txt = str(msg.get("text") or msg.get("content") or msg.get("value") or msg.get("utterance") or "").strip()
+        txt = re.sub(r"^(用户|客服)[:：]\s*", "", txt).strip()
+        return txt
+    return str(msg).strip()
+
+
+def _message_list(raw: Dict[str, Any]) -> List[Dict[str, str]]:
+    source = None
+    # Includes the uploaded sample format: raw['text'] is a list of {用户/客服: ...}
+    for key in ("messages", "turns", "dialogue", "conversation", "text"):
+        if isinstance(raw.get(key), list):
+            source = raw[key]
+            break
+    if source is None and isinstance(raw.get("dialogue_history"), list):
+        source = raw["dialogue_history"]
+    if source is None:
+        raise ValueError("Cannot find message list. Expected messages/turns/dialogue/conversation/text.")
+
+    messages: List[Dict[str, str]] = []
+    for item in source:
+        if isinstance(item, str):
+            txt = item.strip()
+            if not txt:
+                continue
+            if txt.startswith("用户:") or txt.startswith("用户："):
+                messages.append({"role": "user", "text": _text_of(txt)})
+            elif txt.startswith("客服:") or txt.startswith("客服："):
+                messages.append({"role": "assistant", "text": _text_of(txt)})
+            else:
+                # Default unknown strings to user text to avoid dropping data.
+                messages.append({"role": "user", "text": txt})
+        elif isinstance(item, dict):
+            role = _role_of(item)
+            text = _text_of(item)
+            if text:
+                messages.append({"role": role, "text": text})
+    return messages
+
+
+def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
+    dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+    messages = _message_list(raw)
+    targets: List[TargetTurn] = []
+    completed_pairs: List[Pair] = []
+    user_buffer: List[str] = []
+    turn_id = 0
+
+    for msg in messages:
+        role, text = msg["role"], msg["text"]
+        if role == "user":
+            user_buffer.append(text)
+        elif role == "assistant":
+            if not user_buffer:
+                # Assistant without a preceding user is not a target customer-service turn.
+                continue
+            current_user = "\n".join(user_buffer).strip()
+            turn_id += 1
+            targets.append(
+                TargetTurn(
+                    dialog_id=dialog_id,
+                    turn_id=turn_id,
+                    history_pairs=list(completed_pairs),
+                    current_user=current_user,
+                    golden_response=text,
+                )
+            )
+            completed_pairs.append(Pair(user=current_user, assistant=text))
+            user_buffer = []
+    return targets
+
+
+def format_pairs(pairs: List[Pair]) -> str:
+    if not pairs:
+        return "（无已完成历史轮）"
+    lines: List[str] = []
+    for idx, pair in enumerate(pairs, start=1):
+        lines.append(f"[历史轮 {idx}]")
+        lines.append(f"用户：{pair.user}")
+        lines.append(f"客服：{pair.assistant}")
+    return "\n".join(lines)
