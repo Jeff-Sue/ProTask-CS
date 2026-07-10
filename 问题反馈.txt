@@ -1,230 +1,214 @@
-你是一个 IT 客服对话系统中的 Query State Annotator。
-
-你的任务是：根据历史对话、历史 query 状态和当前用户输入，判断当前轮在进入 RAG / Trigger / Policy 之前，系统理论上应该生成什么 query_mode 和 query_text。
-
-你不是在回答用户问题，也不是在生成客服回复。
-你只标注当前轮 query，不要重新标注历史轨迹。
-
-⸻
-
-一、输入
-
-你会收到：
-
-1. 【历史对话】
-    当前轮之前已经发生的对话内容。
-2. 【历史 query trajectory】
-    当前轮之前已经标注好的 query 状态。
-3. 【当前用户输入】
-    当前轮用户刚刚说的话。
-4. 【当前真实客服回复】
-    只用于检查是否存在明显信息泄漏，不能用于生成 query_text。
-5. 【当前 policy / trigger 状态】
-    只用于检查一致性，不能用于生成 query_text。
-6. 【当前候选案例】
-    只用于检查一致性，不能用于生成 query_text。
-
-⸻
-
-二、核心原则
-
-query 发生在 trigger 和 policy 之前。
-
-因此，query_text 只能来自：
-
-1. 当前用户输入；
-2. 当前轮之前的历史对话；
-3. 历史 query trajectory 中已有的 query。
-
-query_text 不能来自：
-
-1. 当前客服回复中新问出的槽位；
-2. 当前 policy 的判断结果；
-3. 当前 trigger / evidence 的判断结果；
-4. 当前候选案例中的专业条件；
-5. 当前轮之后的未来对话。
-
-⸻
-
-三、输出格式
-
-只输出合法 JSON，不要输出任何额外解释：
-
-{
-“turn_id”: 当前轮编号,
-“query_mode”: “none|reuse|refine|rewrite”,
-“query_text”: “检索query或空字符串”,
-“known_terms”: [“当前已知关键词”],
-“reason”: “一句简洁中文说明”
-}
-
-⸻
-
-四、字段规则
-
-1. turn_id
-
-如果历史 query trajectory 已有 n 轮，则当前 turn_id = n + 1。
-
-2. query_mode
-
-只能是：
-
-* none
-* reuse
-* refine
-* rewrite
-
-3. query_text
-
-* 当 query_mode = none 时，必须是空字符串。
-* 当 query_mode = reuse/refine/rewrite 时，必须给出检索 query。
-* query_text 必须简洁、面向检索。
-* query_text 只能包含当前已经明确的信息。
-* 不要写成客服回复句子。
-* 不要加入用户没有说过的信息。
-
-4. known_terms
-
-列出当前用户输入或历史对话中已经明确出现的关键词。
-不要写入客服回复、policy、trigger、候选案例中才出现的信息。
-
-5. reason
-
-一句简洁中文说明，不超过 50 字。
-
-⸻
-
-五、query_mode 定义
-
-1. none
-
-当前轮之前没有形成明确可检索的 IT 问题，也没有历史 query 可以复用。
-
-适用情况：
-
-* 寒暄、感谢、结束语；
-* 用户只是说“好的”“谢谢”“我试试”；
-* 单纯催促或情绪表达；
-* 没有对象、动作、场景、异常现象；
-* 历史中也没有有效 query。
-
-注意：
-“信息不足以解决”不等于 none。
-只要用户已经表达出可检索的问题现象，就应生成 query。
-
-⸻
-
-2. rewrite
-
-当前轮第一次形成新的可检索问题，或用户切换到新的问题主题。
-
-适用情况：
-
-* 用户提出新的 IT 问题；
-* 当前问题与历史 query 不是同一主题；
-* 历史没有可复用 query，需要新建检索意图。
-
-示例：
-
-用户：我用不了。
-正确：
-
-{
-“query_mode”: “rewrite”,
-“query_text”: “用户使用问题”,
-“known_terms”: [“用不了”]
-}
-
-不要输出：
-
-{
-“query_text”: “系统无法使用问题”
-}
-
-因为“系统”是客服后续追问或案例判断后才出现的信息。
-
-⸻
-
-3. reuse
-
-当前轮仍然围绕同一个核心问题，没有新增会改变检索目标的信息，可以沿用上一轮有效 query。
-
-适用情况：
-
-* 用户说“是的”“对”“就是这个”；
-* 用户重复表达同一问题；
-* 用户只是确认上一轮内容；
-* 当前轮没有新增系统、软件、报错、环境、权限、版本等信息。
-
-reuse 时也必须输出当前沿用的 query_text。
-
-⸻
-
-4. refine
-
-当前轮仍是同一个问题，但用户补充了新的已知信息，使 query 可以被细化。
-
-可以用于 refine 的信息必须由用户或历史对话明确提供，例如：
-
-* 系统名、软件名、模块名；
-* 报错信息；
-* 设备类型、平台、环境；
-* 操作路径或操作场景；
-* 失败现象；
-* 权限、网络、版本、账号状态等限制条件。
-
-注意：
-只有用户已经说出的新信息才能进入 query_text。
-客服当前回复中追问的信息不能用于 refine。
-
-⸻
-
-六、信息泄漏禁止规则
-
-这是最重要的规则。
-
-你可以看到当前客服回复、policy、trigger 和候选案例，但它们不能用来扩展 query_text。
-
-禁止以下情况：
-
-1. 用户只说“我用不了”，客服问“哪个系统用不了”
-    * 错误：系统无法使用问题
-    * 正确：用户使用问题 / 无法使用问题
-2. 用户只说“登不上”，候选案例是 Outlook 登录失败
-    * 错误：Outlook 登录失败
-    * 正确：登录失败问题
-3. 用户只说“打不开”，客服问“VPN 客户端吗”
-    * 错误：VPN 客户端打不开
-    * 正确：打不开问题
-4. 用户只说“没权限”，案例涉及权限申请系统
-    * 错误：权限申请系统无权限
-    * 正确：无权限问题
-5. 用户只说“连不上”，案例涉及 VPN
-    * 错误：VPN 连接失败
-    * 正确：连接失败问题
-
-除非这些具体对象、系统、软件、环境或报错已经由用户或历史对话明确说出。
-
-⸻
-
-七、历史一致性原则
-
-1. 同一问题不要无故 rewrite。
-2. 用户确认前文问题时，优先 reuse。
-3. 用户补充已知关键信息时，优先 refine。
-4. 用户切换新问题时，才使用 rewrite。
-5. 如果历史没有有效 query，且当前用户也没有明确问题，才使用 none。
-6. 不要为了匹配当前客服回复而改写 query。
-7. 不要为了匹配候选案例而扩展 query。
-
-⸻
-
-八、输出要求
-
-1. 只输出合法 JSON。
-2. 不要输出 markdown。
-3. 不要输出额外解释。
-4. 不要重新标注历史轮次。
-5. 不要输出完整 trajectory。
-6. 不要编造输入中没有的信息。
+from __future__ import annotations
+
+import argparse
+import time
+from typing import Any, Dict, List
+
+from tqdm import tqdm
+
+from .external import get_parallel_inference, run_llm_batch
+from .io_utils import load_json_or_jsonl, write_jsonl
+from .parsers import parse_step
+from .prompt_builders import (
+    PromptBank,
+    build_incremental_policy_messages,
+    build_incremental_query_messages,
+    build_incremental_trigger_messages,
+)
+from .schema import TargetTurn, build_target_turns, extract_case_ids, normalize_case_ids
+
+
+def _empty_state() -> Dict[str, List[Dict[str, Any]]]:
+    return {"query": [], "trigger": [], "policy": []}
+
+
+def _state_copy(state: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "query": list(state.get("query", [])),
+        "trigger": list(state.get("trigger", [])),
+        "policy": list(state.get("policy", [])),
+    }
+
+
+def _call_one(parallel_inference, messages: List[Dict[str, str]]) -> str:
+    """Call existing project inference API one prompt at a time."""
+    out = run_llm_batch(parallel_inference, [messages], batch_size=1)
+    if not isinstance(out, list) or not out:
+        raise RuntimeError("parallel_inference returned empty output")
+    return str(out[0])
+
+
+def build_candidate_evidence(raw: Dict[str, Any], target: TargetTurn) -> Dict[str, Any]:
+    """Build lightweight candidate evidence from available fields.
+
+    This golden annotator does not call RAG. It exposes only candidate ids already
+    present in the sample and ids mentioned by the current real agent response.
+    If your dataset later stores full case text, add it under sample['cases'] or
+    sample['retrieved_cases']; this function will pass it through.
+    """
+    case_ids = []
+    case_ids.extend(normalize_case_ids(raw.get("caseId")))
+    case_ids.extend(extract_case_ids(target.golden_response))
+
+    seen = set()
+    norm_ids = []
+    for cid in case_ids:
+        if cid and cid not in seen:
+            norm_ids.append(cid)
+            seen.add(cid)
+
+    cases = []
+    for key in ("retrieved_cases", "cases", "evidence"):
+        if isinstance(raw.get(key), list):
+            cases = raw[key]
+            break
+    if not cases:
+        cases = [{"case_id": cid, "title": ""} for cid in norm_ids]
+
+    return {
+        "sample_case_ids": norm_ids,
+        "current_response_case_ids": extract_case_ids(target.golden_response),
+        "retrieved_cases": cases,
+    }
+
+
+def annotate_dialogue_incremental(
+    raw: Dict[str, Any],
+    bank: PromptBank,
+    parallel_inference,
+) -> Dict[str, Any]:
+    targets = build_target_turns(raw)
+    dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+    state = _empty_state()
+    turn_rows: List[Dict[str, Any]] = []
+
+    for target in targets:
+        start = time.time()
+        candidate_evidence = build_candidate_evidence(raw, target)
+
+        # 1) Policy first: current real agent response is the main evidence.
+        t0 = time.time()
+        policy_msg = build_incremental_policy_messages(
+            bank=bank,
+            history_pairs=target.history_pairs,
+            historical_state=_state_copy(state),
+            current_user=target.current_user,
+            real_agent_response=target.golden_response,
+            candidate_evidence=candidate_evidence,
+            turn_id=target.turn_id,
+        )
+        policy_raw = _call_one(parallel_inference, policy_msg)
+        policy = parse_step(policy_raw, "policy", target.turn_id)
+        policy_ms = int((time.time() - t0) * 1000)
+
+        # 2) Trigger second: infer whether this turn needed a new RAG call or reused evidence.
+        t0 = time.time()
+        trigger_msg = build_incremental_trigger_messages(
+            bank=bank,
+            history_pairs=target.history_pairs,
+            historical_state=_state_copy(state),
+            current_user=target.current_user,
+            real_agent_response=target.golden_response,
+            current_policy=policy,
+            candidate_evidence=candidate_evidence,
+            turn_id=target.turn_id,
+        )
+        trigger_raw = _call_one(parallel_inference, trigger_msg)
+        trigger = parse_step(trigger_raw, "trigger", target.turn_id)
+        trigger_ms = int((time.time() - t0) * 1000)
+
+        # 3) Query last: it is annotated last for convenience, but must simulate
+        # the pre-trigger/pre-policy query and avoid leakage from response/cases.
+        t0 = time.time()
+        query_msg = build_incremental_query_messages(
+            bank=bank,
+            history_pairs=target.history_pairs,
+            historical_state=_state_copy(state),
+            current_user=target.current_user,
+            real_agent_response=target.golden_response,
+            current_policy=policy,
+            current_trigger=trigger,
+            candidate_evidence=candidate_evidence,
+            turn_id=target.turn_id,
+        )
+        query_raw = _call_one(parallel_inference, query_msg)
+        query = parse_step(query_raw, "query", target.turn_id)
+        query_ms = int((time.time() - t0) * 1000)
+
+        state["policy"].append(policy)
+        state["trigger"].append(trigger)
+        state["query"].append(query)
+
+        turn_rows.append(
+            {
+                "turn_id": target.turn_id,
+                "history_turns": len(target.history_pairs),
+                "current_user_input": target.current_user,
+                "real_agent_response": target.golden_response,
+                "candidate_evidence": candidate_evidence,
+                "policy": policy,
+                "trigger": trigger,
+                "query": query,
+                "raw_outputs": {
+                    "policy": policy_raw,
+                    "trigger": trigger_raw,
+                    "query": query_raw,
+                },
+                "latency_ms": {
+                    "policy": policy_ms,
+                    "trigger": trigger_ms,
+                    "query": query_ms,
+                    "total": int((time.time() - start) * 1000),
+                },
+            }
+        )
+
+    return {
+        "dialog_id": dialog_id,
+        "caseId": normalize_case_ids(raw.get("caseId")),
+        "num_turns": len(targets),
+        "golden_state": _state_copy(state),
+        "turn_annotations": turn_rows,
+    }
+
+
+def run_incremental_golden_annotation(args) -> List[Dict[str, Any]]:
+    raw_dialogues = load_json_or_jsonl(args.data_path)
+    bank = PromptBank(args.prompt_dir)
+    parallel_inference = get_parallel_inference(args.project_root)
+
+    if args.limit is not None:
+        raw_dialogues = raw_dialogues[args.start : args.start + args.limit]
+    elif args.start:
+        raw_dialogues = raw_dialogues[args.start :]
+
+    rows: List[Dict[str, Any]] = []
+    for raw in tqdm(raw_dialogues, desc="Incremental golden annotation"):
+        try:
+            rows.append(annotate_dialogue_incremental(raw, bank, parallel_inference))
+        except Exception as e:
+            dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+            rows.append({"dialog_id": dialog_id, "status": "error", "error": repr(e)})
+            if not args.continue_on_error:
+                raise
+    return rows
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Turn-by-turn golden-state annotation: Policy -> Trigger -> Query.")
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--prompt_dir", default="prompts")
+    parser.add_argument("--project_root", default=".")
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--continue_on_error", action="store_true")
+    args = parser.parse_args()
+
+    rows = run_incremental_golden_annotation(args)
+    write_jsonl(args.output_path, rows)
+    print(f"Saved {len(rows)} dialogues to {args.output_path}")
+
+
+if __name__ == "__main__":
+    main()
