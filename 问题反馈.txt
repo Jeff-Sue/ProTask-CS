@@ -2,61 +2,259 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
+
+from .io_utils import read_prompt
+from .schema import Pair, format_pairs
 
 
-def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    path = Path(path)
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-    if text[0] in "[{":
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for key in ("data", "dialogues", "items", "records"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-            # Support Huawei dict-of-samples format:
-            # {"220599461": {"text": [...], "caseId": [...]}, ...}
-            if data and all(isinstance(v, dict) for v in data.values()):
-                rows = []
-                for k, v in data.items():
-                    row = dict(v)
-                    row.setdefault("id", str(k))
-                    row.setdefault("dialog_id", str(k))
-                    rows.append(row)
-                return rows
-            return [data]
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
-    return rows
+class PromptBank:
+    def __init__(self, prompt_dir: str | Path):
+        root = Path(prompt_dir)
+        self.annotation_query = read_prompt(root / "annotation" / "query.prompt")
+        self.annotation_trigger = read_prompt(root / "annotation" / "trigger.prompt")
+        self.annotation_policy = read_prompt(root / "annotation" / "policy.prompt")
+        self.prediction_query = read_prompt(root / "prediction" / "query.prompt")
+        self.prediction_trigger = read_prompt(root / "prediction" / "trigger.prompt")
+        self.prediction_policy = read_prompt(root / "prediction" / "policy.prompt")
+        self.prediction_response = read_prompt(root / "prediction" / "response.prompt")
 
 
-def write_json(path: str | Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def _chat(system_prompt: str, user_content: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
 
 
-def write_jsonl(path: str | Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+# ---------------------------------------------------------------------------
+# Legacy full-history annotation builders, kept for backward compatibility.
+# ---------------------------------------------------------------------------
+
+def build_annotation_query_messages(bank: PromptBank, history_pairs: List[Pair]) -> List[Dict[str, str]]:
+    content = "【已完成历史对话】\n" + format_pairs(history_pairs)
+    return _chat(bank.annotation_query, content)
 
 
-def read_prompt(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8").strip()
+def build_annotation_trigger_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    query_traj: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【Query Trajectory】\n"
+        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_trigger, content)
 
 
-def chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    for i in range(0, len(items), batch_size):
-        yield items[i:i + batch_size]
+def build_annotation_policy_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    query_traj: List[Dict[str, Any]],
+    trigger_traj: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【Query Trajectory】\n"
+        + json.dumps({"trajectory": query_traj}, ensure_ascii=False, indent=2)
+        + "\n\n【Trigger Trajectory】\n"
+        + json.dumps({"trajectory": trigger_traj}, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_policy, content)
+
+
+# ---------------------------------------------------------------------------
+# New incremental golden-state annotation builders.
+# One dialogue is annotated turn by turn; each call returns exactly one step.
+# Internal order in the annotation loop: Policy -> Trigger -> Query.
+# Query is intentionally annotated last, but the prompt states that the query
+# itself simulates the pre-trigger/pre-policy retrieval input and must not leak
+# information from the current agent response / policy / trigger / cases.
+# ---------------------------------------------------------------------------
+
+def build_incremental_policy_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    real_agent_response: str,
+    candidate_evidence: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入与当前客服回复）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史 golden-state trajectory】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前真实客服回复】\n"
+        + real_agent_response
+        + "\n\n【当前可用候选案例 / evidence】\n"
+        + json.dumps(candidate_evidence, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_policy, content)
+
+
+def build_incremental_trigger_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    real_agent_response: str,
+    current_policy: Dict[str, Any],
+    candidate_evidence: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入与当前客服回复）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史 golden-state trajectory】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前真实客服回复】\n"
+        + real_agent_response
+        + "\n\n【当前 Policy Step】\n"
+        + json.dumps(current_policy, ensure_ascii=False, indent=2)
+        + "\n\n【当前可用候选案例 / evidence】\n"
+        + json.dumps(candidate_evidence, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_trigger, content)
+
+
+def build_incremental_query_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    real_agent_response: str,
+    current_policy: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    candidate_evidence: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入与当前客服回复）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史 Query Trajectory】\n"
+        + json.dumps({"trajectory": historical_state.get("query", [])}, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【以下内容只用于一致性检查，不能用于扩展 query_text】\n"
+        + "\n【当前真实客服回复】\n"
+        + real_agent_response
+        + "\n\n【当前 Policy Step】\n"
+        + json.dumps(current_policy, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Trigger Step】\n"
+        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
+        + "\n\n【当前候选案例 / evidence】\n"
+        + json.dumps(candidate_evidence, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.annotation_query, content)
+
+
+# ---------------------------------------------------------------------------
+# Existing prediction builders for PE evaluation.
+# ---------------------------------------------------------------------------
+
+def build_prediction_query_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_query: List[Dict[str, Any]],
+    current_user: str,
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史 Query Trajectory】\n"
+        + json.dumps({"trajectory": historical_query}, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+    )
+    return _chat(bank.prediction_query, content)
+
+
+def build_prediction_trigger_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_retrieval: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史状态轨迹】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前 Query Step】\n"
+        + json.dumps(current_query, ensure_ascii=False, indent=2)
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_trigger, content)
+
+
+def build_prediction_policy_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    historical_state: Dict[str, List[Dict[str, Any]]],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_retrieval: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    turn_id: int,
+) -> List[Dict[str, str]]:
+    content = (
+        f"【当前 turn_id】\n{turn_id}\n\n"
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【历史状态轨迹】\n"
+        + json.dumps(historical_state, ensure_ascii=False, indent=2)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前 Query Step】\n"
+        + json.dumps(current_query, ensure_ascii=False, indent=2)
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Trigger Step】\n"
+        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_policy, content)
+
+
+def build_response_messages(
+    bank: PromptBank,
+    history_pairs: List[Pair],
+    current_user: str,
+    current_retrieval: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    current_policy: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    content = (
+        "【已完成历史对话（不包含当前用户输入）】\n"
+        + format_pairs(history_pairs)
+        + "\n\n【当前用户输入】\n"
+        + current_user
+        + "\n\n【当前检索结果】\n"
+        + json.dumps(current_retrieval, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Trigger Step】\n"
+        + json.dumps(current_trigger, ensure_ascii=False, indent=2)
+        + "\n\n【当前 Policy Step】\n"
+        + json.dumps(current_policy, ensure_ascii=False, indent=2)
+    )
+    return _chat(bank.prediction_response, content)
