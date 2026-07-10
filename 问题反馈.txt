@@ -1,214 +1,62 @@
 from __future__ import annotations
 
-import argparse
-import time
-from typing import Any, Dict, List
-
-from tqdm import tqdm
-
-from .external import get_parallel_inference, run_llm_batch
-from .io_utils import load_json_or_jsonl, write_jsonl
-from .parsers import parse_step
-from .prompt_builders import (
-    PromptBank,
-    build_incremental_policy_messages,
-    build_incremental_query_messages,
-    build_incremental_trigger_messages,
-)
-from .schema import TargetTurn, build_target_turns, extract_case_ids, normalize_case_ids
+import json
+from pathlib import Path
+from typing import Any, Dict, Iterable, List
 
 
-def _empty_state() -> Dict[str, List[Dict[str, Any]]]:
-    return {"query": [], "trigger": [], "policy": []}
-
-
-def _state_copy(state: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    return {
-        "query": list(state.get("query", [])),
-        "trigger": list(state.get("trigger", [])),
-        "policy": list(state.get("policy", [])),
-    }
-
-
-def _call_one(parallel_inference, messages: List[Dict[str, str]]) -> str:
-    """Call existing project inference API one prompt at a time."""
-    out = run_llm_batch(parallel_inference, [messages], batch_size=1)
-    if not isinstance(out, list) or not out:
-        raise RuntimeError("parallel_inference returned empty output")
-    return str(out[0])
-
-
-def build_candidate_evidence(raw: Dict[str, Any], target: TargetTurn) -> Dict[str, Any]:
-    """Build lightweight candidate evidence from available fields.
-
-    This golden annotator does not call RAG. It exposes only candidate ids already
-    present in the sample and ids mentioned by the current real agent response.
-    If your dataset later stores full case text, add it under sample['cases'] or
-    sample['retrieved_cases']; this function will pass it through.
-    """
-    case_ids = []
-    case_ids.extend(normalize_case_ids(raw.get("caseId")))
-    case_ids.extend(extract_case_ids(target.golden_response))
-
-    seen = set()
-    norm_ids = []
-    for cid in case_ids:
-        if cid and cid not in seen:
-            norm_ids.append(cid)
-            seen.add(cid)
-
-    cases = []
-    for key in ("retrieved_cases", "cases", "evidence"):
-        if isinstance(raw.get(key), list):
-            cases = raw[key]
-            break
-    if not cases:
-        cases = [{"case_id": cid, "title": ""} for cid in norm_ids]
-
-    return {
-        "sample_case_ids": norm_ids,
-        "current_response_case_ids": extract_case_ids(target.golden_response),
-        "retrieved_cases": cases,
-    }
-
-
-def annotate_dialogue_incremental(
-    raw: Dict[str, Any],
-    bank: PromptBank,
-    parallel_inference,
-) -> Dict[str, Any]:
-    targets = build_target_turns(raw)
-    dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
-    state = _empty_state()
-    turn_rows: List[Dict[str, Any]] = []
-
-    for target in targets:
-        start = time.time()
-        candidate_evidence = build_candidate_evidence(raw, target)
-
-        # 1) Policy first: current real agent response is the main evidence.
-        t0 = time.time()
-        policy_msg = build_incremental_policy_messages(
-            bank=bank,
-            history_pairs=target.history_pairs,
-            historical_state=_state_copy(state),
-            current_user=target.current_user,
-            real_agent_response=target.golden_response,
-            candidate_evidence=candidate_evidence,
-            turn_id=target.turn_id,
-        )
-        policy_raw = _call_one(parallel_inference, policy_msg)
-        policy = parse_step(policy_raw, "policy", target.turn_id)
-        policy_ms = int((time.time() - t0) * 1000)
-
-        # 2) Trigger second: infer whether this turn needed a new RAG call or reused evidence.
-        t0 = time.time()
-        trigger_msg = build_incremental_trigger_messages(
-            bank=bank,
-            history_pairs=target.history_pairs,
-            historical_state=_state_copy(state),
-            current_user=target.current_user,
-            real_agent_response=target.golden_response,
-            current_policy=policy,
-            candidate_evidence=candidate_evidence,
-            turn_id=target.turn_id,
-        )
-        trigger_raw = _call_one(parallel_inference, trigger_msg)
-        trigger = parse_step(trigger_raw, "trigger", target.turn_id)
-        trigger_ms = int((time.time() - t0) * 1000)
-
-        # 3) Query last: it is annotated last for convenience, but must simulate
-        # the pre-trigger/pre-policy query and avoid leakage from response/cases.
-        t0 = time.time()
-        query_msg = build_incremental_query_messages(
-            bank=bank,
-            history_pairs=target.history_pairs,
-            historical_state=_state_copy(state),
-            current_user=target.current_user,
-            real_agent_response=target.golden_response,
-            current_policy=policy,
-            current_trigger=trigger,
-            candidate_evidence=candidate_evidence,
-            turn_id=target.turn_id,
-        )
-        query_raw = _call_one(parallel_inference, query_msg)
-        query = parse_step(query_raw, "query", target.turn_id)
-        query_ms = int((time.time() - t0) * 1000)
-
-        state["policy"].append(policy)
-        state["trigger"].append(trigger)
-        state["query"].append(query)
-
-        turn_rows.append(
-            {
-                "turn_id": target.turn_id,
-                "history_turns": len(target.history_pairs),
-                "current_user_input": target.current_user,
-                "real_agent_response": target.golden_response,
-                "candidate_evidence": candidate_evidence,
-                "policy": policy,
-                "trigger": trigger,
-                "query": query,
-                "raw_outputs": {
-                    "policy": policy_raw,
-                    "trigger": trigger_raw,
-                    "query": query_raw,
-                },
-                "latency_ms": {
-                    "policy": policy_ms,
-                    "trigger": trigger_ms,
-                    "query": query_ms,
-                    "total": int((time.time() - start) * 1000),
-                },
-            }
-        )
-
-    return {
-        "dialog_id": dialog_id,
-        "caseId": normalize_case_ids(raw.get("caseId")),
-        "num_turns": len(targets),
-        "golden_state": _state_copy(state),
-        "turn_annotations": turn_rows,
-    }
-
-
-def run_incremental_golden_annotation(args) -> List[Dict[str, Any]]:
-    raw_dialogues = load_json_or_jsonl(args.data_path)
-    bank = PromptBank(args.prompt_dir)
-    parallel_inference = get_parallel_inference(args.project_root)
-
-    if args.limit is not None:
-        raw_dialogues = raw_dialogues[args.start : args.start + args.limit]
-    elif args.start:
-        raw_dialogues = raw_dialogues[args.start :]
-
-    rows: List[Dict[str, Any]] = []
-    for raw in tqdm(raw_dialogues, desc="Incremental golden annotation"):
-        try:
-            rows.append(annotate_dialogue_incremental(raw, bank, parallel_inference))
-        except Exception as e:
-            dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
-            rows.append({"dialog_id": dialog_id, "status": "error", "error": repr(e)})
-            if not args.continue_on_error:
-                raise
+def load_json_or_jsonl(path: str | Path) -> List[Dict[str, Any]]:
+    path = Path(path)
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    if text[0] in "[{":
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("data", "dialogues", "items", "records"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            # Support Huawei dict-of-samples format:
+            # {"220599461": {"text": [...], "caseId": [...]}, ...}
+            if data and all(isinstance(v, dict) for v in data.values()):
+                rows = []
+                for k, v in data.items():
+                    row = dict(v)
+                    row.setdefault("id", str(k))
+                    row.setdefault("dialog_id", str(k))
+                    rows.append(row)
+                return rows
+            return [data]
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
     return rows
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Turn-by-turn golden-state annotation: Policy -> Trigger -> Query.")
-    parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_path", required=True)
-    parser.add_argument("--prompt_dir", default="prompts")
-    parser.add_argument("--project_root", default=".")
-    parser.add_argument("--start", type=int, default=0)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--continue_on_error", action="store_true")
-    args = parser.parse_args()
-
-    rows = run_incremental_golden_annotation(args)
-    write_jsonl(args.output_path, rows)
-    print(f"Saved {len(rows)} dialogues to {args.output_path}")
+def write_json(path: str | Path, data: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-if __name__ == "__main__":
-    main()
+def write_jsonl(path: str | Path, rows: Iterable[Dict[str, Any]]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def read_prompt(path: str | Path) -> str:
+    return Path(path).read_text(encoding="utf-8").strip()
+
+
+def chunked(items: List[Any], batch_size: int) -> Iterable[List[Any]]:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    for i in range(0, len(items), batch_size):
+        yield items[i:i + batch_size]
