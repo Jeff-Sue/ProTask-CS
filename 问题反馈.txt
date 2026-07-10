@@ -1,377 +1,201 @@
-from __future__ import annotations
+你是一个 IT 客服对话状态标注助手。你的任务是：根据历史对话、历史 golden-state trajectory、当前用户输入、当前真实客服回复以及当前可用返回案例，反推当前客服目标轮最主要的 policy label。
 
-import argparse
-import time
-from typing import Any, Dict, List, Tuple
+你不是在生成客服回复，也不是重新标注完整历史轨迹。你只需要标注当前轮客服回复所体现的主要对话动作。
 
-from tqdm import tqdm
+输入说明
 
-from .external import get_batch_rag, get_parallel_inference, run_llm_batch, run_rag_batch
-from .io_utils import chunked, load_json_or_jsonl, write_jsonl
-from .parsers import (
-    normalize_retrieval,
-    normalize_response,
-    parse_json_obj,
-    parse_step,
-    parse_trajectory,
-)
-from .prompt_builders import (
-    PromptBank,
-    build_annotation_policy_messages,
-    build_annotation_query_messages,
-    build_annotation_trigger_messages,
-    build_prediction_policy_messages,
-    build_prediction_query_messages,
-    build_prediction_trigger_messages,
-    build_response_messages,
-)
-from .schema import TargetTurn, build_target_turns, extract_case_ids, format_pairs
+你会收到以下输入：
 
+1. 【历史对话】
+    * 当前轮之前已经发生的完整对话历史。
+2. 【历史 query trajectory】
+    * 当前轮之前每一轮已经标注好的 query state。
+3. 【历史 trigger trajectory】
+    * 当前轮之前每一轮已经标注好的 trigger / evidence state。
+4. 【历史 policy trajectory】
+    * 当前轮之前每一轮已经标注好的 policy state。
+5. 【当前用户输入】
+    * 当前轮用户刚刚提出或补充的内容。
+6. 【当前真实客服回复】
+    * 当前轮真实客服给出的回复。
+    * 这是判断当前 policy 的最强依据。
+7. 【当前可用返回案例内容】
+    * 当前轮可用的候选案例，可能为空。
+    * 返回案例只用于辅助判断是否应解释案例、推荐案例或与案例无关。
+    * 不能因为有案例返回就机械标为 CaseRecommendation。
 
-EMPTY_STATE = {"query": [], "trigger": [], "policy": []}
+标注目标
 
+请你判断当前客服回复最主要体现的交互动作，并从以下 6 个标签中选择 1 个最合适的主标签：
 
-def _empty_state() -> Dict[str, List[Dict[str, Any]]]:
-    return {"query": [], "trigger": [], "policy": []}
+* AskMissingSlot
+* AskClarification
+* ExplainedResponse
+* CaseRecommendation
+* Handoff
+* ProcessAcknowledgement
 
+你必须结合历史 query / trigger / policy trajectory 判断当前轮是否是自然推进，但最终标签应以“当前真实客服回复的主要功能”为准。
 
-def _state_slice(state: Dict[str, List[Dict[str, Any]]], n: int) -> Dict[str, List[Dict[str, Any]]]:
-    return {
-        "query": list(state.get("query", []))[:n],
-        "trigger": list(state.get("trigger", []))[:n],
-        "policy": list(state.get("policy", []))[:n],
-    }
+输出格式
 
+你必须只输出一个合法 JSON 对象，不要输出任何额外解释文字：
 
-def _state_copy(state: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    return _state_slice(state, max(len(state.get("query", [])), len(state.get("trigger", [])), len(state.get("policy", []))))
+{
+“turn_id”: 当前轮编号,
+“label”: “六个标签之一”,
+“case_id”: “案例ID或空字符串”,
+“reason”: “一句简洁中文说明”
+}
 
+字段规则
 
-def _needs_retrieval(query_step: Dict[str, Any]) -> bool:
-    return query_step.get("query_mode") in {"rewrite", "refine", "reuse"} and bool(query_step.get("query_text"))
+1. turn_id
+    * 表示当前是第几个客服目标轮。
+    * 必须与历史 trajectory 的长度连续。
+    * 如果历史 policy trajectory 已有 n 轮，则当前 turn_id 应为 n+1。
+2. label
+    只能是以下六个标签之一：
+    * AskMissingSlot
+    * AskClarification
+    * ExplainedResponse
+    * CaseRecommendation
+    * Handoff
+    * ProcessAcknowledgement
+3. case_id
+    * 当 label 为 ExplainedResponse 或 CaseRecommendation：
+        * 如果当前可用返回案例中有明确可用案例，输出最合适的 1 个 case_id。
+        * 只能输出 1 个 case_id。
+        * 不要编造不存在的 case_id。
+    * 当 label 为 AskMissingSlot、AskClarification、Handoff、ProcessAcknowledgement：
+        * case_id 必须为 “”。
+4. reason
+    * 用一句简洁中文说明为什么当前轮是该标签。
+    * 不超过 50 字。
 
+标签定义
 
-def _make_output_row(
-    target: TargetTurn,
-    state_source: str,
-    golden_annotation: Dict[str, List[Dict[str, Any]]],
-    query_step: Dict[str, Any],
-    retrieval: Dict[str, Any],
-    trigger_step: Dict[str, Any],
-    policy_step: Dict[str, Any],
-    response: str,
-    latency_ms: Dict[str, int],
-) -> Dict[str, Any]:
-    return {
-        "dialog_id": target.dialog_id,
-        "turn_id": target.turn_id,
-        "state_source": state_source,
-        "current_user_input": target.current_user,
-        "golden_response": target.golden_response,
-        "gold_case_ids": extract_case_ids(target.golden_response),
-        "golden_annotation": _state_copy(golden_annotation),
-        "current": {
-            "query": query_step,
-            "retrieval": retrieval,
-            "trigger": trigger_step,
-            "policy": policy_step,
-            "response": response,
-        },
-        "latency_ms": latency_ms,
-    }
+AskMissingSlot
 
+客服为了继续判断、排查或处理问题，向用户索取缺失的客观事实信息、材料、参数、身份信息、环境信息或执行结果。
 
-def build_all_targets(raw_dialogues: List[Dict[str, Any]]) -> List[TargetTurn]:
-    targets: List[TargetTurn] = []
-    for raw in raw_dialogues:
-        targets.extend(build_target_turns(raw))
-    return targets
+典型情况：
 
+* 索要工号、账号、手机号、邮箱
+* 索要截图、日志、报错码
+* 询问设备类型、系统版本、客户端类型
+* 询问时间、地点、单号、操作步骤、执行结果
 
-def annotate_histories_gold_state(
-    targets: List[TargetTurn],
-    bank: PromptBank,
-    parallel_inference,
-    batch_size: int,
-) -> Dict[Tuple[str, int], Dict[str, List[Dict[str, Any]]]]:
-    """Parse only completed historical pairs for each target.
+核心判断：缺的是客观信息或材料，而不是用户意思。
 
-    Key is (dialog_id, history_len). history_len = target.turn_id - 1.
-    The current user input is never included here.
-    """
-    unique: Dict[Tuple[str, int], List[Any]] = {}
-    for t in targets:
-        n = len(t.history_pairs)
-        if n == 0:
-            continue
-        unique[(t.dialog_id, n)] = t.history_pairs
+AskClarification
 
-    states: Dict[Tuple[str, int], Dict[str, List[Dict[str, Any]]]] = {
-        (t.dialog_id, 0): _empty_state() for t in targets if len(t.history_pairs) == 0
-    }
-    if not unique:
-        return states
+客服因用户表述不清、范围不明、指代模糊或意图不明确，主动提问以澄清用户到底在说什么、问什么、指什么。
 
-    keys = list(unique.keys())
-    histories = [unique[k] for k in keys]
+典型情况：
 
-    # Query annotation.
-    q_messages = [build_annotation_query_messages(bank, h) for h in histories]
-    q_raw: List[str] = []
-    for batch in tqdm(list(chunked(q_messages, batch_size)), desc="Annotate historical query"):
-        q_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
-    q_trajs = [parse_trajectory(x, "query", expected_len=len(histories[i])) for i, x in enumerate(q_raw)]
+* “您指的是登录失败还是页面卡顿？”
+* “您是想查询进度，还是想重新发起？”
+* “您说的是哪个系统？”
 
-    # Trigger annotation, conditioned on query trajectory.
-    trig_messages = [
-        build_annotation_trigger_messages(bank, histories[i], q_trajs[i])
-        for i in range(len(histories))
-    ]
-    trig_raw: List[str] = []
-    for batch in tqdm(list(chunked(trig_messages, batch_size)), desc="Annotate historical trigger"):
-        trig_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
-    trig_trajs = [parse_trajectory(x, "trigger", expected_len=len(histories[i])) for i, x in enumerate(trig_raw)]
+核心判断：缺的是对用户意图或指代的理解。
 
-    # Policy annotation, conditioned on query/trigger trajectory.
-    pol_messages = [
-        build_annotation_policy_messages(bank, histories[i], q_trajs[i], trig_trajs[i])
-        for i in range(len(histories))
-    ]
-    pol_raw: List[str] = []
-    for batch in tqdm(list(chunked(pol_messages, batch_size)), desc="Annotate historical policy"):
-        pol_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=batch_size))
-    pol_trajs = [parse_trajectory(x, "policy", expected_len=len(histories[i])) for i, x in enumerate(pol_raw)]
+ExplainedResponse
 
-    for i, key in enumerate(keys):
-        states[key] = {"query": q_trajs[i], "trigger": trig_trajs[i], "policy": pol_trajs[i]}
-    return states
+客服基于当前信息，直接提供解释、判断、原因分析、规则说明、排查建议、解决方案、操作指导或结论。
 
+典型情况：
 
-def run_retrieval_for_query_steps(
-    targets: List[TargetTurn],
-    query_steps: List[Dict[str, Any]],
-    batch_zefeng_rag,
-    rag_batch_size: int,
-    top_k: int,
-) -> List[Dict[str, Any]]:
-    retrievals = [{"selected_case_ids": [], "retrieved_cases": []} for _ in targets]
-    idxs: List[int] = []
-    histories: List[str] = []
-    queries: List[str] = []
+* 解释问题原因
+* 说明规则机制
+* 给出排查建议
+* 给出处理步骤
+* 给出判断和结论
+* 吸收案例内容后自己总结并解释给用户
 
-    for i, (t, q) in enumerate(zip(targets, query_steps)):
-        if _needs_retrieval(q):
-            idxs.append(i)
-            histories.append(format_pairs(t.history_pairs) + "\n" + t.current_user)
-            queries.append(q["query_text"])
+核心判断：主要价值来自客服自己的解释。
 
-    for batch_indices in tqdm(list(chunked(list(range(len(idxs))), rag_batch_size)), desc="Retrieval global batch"):
-        h_batch = [histories[j] for j in batch_indices]
-        q_batch = [queries[j] for j in batch_indices]
-        raw_batch = run_rag_batch(batch_zefeng_rag, h_batch, q_batch)
-        if not isinstance(raw_batch, list):
-            raw_batch = [raw_batch]
-        if len(raw_batch) != len(batch_indices):
-            raise ValueError(f"RAG output length mismatch: expected {len(batch_indices)}, got {len(raw_batch)}")
-        for local_j, raw in zip(batch_indices, raw_batch):
-            retrievals[idxs[local_j]] = normalize_retrieval(raw, top_k=top_k)
-    return retrievals
+CaseRecommendation
 
+客服主要通过推荐案例、FAQ、知识文档、操作手册、帮助链接等外部知识资源来帮助用户，而不是在当前轮中自己完成完整解释。
 
-def run_gold_state_pe(args) -> List[Dict[str, Any]]:
-    raw_dialogues = load_json_or_jsonl(args.data_path)
-    targets = build_all_targets(raw_dialogues)
-    bank = PromptBank(args.prompt_dir)
-    parallel_inference = get_parallel_inference(args.project_root)
-    batch_zefeng_rag = get_batch_rag(args.project_root)
+典型情况：
 
-    history_states = annotate_histories_gold_state(targets, bank, parallel_inference, args.batch_size)
+* “您可以参考这个案例处理”
+* “这边给您一个操作文档”
+* “建议先查看这个 FAQ”
 
-    rows: List[Dict[str, Any]] = []
-    start_total = time.time()
+核心判断：主要价值来自给资源、给案例、给文档。
 
-    # Current query prediction, batched globally.
-    q_messages = []
-    states_for_target = []
-    for t in targets:
-        hist_state = history_states.get((t.dialog_id, len(t.history_pairs)), _empty_state())
-        states_for_target.append(hist_state)
-        q_messages.append(build_prediction_query_messages(bank, t.history_pairs, hist_state["query"], t.current_user, t.turn_id))
+Handoff
 
-    t0 = time.time()
-    q_raw: List[str] = []
-    for batch in tqdm(list(chunked(q_messages, args.batch_size)), desc="Predict current query"):
-        q_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
-    query_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
-    query_steps = [parse_step(x, "query", t.turn_id) for x, t in zip(q_raw, targets)]
+客服明确表示当前问题将被转交给其他处理主体或处理通道，例如人工客服、专员、二线团队、后台团队、工程师、工单系统或其他部门。
 
-    # Retrieval, batched globally.
-    t0 = time.time()
-    retrievals = run_retrieval_for_query_steps(targets, query_steps, batch_zefeng_rag, args.rag_batch_size, args.top_k)
-    retrieval_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
+核心判断：核心动作是交给别人处理，而不是当前轮直接解决。
 
-    # Trigger prediction.
-    trig_messages = [
-        build_prediction_trigger_messages(
-            bank, t.history_pairs, states_for_target[i], t.current_user, query_steps[i], retrievals[i], t.turn_id
-        )
-        for i, t in enumerate(targets)
-    ]
-    t0 = time.time()
-    trig_raw: List[str] = []
-    for batch in tqdm(list(chunked(trig_messages, args.batch_size)), desc="Predict current trigger"):
-        trig_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
-    trigger_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
-    trigger_steps = [parse_step(x, "trigger", t.turn_id) for x, t in zip(trig_raw, targets)]
+ProcessAcknowledgement
 
-    # Policy prediction.
-    pol_messages = [
-        build_prediction_policy_messages(
-            bank,
-            t.history_pairs,
-            states_for_target[i],
-            t.current_user,
-            query_steps[i],
-            retrievals[i],
-            trigger_steps[i],
-            t.turn_id,
-        )
-        for i, t in enumerate(targets)
-    ]
-    t0 = time.time()
-    pol_raw: List[str] = []
-    for batch in tqdm(list(chunked(pol_messages, args.batch_size)), desc="Predict current policy"):
-        pol_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
-    policy_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
-    policy_steps = [parse_step(x, "policy", t.turn_id) for x, t in zip(pol_raw, targets)]
+客服对用户进行承接、回应、安抚、状态同步、流程推进、等待占位或礼貌收尾，但没有提供实质性解释，也没有推荐案例或转接作为核心动作。
 
-    # Response generation.
-    resp_messages = [
-        build_response_messages(bank, t.history_pairs, t.current_user, retrievals[i], trigger_steps[i], policy_steps[i])
-        for i, t in enumerate(targets)
-    ]
-    t0 = time.time()
-    resp_raw: List[str] = []
-    for batch in tqdm(list(chunked(resp_messages, args.batch_size)), desc="Generate current response"):
-        resp_raw.extend(run_llm_batch(parallel_inference, batch, batch_size=args.batch_size))
-    response_ms = int((time.time() - t0) * 1000 / max(len(targets), 1))
-    responses = [normalize_response(parse_json_obj(x)) for x in resp_raw]
+典型情况：
 
-    total_ms = int((time.time() - start_total) * 1000 / max(len(targets), 1))
-    for i, t in enumerate(targets):
-        rows.append(
-            _make_output_row(
-                t,
-                "gold_state",
-                states_for_target[i],
-                query_steps[i],
-                retrievals[i],
-                trigger_steps[i],
-                policy_steps[i],
-                responses[i],
-                {
-                    "query": query_ms,
-                    "retrieval": retrieval_ms,
-                    "trigger": trigger_ms,
-                    "policy": policy_ms,
-                    "response": response_ms,
-                    "total": total_ms,
-                },
-            )
-        )
-    return rows
+* “好的，收到”
+* “明白了，我这边帮您核实一下”
+* “您稍等，我查一下”
+* “已为您记录该问题”
+* “请问还有其他可以帮您的吗？”
 
+核心判断：接得住、推得动，但没有真正解释或解决。
 
-def run_pred_state_pe(args) -> List[Dict[str, Any]]:
-    raw_dialogues = load_json_or_jsonl(args.data_path)
-    bank = PromptBank(args.prompt_dir)
-    parallel_inference = get_parallel_inference(args.project_root)
-    batch_zefeng_rag = get_batch_rag(args.project_root)
-    rows: List[Dict[str, Any]] = []
+判断原则
 
-    # Golden annotation is saved for analysis only.
-    # Pred-state prediction still uses accumulated predicted state as input.
-    all_targets = build_all_targets(raw_dialogues)
-    gold_history_states = annotate_histories_gold_state(all_targets, bank, parallel_inference, args.batch_size)
+1. 只标注当前轮，不要重新标注历史轮次。
+2. 当前真实客服回复是判断当前 policy 的最强依据。
+3. 历史 query / trigger / policy trajectory 用于判断当前动作是否是自然状态推进。
+4. 返回案例内容只是辅助信息，不能因为有案例返回就直接标为 CaseRecommendation。
+5. 如果客服主要是在吸收案例内容后自己解释给用户，标 ExplainedResponse。
+6. 如果客服主要是在让用户查看案例、文档或 FAQ，标 CaseRecommendation。
+7. 如果当前轮是在索取客观信息，标 AskMissingSlot。
+8. 如果当前轮是在澄清用户意图或指代，标 AskClarification。
+9. 如果明确转交其他团队或系统处理，标 Handoff。
+10. 如果只是承接、等待、记录、安抚或收尾，标 ProcessAcknowledgement。
+11. 不要机械照抄 trigger。trigger=true 不等于一定推荐案例；trigger=false 也可能直接解释常识性问题。
+12. 不要无故改变问题链路。如果用户没有切换问题，当前 policy 应与历史状态自然衔接。
+13. 如果用户明确切换问题，当前 policy 可以开启新的问题处理链。
 
-    for raw in tqdm(raw_dialogues, desc="Pred-state dialogues"):
-        targets = build_target_turns(raw)
-        state = _empty_state()
-        for t in targets:
-            start = time.time()
+易混规则
 
-            t0 = time.time()
-            q_msg = build_prediction_query_messages(bank, t.history_pairs, state["query"], t.current_user, t.turn_id)
-            q_raw = run_llm_batch(parallel_inference, [q_msg], batch_size=1)[0]
-            query_ms = int((time.time() - t0) * 1000)
-            q_step = parse_step(q_raw, "query", t.turn_id)
+AskMissingSlot vs AskClarification
 
-            t0 = time.time()
-            if _needs_retrieval(q_step):
-                hist = format_pairs(t.history_pairs) + "\n" + t.current_user
-                raw_ret = run_rag_batch(batch_zefeng_rag, [hist], [q_step["query_text"]])
-                if isinstance(raw_ret, list) and raw_ret:
-                    raw_ret = raw_ret[0]
-                retrieval = normalize_retrieval(raw_ret, top_k=args.top_k)
-            else:
-                retrieval = {"selected_case_ids": [], "retrieved_cases": []}
-            retrieval_ms = int((time.time() - t0) * 1000)
+* 索取客观事实、材料、参数、截图、报错信息：AskMissingSlot
+* 澄清用户到底是什么意思、指什么、想问什么：AskClarification
 
-            t0 = time.time()
-            trig_msg = build_prediction_trigger_messages(bank, t.history_pairs, state, t.current_user, q_step, retrieval, t.turn_id)
-            trig_raw = run_llm_batch(parallel_inference, [trig_msg], batch_size=1)[0]
-            trigger_ms = int((time.time() - t0) * 1000)
-            trig_step = parse_step(trig_raw, "trigger", t.turn_id)
+ExplainedResponse vs CaseRecommendation
 
-            t0 = time.time()
-            pol_msg = build_prediction_policy_messages(bank, t.history_pairs, state, t.current_user, q_step, retrieval, trig_step, t.turn_id)
-            pol_raw = run_llm_batch(parallel_inference, [pol_msg], batch_size=1)[0]
-            policy_ms = int((time.time() - t0) * 1000)
-            pol_step = parse_step(pol_raw, "policy", t.turn_id)
+* 主要价值来自客服自己的解释、判断、建议：ExplainedResponse
+* 主要价值来自推荐外部案例、FAQ、文档：CaseRecommendation
+* 即使返回了案例，只要客服是在基于案例自己讲清楚，仍标 ExplainedResponse
 
-            t0 = time.time()
-            resp_msg = build_response_messages(bank, t.history_pairs, t.current_user, retrieval, trig_step, pol_step)
-            resp_raw = run_llm_batch(parallel_inference, [resp_msg], batch_size=1)[0]
-            response_ms = int((time.time() - t0) * 1000)
-            response = normalize_response(parse_json_obj(resp_raw))
+Handoff vs ProcessAcknowledgement
 
-            latency = {
-                "query": query_ms,
-                "retrieval": retrieval_ms,
-                "trigger": trigger_ms,
-                "policy": policy_ms,
-                "response": response_ms,
-                "total": int((time.time() - start) * 1000),
-            }
-            gold_ann = gold_history_states.get((t.dialog_id, len(t.history_pairs)), _empty_state())
-            rows.append(_make_output_row(t, "pred_state", gold_ann, q_step, retrieval, trig_step, pol_step, response, latency))
+* 明确转人工、转后台、转专员、提交工单并由其他团队处理：Handoff
+* 只是“我帮您查一下/核实一下/记录一下/请稍等”：ProcessAcknowledgement
 
-            # Accumulate only current predicted steps as next historical state.
-            state["query"].append(q_step)
-            state["trigger"].append(trig_step)
-            state["policy"].append(pol_step)
-    return rows
+推荐优先级
 
+当多个标签都可能成立时，按以下顺序优先判断：
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_path", required=True)
-    parser.add_argument("--state_source", choices=["gold_state", "pred_state"], default="gold_state")
-    parser.add_argument("--prompt_dir", default="prompts")
-    parser.add_argument("--project_root", default=".")
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--rag_batch_size", type=int, default=64)
-    parser.add_argument("--top_k", type=int, default=5)
-    args = parser.parse_args()
+Handoff > CaseRecommendation > ExplainedResponse > AskMissingSlot > AskClarification > ProcessAcknowledgement
 
-    if args.state_source == "gold_state":
-        rows = run_gold_state_pe(args)
-    else:
-        rows = run_pred_state_pe(args)
-    write_jsonl(args.output_path, rows)
-    print(f"Saved {len(rows)} rows to {args.output_path}")
+补充：
 
+* 只有当“请参考案例/文档”是当前轮核心动作时，才优先 CaseRecommendation。
+* 如果出现案例但核心是解释，应标 ExplainedResponse。
 
-if __name__ == "__main__":
-    main()
+输出要求
+
+1. 只输出合法 JSON。
+2. 不要输出 markdown 代码块。
+3. 不要输出历史 trajectory。
+4. 不要输出多个候选标签。
+5. 不要输出额外解释。
