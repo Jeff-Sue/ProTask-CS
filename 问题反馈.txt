@@ -1,593 +1,947 @@
 from __future__ import annotations
 
 import argparse
+
 import json
+
 import time
+
 from dataclasses import dataclass
+
 from pathlib import Path
+
 from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
 from .external import get_batch_rag, get_parallel_inference, run_llm_batch, run_rag_batch
-from .io_utils import load_json_or_jsonl, write_json, write_jsonl
-from .parsers import normalize_retrieval, normalize_response, parse_json_obj, parse_step
-from .prompt_builders import (
-    PromptBank,
-    build_prediction_policy_messages,
-    build_prediction_query_messages,
-    build_prediction_trigger_messages,
-    build_response_messages,
-)
-from .schema import Pair, extract_case_ids, format_pairs
 
+from .parsers import normalize_retrieval, parse_json_obj
+
+from .io import load_json_or_jsonl, write_json
+
+# =========================
+
+# Data schema
+
+# =========================
 
 @dataclass
+
+class Pair:
+
+    user: str
+
+    assistant: str
+
+@dataclass
+
 class TargetTurn:
+
     dialog_id: str
+
     turn_id: int
+
     history_pairs: List[Pair]
+
     current_user: str
+
     golden_response: str
+
     case_ids: List[str]
 
+# =========================
 
-EMPTY_RETRIEVAL = {"selected_case_ids": [], "retrieved_cases": []}
+# Prompt bank
 
+# =========================
 
-def _empty_state() -> Dict[str, List[Dict[str, Any]]]:
-    return {"query": [], "trigger": [], "policy": []}
+class PromptBank:
 
+    def __init__(self, prompt_dir: str | Path):
 
-def _state_slice(state: Dict[str, List[Dict[str, Any]]], n: int) -> Dict[str, List[Dict[str, Any]]]:
-    return {
-        "query": list(state.get("query", []))[:n],
-        "trigger": list(state.get("trigger", []))[:n],
-        "policy": list(state.get("policy", []))[:n],
-    }
+        self.prompt_dir = Path(prompt_dir)
 
+        self.query = self._read("predict_query.prompt")
 
-def _state_copy(state: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
-    return _state_slice(
-        state,
-        max(
-            len(state.get("query", [])),
-            len(state.get("trigger", [])),
-            len(state.get("policy", [])),
-        ),
-    )
+        self.trigger = self._read("predict_trigger.prompt")
 
+        self.policy = self._read("predict_policy.prompt")
 
-def _normalize_dialogues(data: Any) -> List[Dict[str, Any]]:
-    """Support both list-of-dialogues and dict-of-dialogues.
+        self.response = self._read("predict_response.prompt")
 
-    Example dict-of-dialogues:
-    {
-      "220599461": {"text": [{"用户": "..."}, {"客服": "..."}], "caseId": [...]}
-    }
+    def _read(self, name: str) -> str:
+
+        path = self.prompt_dir / name
+
+        if not path.exists():
+
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+
+        return path.read_text(encoding="utf-8").strip()
+
+# =========================
+
+# Basic IO / parsing
+
+# =========================
+
+def normalize_dialogues(data: Any) -> List[Dict[str, Any]]:
+
     """
+
+    Support:
+
+    1. list of dialogue samples
+
+    2. dict keyed by dialog_id:
+
+       {
+
+         "220599461": {
+
+           "text": [{"用户": "..."}, {"客服": "..."}],
+
+           "caseId": [...]
+
+         }
+
+       }
+
+    """
+
     if isinstance(data, list):
+
         return data
 
     if isinstance(data, dict):
+
         for key in ("data", "dialogues", "items", "records"):
+
             if isinstance(data.get(key), list):
+
                 return data[key]
 
-        out: List[Dict[str, Any]] = []
+        rows = []
+
         for dialog_id, sample in data.items():
+
             if isinstance(sample, dict):
+
                 x = dict(sample)
+
                 x.setdefault("dialog_id", str(dialog_id))
-                out.append(x)
-        return out
 
-    raise ValueError(f"Unsupported dialogue data type: {type(data)}")
+                rows.append(x)
 
+        return rows
+
+    raise ValueError(f"Unsupported data type: {type(data)}")
 
 def load_dialogues(path: str | Path) -> List[Dict[str, Any]]:
-    p = Path(path)
-    text = p.read_text(encoding="utf-8").strip()
+
+    data = load_json_or_jsonl(str(path))
+
+    return normalize_dialogues(data)
+
+def parse_message(item: Any) -> Optional[Dict[str, str]]:
+
+    if isinstance(item, str):
+
+        text = item.strip()
+
+        if not text:
+
+            return None
+
+        if text.startswith(("用户:", "用户：")):
+
+            return {"role": "user", "text": text.split("：", 1)[-1].split(":", 1)[-1].strip()}
+
+        if text.startswith(("客服:", "客服：")):
+
+            return {"role": "assistant", "text": text.split("：", 1)[-1].split(":", 1)[-1].strip()}
+
+        return {"role": "user", "text": text}
+
+    if not isinstance(item, dict):
+
+        return None
+
+    for k in ("用户", "user", "human"):
+
+        if k in item and str(item[k]).strip():
+
+            return {"role": "user", "text": str(item[k]).strip()}
+
+    for k in ("客服", "assistant", "agent", "system"):
+
+        if k in item and str(item[k]).strip():
+
+            return {"role": "assistant", "text": str(item[k]).strip()}
+
+    role = str(item.get("role") or item.get("speaker") or "").lower()
+
+    text = str(item.get("text") or item.get("content") or item.get("utterance") or "").strip()
+
     if not text:
-        return []
 
-    if text[0] in "[{":
-        return _normalize_dialogues(json.loads(text))
-
-    rows = [json.loads(line) for line in text.splitlines() if line.strip()]
-    return _normalize_dialogues(rows)
-
-
-def _text_from_role_dict(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    # Native sample format: {"用户": "..."}, {"客服": "..."}
-    for user_key in ("用户", "user", "human"):
-        if user_key in item and str(item[user_key]).strip():
-            return {"role": "user", "text": str(item[user_key]).strip()}
-
-    for agent_key in ("客服", "assistant", "agent", "system"):
-        if agent_key in item and str(item[agent_key]).strip():
-            return {"role": "assistant", "text": str(item[agent_key]).strip()}
-
-    role = str(item.get("role") or item.get("speaker") or item.get("from") or "").lower()
-    text = str(
-        item.get("text")
-        or item.get("content")
-        or item.get("value")
-        or item.get("utterance")
-        or ""
-    ).strip()
-
-    if not text:
         return None
 
     if role in {"user", "human", "客户", "用户"}:
+
         return {"role": "user", "text": text}
 
-    if role in {"assistant", "客服", "agent", "system", "gpt"}:
-        return {"role": "assistant", "text": text}
+    if role in {"assistant", "agent", "客服", "system"}:
 
-    if text.startswith(("用户:", "用户：")):
-        return {"role": "user", "text": text}
-
-    if text.startswith(("客服:", "客服：")):
         return {"role": "assistant", "text": text}
 
     return {"role": "user", "text": text}
 
+def get_messages(raw: Dict[str, Any]) -> List[Dict[str, str]]:
 
-def _messages(raw: Dict[str, Any]) -> List[Dict[str, str]]:
-    source = None
-    for key in ("text", "messages", "turns", "dialogue", "conversation", "dialogue_history"):
+    for key in ("text", "messages", "turns", "dialogue", "conversation"):
+
         if isinstance(raw.get(key), list):
-            source = raw[key]
-            break
 
-    if source is None:
-        raise ValueError(
-            "Cannot find dialogue messages. Expected text/messages/turns/dialogue/conversation."
-        )
+            msgs = []
 
-    msgs: List[Dict[str, str]] = []
+            for item in raw[key]:
 
-    for item in source:
-        if isinstance(item, str):
-            s = item.strip()
-            if not s:
-                continue
+                msg = parse_message(item)
 
-            if s.startswith(("用户:", "用户：")):
-                msgs.append({"role": "user", "text": s})
-            elif s.startswith(("客服:", "客服：")):
-                msgs.append({"role": "assistant", "text": s})
-            else:
-                msgs.append({"role": "user", "text": s})
+                if msg:
 
-        elif isinstance(item, dict):
-            msg = _text_from_role_dict(item)
-            if msg is not None:
-                msgs.append(msg)
+                    msgs.append(msg)
 
-    return msgs
+            return msgs
 
+    raise ValueError("Cannot find dialogue messages in sample.")
 
-def build_target_turns_no_batch(raw: Dict[str, Any]) -> List[TargetTurn]:
+def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
+
     dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+
     case_ids = [
-        str(x).strip().upper()
+
+        str(x).strip()
+
         for x in raw.get("caseId", raw.get("case_ids", []))
+
         if str(x).strip()
+
     ]
 
+    messages = get_messages(raw)
+
     completed: List[Pair] = []
+
     user_buffer: List[str] = []
+
     targets: List[TargetTurn] = []
+
     turn_id = 0
 
-    for msg in _messages(raw):
+    for msg in messages:
+
         if msg["role"] == "user":
+
             user_buffer.append(msg["text"])
 
         elif msg["role"] == "assistant":
+
             if not user_buffer:
+
                 continue
 
             current_user = "\n".join(user_buffer).strip()
+
             turn_id += 1
 
             targets.append(
+
                 TargetTurn(
+
                     dialog_id=dialog_id,
+
                     turn_id=turn_id,
+
                     history_pairs=list(completed),
+
                     current_user=current_user,
+
                     golden_response=msg["text"],
+
                     case_ids=case_ids,
+
                 )
+
             )
 
             completed.append(Pair(user=current_user, assistant=msg["text"]))
+
             user_buffer = []
 
     return targets
 
+# =========================
 
-def _unwrap_llm_response(raw: Any) -> str:
-    """Accept parallel_inference outputs: str, {response: str}, or nested shapes."""
+# State compression
+
+# =========================
+
+def remove_reason(obj: Any) -> Any:
+
+    """
+
+    Remove reason fields from q/t/p before putting them into history state.
+
+    """
+
+    if isinstance(obj, dict):
+
+        return {
+
+            k: remove_reason(v)
+
+            for k, v in obj.items()
+
+            if k != "reason"
+
+        }
+
+    if isinstance(obj, list):
+
+        return [remove_reason(x) for x in obj]
+
+    return obj
+
+def compact_evidence(retrieval: Dict[str, Any]) -> Dict[str, Any]:
+
+    """
+
+    Keep only case_id and title in evidence history.
+
+    Do not keep full case content.
+
+    """
+
+    cases = retrieval.get("retrieved_cases", []) or []
+
+    compact_cases = []
+
+    for c in cases:
+
+        if not isinstance(c, dict):
+
+            continue
+
+        case_id = (
+
+            c.get("case_id")
+
+            or c.get("caseId")
+
+            or c.get("id")
+
+            or c.get("doc_id")
+
+            or ""
+
+        )
+
+        title = (
+
+            c.get("title")
+
+            or c.get("case_title")
+
+            or c.get("name")
+
+            or c.get("summary")
+
+            or ""
+
+        )
+
+        compact_cases.append(
+
+            {
+
+                "case_id": str(case_id),
+
+                "title": str(title),
+
+            }
+
+        )
+
+    return {
+
+        "selected_case_ids": retrieval.get("selected_case_ids", []),
+
+        "cases": compact_cases,
+
+    }
+
+def build_history_state(turn_states: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+    """
+
+    Each state item:
+
+    {
+
+      "turn_id": 1,
+
+      "u": "...",
+
+      "q": {... no reason ...},
+
+      "t": {... no reason ...},
+
+      "e": {"cases": [{"case_id": "...", "title": "..."}]},
+
+      "p": {... no reason ...},
+
+      "r": "..."
+
+    }
+
+    """
+
+    history = []
+
+    for s in turn_states:
+
+        history.append(
+
+            {
+
+                "turn_id": s["turn_id"],
+
+                "u": s["u"],
+
+                "q": remove_reason(s["q"]),
+
+                "t": remove_reason(s["t"]),
+
+                "e": compact_evidence(s["e"]),
+
+                "p": remove_reason(s["p"]),
+
+                "r": s["r"],
+
+            }
+
+        )
+
+    return history
+
+# =========================
+
+# LLM / RAG helpers
+
+# =========================
+
+def make_messages(system_prompt: str, payload: Dict[str, Any]) -> List[Dict[str, str]]:
+
+    return [
+
+        {
+
+            "role": "system",
+
+            "content": system_prompt,
+
+        },
+
+        {
+
+            "role": "user",
+
+            "content": json.dumps(payload, ensure_ascii=False, indent=2),
+
+        },
+
+    ]
+
+def unwrap_llm_response(raw: Any) -> str:
+
     if isinstance(raw, dict):
-        for key in ("response", "text", "content", "output"):
-            if key in raw:
-                return str(raw[key])
+
+        for k in ("response", "text", "content", "output"):
+
+            if k in raw:
+
+                return str(raw[k])
+
         return json.dumps(raw, ensure_ascii=False)
 
     return str(raw)
 
+def call_llm_json(parallel_inference, messages: List[Dict[str, str]]) -> Dict[str, Any]:
 
-def call_llm_once(parallel_inference, messages: List[Dict[str, str]]) -> str:
     raw = run_llm_batch(parallel_inference, [messages], batch_size=1)
 
     if not isinstance(raw, list) or not raw:
-        raise ValueError(f"LLM returned empty output: {raw}")
 
-    return _unwrap_llm_response(raw[0])
+        raise ValueError(f"Empty LLM output: {raw}")
 
+    text = unwrap_llm_response(raw[0])
 
-def _needs_retrieval(query_step: Dict[str, Any]) -> bool:
-    return query_step.get("query_mode") in {"rewrite", "refine", "reuse"} and bool(
-        query_step.get("query_text")
+    obj = parse_json_obj(text)
+
+    if not isinstance(obj, dict):
+
+        raise ValueError(f"LLM output is not JSON object: {text}")
+
+    return obj
+
+def needs_rag(q: Dict[str, Any]) -> bool:
+
+    return q.get("query_mode") in {"rewrite", "refine", "reuse"} and bool(q.get("query_text"))
+
+def run_rag_once(batch_zefeng_rag, target: TargetTurn, q: Dict[str, Any], top_k: int) -> Dict[str, Any]:
+
+    if not needs_rag(q):
+
+        return {"selected_case_ids": [], "retrieved_cases": []}
+
+    history_text = "\n".join(
+
+        [f"用户：{p.user}\n客服：{p.assistant}" for p in target.history_pairs]
+
     )
 
+    if history_text:
 
-def retrieve_once(
-    batch_zefeng_rag,
+        history_text += "\n"
+
+    history_text += f"用户：{target.current_user}"
+
+    raw = run_rag_batch(batch_zefeng_rag, [history_text], [q["query_text"]])
+
+    if isinstance(raw, list):
+
+        raw = raw[0] if raw else None
+
+    return normalize_retrieval(raw, top_k=top_k)
+
+def normalize_response_obj(obj: Dict[str, Any]) -> str:
+
+    return str(obj.get("response") or obj.get("text") or obj.get("content") or "").strip()
+
+# =========================
+
+# Predict one turn
+
+# =========================
+
+def predict_query(
+
+    bank: PromptBank,
+
+    parallel_inference,
+
+    history_state: List[Dict[str, Any]],
+
     target: TargetTurn,
-    query_step: Dict[str, Any],
-    top_k: int,
+
 ) -> Dict[str, Any]:
-    if not _needs_retrieval(query_step):
-        return dict(EMPTY_RETRIEVAL)
 
-    history_text = format_pairs(target.history_pairs) + "\n" + target.current_user
-    raw_ret = run_rag_batch(batch_zefeng_rag, [history_text], [query_step["query_text"]])
+    payload = {
 
-    if isinstance(raw_ret, list):
-        raw_ret = raw_ret[0] if raw_ret else None
-
-    return normalize_retrieval(raw_ret, top_k=top_k)
-
-
-def load_golden_annotations(path: str | Path) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
-    """Load completed golden annotations and index by dialog_id.
-
-    Supported row shapes:
-    1) {dialog_id: {golden_state: {query/trigger/policy}}}
-    2) {dialog_id: {query: [...], trigger: [...], policy: [...]}}
-    3) JSONL rows with dialog_id and golden_state/state.
-    """
-    p = Path(path)
-    text = p.read_text(encoding="utf-8").strip()
-
-    if not text:
-        return {}
-
-    if text[0] in "[{":
-        obj = json.loads(text)
-    else:
-        obj = [json.loads(line) for line in text.splitlines() if line.strip()]
-
-    index: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-
-    def put(dialog_id: str, payload: Any) -> None:
-        if not dialog_id or not isinstance(payload, dict):
-            return
-
-        state = (
-            payload.get("golden_state")
-            or payload.get("state")
-            or payload.get("golden_annotation")
-            or payload
-        )
-
-        if not isinstance(state, dict):
-            return
-
-        index[str(dialog_id)] = {
-            "query": list(state.get("query", state.get("query_trajectory", [])) or []),
-            "trigger": list(state.get("trigger", state.get("trigger_trajectory", [])) or []),
-            "policy": list(state.get("policy", state.get("policy_trajectory", [])) or []),
-        }
-
-    if isinstance(obj, dict):
-        # Dict keyed by dialog id.
-        if "dialog_id" in obj:
-            put(str(obj.get("dialog_id")), obj)
-        else:
-            for did, payload in obj.items():
-                put(str(did), payload)
-
-    elif isinstance(obj, list):
-        for row in obj:
-            if isinstance(row, dict):
-                put(
-                    str(row.get("dialog_id") or row.get("id") or row.get("dialogue_id") or ""),
-                    row,
-                )
-
-    return index
-
-
-def _gold_state_for_turn(
-    golden_index: Dict[str, Dict[str, List[Dict[str, Any]]]],
-    dialog_id: str,
-    turn_id: int,
-) -> Dict[str, List[Dict[str, Any]]]:
-    full = golden_index.get(str(dialog_id), _empty_state())
-    return _state_slice(full, turn_id - 1)
-
-
-def _make_row(
-    target: TargetTurn,
-    state_source: str,
-    historical_state: Dict[str, List[Dict[str, Any]]],
-    query_step: Dict[str, Any],
-    retrieval: Dict[str, Any],
-    trigger_step: Dict[str, Any],
-    policy_step: Dict[str, Any],
-    response: str,
-    latency_ms: Dict[str, int],
-) -> Dict[str, Any]:
-    return {
-        "dialog_id": target.dialog_id,
         "turn_id": target.turn_id,
-        "state_source": state_source,
-        "current_user_input": target.current_user,
-        "golden_response": target.golden_response,
-        "gold_case_ids": extract_case_ids(target.golden_response) or target.case_ids,
-        "historical_state": _state_copy(historical_state),
+
+        "history_state": history_state,
+
         "current": {
-            "query": query_step,
-            "retrieval": retrieval,
-            "trigger": trigger_step,
-            "policy": policy_step,
-            "response": response,
+
+            "u": target.current_user,
+
         },
-        "latency_ms": latency_ms,
+
     }
 
+    return call_llm_json(parallel_inference, make_messages(bank.query, payload))
+
+def predict_trigger(
+
+    bank: PromptBank,
+
+    parallel_inference,
+
+    history_state: List[Dict[str, Any]],
+
+    target: TargetTurn,
+
+    q: Dict[str, Any],
+
+    e: Dict[str, Any],
+
+) -> Dict[str, Any]:
+
+    payload = {
+
+        "turn_id": target.turn_id,
+
+        "history_state": history_state,
+
+        "current": {
+
+            "u": target.current_user,
+
+            "q": remove_reason(q),
+
+            "e": compact_evidence(e),
+
+        },
+
+    }
+
+    return call_llm_json(parallel_inference, make_messages(bank.trigger, payload))
+
+def predict_policy(
+
+    bank: PromptBank,
+
+    parallel_inference,
+
+    history_state: List[Dict[str, Any]],
+
+    target: TargetTurn,
+
+    q: Dict[str, Any],
+
+    e: Dict[str, Any],
+
+    t: Dict[str, Any],
+
+) -> Dict[str, Any]:
+
+    payload = {
+
+        "turn_id": target.turn_id,
+
+        "history_state": history_state,
+
+        "current": {
+
+            "u": target.current_user,
+
+            "q": remove_reason(q),
+
+            "e": compact_evidence(e),
+
+            "t": remove_reason(t),
+
+        },
+
+    }
+
+    return call_llm_json(parallel_inference, make_messages(bank.policy, payload))
+
+def predict_response(
+
+    bank: PromptBank,
+
+    parallel_inference,
+
+    history_state: List[Dict[str, Any]],
+
+    target: TargetTurn,
+
+    q: Dict[str, Any],
+
+    e: Dict[str, Any],
+
+    t: Dict[str, Any],
+
+    p: Dict[str, Any],
+
+) -> str:
+
+    payload = {
+
+        "turn_id": target.turn_id,
+
+        "history_state": history_state,
+
+        "current": {
+
+            "u": target.current_user,
+
+            "q": remove_reason(q),
+
+            "e": compact_evidence(e),
+
+            "t": remove_reason(t),
+
+            "p": remove_reason(p),
+
+        },
+
+    }
+
+    obj = call_llm_json(parallel_inference, make_messages(bank.response, payload))
+
+    return normalize_response_obj(obj)
 
 def predict_one_turn(
-    target: TargetTurn,
-    historical_state: Dict[str, List[Dict[str, Any]]],
-    bank: PromptBank,
-    parallel_inference,
-    batch_zefeng_rag,
-    top_k: int,
-    generate_response: bool = True,
-) -> Dict[str, Any]:
-    """Run one current turn in the system forward order: Query -> RAG -> Trigger -> Policy -> Response.
 
-    This is PE/evaluation inference, not golden annotation. Golden annotation may be produced in
-    reverse explanatory order, but system prediction should still be forward.
+    target: TargetTurn,
+
+    turn_states: List[Dict[str, Any]],
+
+    bank: PromptBank,
+
+    parallel_inference,
+
+    batch_zefeng_rag,
+
+    top_k: int,
+
+    no_response: bool = False,
+
+) -> Dict[str, Any]:
+
     """
+
+    Current turn order:
+
+    q_n -> RAG/e_n -> t_n -> p_n -> r_n
+
+    """
+
     start = time.time()
+
     latency: Dict[str, int] = {}
 
-    # 1. Query
+    history_state = build_history_state(turn_states)
+
+    # q
+
     t0 = time.time()
-    q_msg = build_prediction_query_messages(
-        bank,
-        target.history_pairs,
-        historical_state.get("query", []),
-        target.current_user,
-        target.turn_id,
-    )
-    q_raw = call_llm_once(parallel_inference, q_msg)
-    q_step = parse_step(q_raw, "query", target.turn_id)
+
+    q = predict_query(bank, parallel_inference, history_state, target)
+
     latency["query"] = int((time.time() - t0) * 1000)
 
-    # 2. RAG
-    t0 = time.time()
-    retrieval = retrieve_once(batch_zefeng_rag, target, q_step, top_k=top_k)
-    latency["retrieval"] = int((time.time() - t0) * 1000)
+    # e
 
-    # 3. Trigger
     t0 = time.time()
-    trig_msg = build_prediction_trigger_messages(
-        bank,
-        target.history_pairs,
-        historical_state,
-        target.current_user,
-        q_step,
-        retrieval,
-        target.turn_id,
-    )
-    trig_raw = call_llm_once(parallel_inference, trig_msg)
-    trig_step = parse_step(trig_raw, "trigger", target.turn_id)
+
+    e = run_rag_once(batch_zefeng_rag, target, q, top_k=top_k)
+
+    latency["evidence"] = int((time.time() - t0) * 1000)
+
+    # t
+
+    t0 = time.time()
+
+    trig = predict_trigger(bank, parallel_inference, history_state, target, q, e)
+
     latency["trigger"] = int((time.time() - t0) * 1000)
 
-    # 4. Policy
+    # p
+
     t0 = time.time()
-    pol_msg = build_prediction_policy_messages(
-        bank,
-        target.history_pairs,
-        historical_state,
-        target.current_user,
-        q_step,
-        retrieval,
-        trig_step,
-        target.turn_id,
-    )
-    pol_raw = call_llm_once(parallel_inference, pol_msg)
-    pol_step = parse_step(pol_raw, "policy", target.turn_id)
+
+    p = predict_policy(bank, parallel_inference, history_state, target, q, e, trig)
+
     latency["policy"] = int((time.time() - t0) * 1000)
 
-    # 5. Response
-    response = ""
-    if generate_response:
-        t0 = time.time()
-        resp_msg = build_response_messages(
-            bank,
-            target.history_pairs,
-            target.current_user,
-            retrieval,
-            trig_step,
-            pol_step,
-        )
-        resp_raw = call_llm_once(parallel_inference, resp_msg)
+    # r
 
-        try:
-            response = normalize_response(parse_json_obj(resp_raw))
-        except Exception:
-            response = normalize_response(resp_raw)
+    if no_response:
+
+        r = ""
+
+        latency["response"] = 0
+
+    else:
+
+        t0 = time.time()
+
+        r = predict_response(bank, parallel_inference, history_state, target, q, e, trig, p)
 
         latency["response"] = int((time.time() - t0) * 1000)
-    else:
-        latency["response"] = 0
 
     latency["total"] = int((time.time() - start) * 1000)
 
     return {
-        "query": q_step,
-        "retrieval": retrieval,
-        "trigger": trig_step,
-        "policy": pol_step,
-        "response": response,
+
+        "turn_id": target.turn_id,
+
+        "u": target.current_user,
+
+        "q": q,
+
+        "e": e,
+
+        "t": trig,
+
+        "p": p,
+
+        "r": r,
+
+        "golden_response": target.golden_response,
+
         "latency_ms": latency,
+
     }
 
+# =========================
 
-def run_gold_state_pe_no_batch(args) -> List[Dict[str, Any]]:
-    if not args.golden_annotation_path:
-        raise ValueError("--golden_annotation_path is required when --state_source gold_state")
+# Run pred-state incremental
 
-    raw_dialogues = load_dialogues(args.data_path)[: args.max_dialogues]
-    golden_index = load_golden_annotations(args.golden_annotation_path)
+# =========================
 
-    bank = PromptBank(args.prompt_dir)
-    parallel_inference = get_parallel_inference(args.project_root)
-    batch_zefeng_rag = get_batch_rag(args.project_root)
+def run_predict_state_incremental(args) -> List[Dict[str, Any]]:
 
-    rows: List[Dict[str, Any]] = []
-
-    for raw in tqdm(raw_dialogues, desc="Gold-state dialogues"):
-        targets = build_target_turns_no_batch(raw)
-
-        for target in targets:
-            hist_state = _gold_state_for_turn(golden_index, target.dialog_id, target.turn_id)
-
-            pred = predict_one_turn(
-                target,
-                hist_state,
-                bank,
-                parallel_inference,
-                batch_zefeng_rag,
-                top_k=args.top_k,
-                generate_response=not args.no_response,
-            )
-
-            rows.append(
-                _make_row(
-                    target,
-                    "gold_state",
-                    hist_state,
-                    pred["query"],
-                    pred["retrieval"],
-                    pred["trigger"],
-                    pred["policy"],
-                    pred["response"],
-                    pred["latency_ms"],
-                )
-            )
-
-    return rows
-
-
-def run_pred_state_pe_no_batch(args) -> List[Dict[str, Any]]:
     raw_dialogues = load_dialogues(args.data_path)[: args.max_dialogues]
 
     bank = PromptBank(args.prompt_dir)
+
     parallel_inference = get_parallel_inference(args.project_root)
+
     batch_zefeng_rag = get_batch_rag(args.project_root)
 
-    rows: List[Dict[str, Any]] = []
+    outputs: List[Dict[str, Any]] = []
 
-    for raw in tqdm(raw_dialogues, desc="Pred-state dialogues"):
-        targets = build_target_turns_no_batch(raw)
-        state = _empty_state()
+    for raw in tqdm(raw_dialogues, desc="Predict-state dialogues"):
+
+        targets = build_target_turns(raw)
+
+        if not targets:
+
+            continue
+
+        dialog_id = targets[0].dialog_id
+
+        turn_states: List[Dict[str, Any]] = []
 
         for target in targets:
-            hist_state = _state_copy(state)
 
-            pred = predict_one_turn(
-                target,
-                hist_state,
-                bank,
-                parallel_inference,
-                batch_zefeng_rag,
-                top_k=args.top_k,
-                generate_response=not args.no_response,
-            )
+            try:
 
-            rows.append(
-                _make_row(
-                    target,
-                    "pred_state",
-                    hist_state,
-                    pred["query"],
-                    pred["retrieval"],
-                    pred["trigger"],
-                    pred["policy"],
-                    pred["response"],
-                    pred["latency_ms"],
+                pred = predict_one_turn(
+
+                    target=target,
+
+                    turn_states=turn_states,
+
+                    bank=bank,
+
+                    parallel_inference=parallel_inference,
+
+                    batch_zefeng_rag=batch_zefeng_rag,
+
+                    top_k=args.top_k,
+
+                    no_response=args.no_response,
+
                 )
-            )
 
-            # Pred-state: next turn sees the model's own predicted state.
-            state["query"].append(pred["query"])
-            state["trigger"].append(pred["trigger"])
-            state["policy"].append(pred["policy"])
+                turn_states.append(
 
-    return rows
+                    {
 
+                        "turn_id": pred["turn_id"],
+
+                        "u": pred["u"],
+
+                        "q": pred["q"],
+
+                        "e": pred["e"],
+
+                        "t": pred["t"],
+
+                        "p": pred["p"],
+
+                        "r": pred["r"],
+
+                    }
+
+                )
+
+            except Exception as exc:
+
+                if not args.continue_on_error:
+
+                    raise
+
+                turn_states.append(
+
+                    {
+
+                        "turn_id": target.turn_id,
+
+                        "u": target.current_user,
+
+                        "q": {},
+
+                        "e": {"selected_case_ids": [], "retrieved_cases": []},
+
+                        "t": {},
+
+                        "p": {},
+
+                        "r": "",
+
+                        "error": repr(exc),
+
+                    }
+
+                )
+
+        outputs.append(
+
+            {
+
+                "dialog_id": dialog_id,
+
+                "case_ids": targets[0].case_ids,
+
+                "num_turns": len(targets),
+
+                "turns": turn_states,
+
+            }
+
+        )
+
+    return outputs
 
 def main() -> None:
+
     parser = argparse.ArgumentParser()
+
     parser.add_argument("--data_path", required=True)
+
     parser.add_argument("--output_path", required=True)
-    parser.add_argument(
-        "--state_source",
-        choices=["gold_state", "pred_state"],
-        default="gold_state",
-    )
-    parser.add_argument("--golden_annotation_path", default="")
-    parser.add_argument("--prompt_dir", default="prompts")
+
+    parser.add_argument("--prompt_dir", default="prompts/predict_state")
+
     parser.add_argument("--project_root", default=".")
+
     parser.add_argument("--top_k", type=int, default=5)
+
     parser.add_argument("--max_dialogues", type=int, default=300)
-    parser.add_argument(
-        "--jsonl",
-        action="store_true",
-        help="Write output as JSONL instead of JSON list.",
-    )
-    parser.add_argument(
-        "--no_response",
-        action="store_true",
-        help="Skip response generation; only output query/retrieval/trigger/policy.",
-    )
+
+    parser.add_argument("--no_response", action="store_true")
+
+    parser.add_argument("--continue_on_error", action="store_true")
 
     args = parser.parse_args()
 
-    if args.state_source == "gold_state":
-        rows = run_gold_state_pe_no_batch(args)
-    else:
-        rows = run_pred_state_pe_no_batch(args)
+    rows = run_predict_state_incremental(args)
 
-    if args.jsonl:
-        write_jsonl(args.output_path, rows)
-    else:
-        write_json(args.output_path, rows)
+    write_json(args.output_path, rows)
 
-    print(f"Saved {len(rows)} rows to {args.output_path}")
-
+    print(f"Saved {len(rows)} dialogues to {args.output_path}")
 
 if __name__ == "__main__":
+
     main()
