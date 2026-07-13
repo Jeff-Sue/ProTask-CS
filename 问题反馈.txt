@@ -64,13 +64,12 @@ class PromptBank:
 
 
 # ============================================================
-# Load and parse dialogues
+# Dialogue loading
 # ============================================================
 
 def normalize_dialogues(data: Any) -> List[Dict[str, Any]]:
     """
     Support:
-
     1. list-of-dialogues
     2. dict-of-dialogues:
        {
@@ -209,7 +208,7 @@ def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
 
 
 # ============================================================
-# JSON / LLM helpers
+# LLM helpers
 # ============================================================
 
 def make_messages(system_prompt: str, payload: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -260,12 +259,12 @@ def normalize_response_obj(obj: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# Compression utilities
+# Evidence / state compression
 # ============================================================
 
 def remove_reason(obj: Any) -> Any:
     """
-    q/t/p 进入 history_state 时不保留 reason。
+    q / t / p 进入 history_state 时不保留 reason。
     """
     if isinstance(obj, dict):
         return {
@@ -302,19 +301,6 @@ def get_case_title(case: Dict[str, Any]) -> str:
     ).strip()
 
 
-def get_case_content(case: Dict[str, Any]) -> str:
-    return str(
-        case.get("content")
-        or case.get("text")
-        or case.get("body")
-        or case.get("case_content")
-        or case.get("answer")
-        or case.get("solution")
-        or case.get("summary")
-        or ""
-    ).strip()
-
-
 def has_evidence(evidence: Dict[str, Any]) -> bool:
     return bool(
         evidence.get("cases")
@@ -323,15 +309,28 @@ def has_evidence(evidence: Dict[str, Any]) -> bool:
     )
 
 
+def empty_evidence_metadata() -> Dict[str, Any]:
+    return {
+        "selected_case_ids": [],
+        "cases": [],
+    }
+
+
+def empty_active_evidence() -> Dict[str, Any]:
+    return {
+        "scope": "none",
+        "source": "empty",
+        "selected_case_ids": [],
+        "cases": [],
+    }
+
+
 def compact_evidence_metadata(evidence: Any) -> Dict[str, Any]:
     """
-    e_i 写入历史时，只保留 case_id / title，不保留内容。
+    e_i 写入 history_state 时只保留 case_id/title，不保留内容。
     """
     if not isinstance(evidence, dict):
-        return {
-            "selected_case_ids": [],
-            "cases": [],
-        }
+        return empty_evidence_metadata()
 
     raw_cases = (
         evidence.get("retrieved_cases")
@@ -341,6 +340,7 @@ def compact_evidence_metadata(evidence: Any) -> Dict[str, Any]:
     )
 
     cases: List[Dict[str, str]] = []
+
     if isinstance(raw_cases, list):
         for case in raw_cases:
             if not isinstance(case, dict):
@@ -365,12 +365,12 @@ def compact_evidence_metadata(evidence: Any) -> Dict[str, Any]:
     }
 
 
-def compact_active_evidence(evidence: Any, max_chars: int = 800) -> Dict[str, Any]:
+def keep_full_active_evidence(evidence: Any) -> Dict[str, Any]:
     """
-    active_evidence = a，作为外部证据内容空间。
+    active_evidence = a。
 
-    它不是每轮状态的一部分，而是当前可用案例知识内容。
-    可以保留 content/summary，但做截断，避免过长。
+    这是外部证据空间，用于给 policy / response 提供完整案例知识。
+    不截断内容，不删除 case 内字段。
     """
     if not isinstance(evidence, dict):
         return empty_active_evidence()
@@ -382,25 +382,12 @@ def compact_active_evidence(evidence: Any, max_chars: int = 800) -> Dict[str, An
         or []
     )
 
-    cases: List[Dict[str, str]] = []
+    cases: List[Dict[str, Any]] = []
 
     if isinstance(raw_cases, list):
         for case in raw_cases:
-            if not isinstance(case, dict):
-                continue
-
-            case_id = get_case_id(case)
-            title = get_case_title(case)
-            content = get_case_content(case)
-
-            if case_id or title or content:
-                cases.append(
-                    {
-                        "case_id": case_id,
-                        "title": title,
-                        "content": content[:max_chars],
-                    }
-                )
+            if isinstance(case, dict):
+                cases.append(dict(case))
 
     selected_case_ids = evidence.get("selected_case_ids") or evidence.get("case_ids") or []
 
@@ -423,30 +410,14 @@ def compact_active_evidence(evidence: Any, max_chars: int = 800) -> Dict[str, An
     }
 
 
-def empty_evidence_metadata() -> Dict[str, Any]:
-    return {
-        "selected_case_ids": [],
-        "cases": [],
-    }
-
-
-def empty_active_evidence() -> Dict[str, Any]:
-    return {
-        "scope": "none",
-        "source": "empty",
-        "selected_case_ids": [],
-        "cases": [],
-    }
-
-
 def build_history_state(turn_states: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    history_state 只保存前 n-1 轮：
+    history_state 保存前 n-1 轮：
     (u, q, t, e, p, r)
 
     注意：
-    - 不保存 golden_response
     - 不保存 active_evidence
+    - 不保存 golden_response
     - q/t/p 去掉 reason
     - e 只保留 case_id/title
     """
@@ -469,7 +440,7 @@ def build_history_state(turn_states: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 # ============================================================
-# Evidence update
+# Evidence decision and update
 # ============================================================
 
 def needs_query(q: Dict[str, Any]) -> bool:
@@ -488,6 +459,7 @@ def run_rag_once(
     history_text = "\n".join(
         [f"用户：{p.user}\n客服：{p.assistant}" for p in target.history_pairs]
     )
+
     if history_text:
         history_text += "\n"
 
@@ -524,7 +496,7 @@ def select_case_from_evidence(evidence: Dict[str, Any], case_id: str) -> Dict[st
 
         cid = get_case_id(case)
         if cid == case_id:
-            selected_cases.append(case)
+            selected_cases.append(dict(case))
 
     if not selected_cases:
         return empty_active_evidence()
@@ -542,20 +514,24 @@ def decide_current_evidence(
     target: TargetTurn,
     q: Dict[str, Any],
     t: Dict[str, Any],
-    active_evidence: Dict[str, Any],
+    a_before: Dict[str, Any],
     top_k: int,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """
-    根据 t_n 决定当前轮 evidence。
+    根据 t_n 决定当前轮 evidence，并得到 p/r 阶段使用的 a_current。
 
-    返回两个对象：
-    1. e_short: 写入当前轮历史状态，只含 case_id/title
-    2. e_content: 当前轮供 policy/response 使用的证据内容
+    返回：
+    - e_short: 写入当前轮历史状态的短 evidence metadata
+    - e_content: 当前轮 evidence 内容
+    - a_current: 当前轮 p/r 阶段使用的证据空间
 
     逻辑：
-    - retrieve_new_evidence: 调 RAG，得到新内容
-    - reuse_existing_evidence: 使用 active_evidence
-    - no_evidence_needed: 当前轮 e 为空，但 active_evidence 不在这里清空
+    - retrieve_new_evidence:
+        调 RAG，e_content = 新证据，a_current = 新证据
+    - reuse_existing_evidence:
+        e_content = a_before，a_current = a_before
+    - no_evidence_needed:
+        e_content = empty，a_current = a_before
     """
     evidence_mode = t.get("evidence_mode")
     trigger = bool(t.get("trigger"))
@@ -567,45 +543,60 @@ def decide_current_evidence(
             q=q,
             top_k=top_k,
         )
-        return compact_evidence_metadata(retrieved_content), compact_active_evidence(retrieved_content)
+
+        e_content = keep_full_active_evidence(retrieved_content)
+        e_short = compact_evidence_metadata(e_content)
+        a_current = keep_full_active_evidence(e_content)
+
+        return e_short, e_content, a_current
 
     if evidence_mode == "reuse_existing_evidence":
-        return compact_evidence_metadata(active_evidence), compact_active_evidence(active_evidence)
+        e_content = keep_full_active_evidence(a_before)
+        e_short = compact_evidence_metadata(e_content)
+        a_current = keep_full_active_evidence(a_before)
 
-    return empty_evidence_metadata(), empty_active_evidence()
+        return e_short, e_content, a_current
+
+    # no_evidence_needed
+    e_content = empty_active_evidence()
+    e_short = empty_evidence_metadata()
+
+    # 注意：当前轮不需要 evidence，不等于清空 a。
+    # p/r 阶段仍然可以看到 a_before，避免短反馈导致证据空间丢失。
+    a_current = keep_full_active_evidence(a_before)
+
+    return e_short, e_content, a_current
 
 
-def update_active_evidence(
-    previous_active: Dict[str, Any],
-    current_evidence_content: Dict[str, Any],
+def update_active_evidence_after_policy(
+    a_current: Dict[str, Any],
+    e_content: Dict[str, Any],
     current_trigger: Dict[str, Any],
     current_policy: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    更新外部证据空间 a。
-
-    a 不进入每轮 history_state，只作为下一轮外部变量。
+    根据 policy 更新本轮结束后的 active_evidence = a_n。
 
     规则：
-    1. 如果本轮 policy 明确选中 case_id，则 a 收敛为该 case。
-    2. 如果本轮新检索且未选中单个 case，则 a 更新为候选集合。
-    3. 如果本轮复用证据，则 a 默认保持 previous_active，除非 policy 收敛到单 case。
-    4. 如果本轮不需要证据，不清空 a，避免短反馈导致证据丢失。
+    1. 如果 policy.case_id 非空，则 a 收敛到该 case。
+    2. 如果本轮新检索但未确定单个 case，则 a 保留新候选集合。
+    3. 如果本轮复用证据，则 a 默认保持当前证据空间。
+    4. 如果本轮不需要证据，不清空 a。
     """
-    label = current_policy.get("label", "")
+    label = str(current_policy.get("label") or "")
     case_id = str(current_policy.get("case_id") or "").strip()
-    evidence_mode = current_trigger.get("evidence_mode")
+    evidence_mode = str(current_trigger.get("evidence_mode") or "")
 
-    base = current_evidence_content if has_evidence(current_evidence_content) else previous_active
+    base = e_content if has_evidence(e_content) else a_current
 
     if case_id:
         selected = select_case_from_evidence(base, case_id)
         if has_evidence(selected):
-            return compact_active_evidence(selected)
+            return keep_full_active_evidence(selected)
 
     if evidence_mode == "retrieve_new_evidence":
-        if has_evidence(current_evidence_content):
-            updated = compact_active_evidence(current_evidence_content)
+        if has_evidence(e_content):
+            updated = keep_full_active_evidence(e_content)
             if label in {"CaseRecommendation", "ExplainedResponse"} and len(updated.get("cases", [])) == 1:
                 updated["scope"] = "selected_case"
                 updated["source"] = "used_for_response"
@@ -615,24 +606,24 @@ def update_active_evidence(
             return updated
 
     if evidence_mode == "reuse_existing_evidence":
-        return compact_active_evidence(previous_active)
+        return keep_full_active_evidence(a_current)
 
     if label in {"AskMissingSlot", "AskClarification"}:
-        if has_evidence(current_evidence_content):
-            updated = compact_active_evidence(current_evidence_content)
+        if has_evidence(base):
+            updated = keep_full_active_evidence(base)
             updated["scope"] = "candidate_set"
             updated["source"] = "candidate_for_missing_info"
             return updated
-        return compact_active_evidence(previous_active)
+        return keep_full_active_evidence(a_current)
 
     if label in {"CaseRecommendation", "ExplainedResponse"}:
-        if has_evidence(current_evidence_content):
-            updated = compact_active_evidence(current_evidence_content)
+        if has_evidence(base):
+            updated = keep_full_active_evidence(base)
             updated["source"] = "used_for_response"
             return updated
-        return compact_active_evidence(previous_active)
+        return keep_full_active_evidence(a_current)
 
-    return compact_active_evidence(previous_active)
+    return keep_full_active_evidence(a_current)
 
 
 # ============================================================
@@ -643,13 +634,13 @@ def build_query_messages(
     bank: PromptBank,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_before: Dict[str, Any],
     current_user: str,
 ) -> List[Dict[str, str]]:
     payload = {
         "turn_id": turn_id,
         "history_state": history_state,
-        "active_evidence": compact_active_evidence(active_evidence),
+        "active_evidence": keep_full_active_evidence(a_before),
         "current": {
             "u": current_user,
         },
@@ -661,18 +652,18 @@ def build_trigger_messages(
     bank: PromptBank,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_before: Dict[str, Any],
     current_user: str,
     current_query: Dict[str, Any],
 ) -> List[Dict[str, str]]:
     """
-    Trigger 在 evidence 更新之前执行。
-    所以 trigger 不能看到当前新 evidence，只能看到 active_evidence。
+    Trigger 在 evidence 更新前执行。
+    所以它看到的是 a_before。
     """
     payload = {
         "turn_id": turn_id,
         "history_state": history_state,
-        "active_evidence": compact_active_evidence(active_evidence),
+        "active_evidence": keep_full_active_evidence(a_before),
         "current": {
             "u": current_user,
             "q": remove_reason(current_query),
@@ -685,21 +676,25 @@ def build_policy_messages(
     bank: PromptBank,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_current: Dict[str, Any],
     current_user: str,
     current_query: Dict[str, Any],
     current_trigger: Dict[str, Any],
     current_evidence_content: Dict[str, Any],
 ) -> List[Dict[str, str]]:
+    """
+    Policy 在 evidence 更新后执行。
+    所以它看到的是 a_current。
+    """
     payload = {
         "turn_id": turn_id,
         "history_state": history_state,
-        "active_evidence": compact_active_evidence(active_evidence),
+        "active_evidence": keep_full_active_evidence(a_current),
         "current": {
             "u": current_user,
             "q": remove_reason(current_query),
             "t": remove_reason(current_trigger),
-            "e": compact_active_evidence(current_evidence_content),
+            "e": keep_full_active_evidence(current_evidence_content),
         },
     }
     return make_messages(bank.policy, payload)
@@ -709,22 +704,26 @@ def build_response_messages(
     bank: PromptBank,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_current: Dict[str, Any],
     current_user: str,
     current_query: Dict[str, Any],
     current_trigger: Dict[str, Any],
     current_evidence_content: Dict[str, Any],
     current_policy: Dict[str, Any],
 ) -> List[Dict[str, str]]:
+    """
+    Response 在 evidence 更新后执行。
+    所以它看到的是 a_current。
+    """
     payload = {
         "turn_id": turn_id,
         "history_state": history_state,
-        "active_evidence": compact_active_evidence(active_evidence),
+        "active_evidence": keep_full_active_evidence(a_current),
         "current": {
             "u": current_user,
             "q": remove_reason(current_query),
             "t": remove_reason(current_trigger),
-            "e": compact_active_evidence(current_evidence_content),
+            "e": keep_full_active_evidence(current_evidence_content),
             "p": remove_reason(current_policy),
         },
     }
@@ -732,7 +731,7 @@ def build_response_messages(
 
 
 # ============================================================
-# Prediction
+# Predict modules
 # ============================================================
 
 def predict_query(
@@ -740,14 +739,14 @@ def predict_query(
     parallel_inference,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_before: Dict[str, Any],
     current_user: str,
 ) -> Dict[str, Any]:
     messages = build_query_messages(
         bank=bank,
         turn_id=turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_before=a_before,
         current_user=current_user,
     )
     return call_llm_json(parallel_inference, messages)
@@ -758,7 +757,7 @@ def predict_trigger(
     parallel_inference,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_before: Dict[str, Any],
     current_user: str,
     q: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -766,7 +765,7 @@ def predict_trigger(
         bank=bank,
         turn_id=turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_before=a_before,
         current_user=current_user,
         current_query=q,
     )
@@ -778,7 +777,7 @@ def predict_policy(
     parallel_inference,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_current: Dict[str, Any],
     current_user: str,
     q: Dict[str, Any],
     t: Dict[str, Any],
@@ -788,7 +787,7 @@ def predict_policy(
         bank=bank,
         turn_id=turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_current=a_current,
         current_user=current_user,
         current_query=q,
         current_trigger=t,
@@ -802,7 +801,7 @@ def predict_response(
     parallel_inference,
     turn_id: int,
     history_state: List[Dict[str, Any]],
-    active_evidence: Dict[str, Any],
+    a_current: Dict[str, Any],
     current_user: str,
     q: Dict[str, Any],
     t: Dict[str, Any],
@@ -813,7 +812,7 @@ def predict_response(
         bank=bank,
         turn_id=turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_current=a_current,
         current_user=current_user,
         current_query=q,
         current_trigger=t,
@@ -823,6 +822,10 @@ def predict_response(
     obj = call_llm_json(parallel_inference, messages)
     return normalize_response_obj(obj)
 
+
+# ============================================================
+# Predict one turn
+# ============================================================
 
 def predict_one_turn(
     target: TargetTurn,
@@ -835,23 +838,39 @@ def predict_one_turn(
     no_response: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    第 n 轮执行顺序：
+    第 n 轮：
 
-    history_state + active_evidence + u_n
-    → q_n
-    → t_n
-    → e_n = retrieve / reuse / empty
-    → p_n
-    → r_n
-    → update active_evidence
+    a_before = a_{n-1}
 
-    返回：
-    - turn_state: 当前轮 (u,q,t,e,p,r,golden_response)
-    - new_active_evidence: 更新后的外部证据空间 a_n
+    q_n = Query(history_state, a_before, u_n)
+
+    t_n = Trigger(history_state, a_before, u_n, q_n)
+
+    if retrieve:
+        e_n = RAG(q_n)
+        a_current = e_n
+    elif reuse:
+        e_n = a_before
+        a_current = a_before
+    else:
+        e_n = empty
+        a_current = a_before
+
+    p_n = Policy(history_state, a_current, u_n, q_n, t_n, e_n)
+
+    r_n = Response(history_state, a_current, u_n, q_n, t_n, e_n, p_n)
+
+    a_n = update(a_current, e_n, p_n)
+
+    append (u_n, q_n, t_n, e_n_short, p_n, r_n)
+
+    golden_response 只保存用于对比，不进入下一轮 history_state。
     """
     start = time.time()
     latency: Dict[str, int] = {}
     history_state = build_history_state(turn_states)
+
+    a_before = keep_full_active_evidence(active_evidence)
 
     # 1. q_n
     t0 = time.time()
@@ -860,7 +879,7 @@ def predict_one_turn(
         parallel_inference=parallel_inference,
         turn_id=target.turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_before=a_before,
         current_user=target.current_user,
     )
     latency["query"] = int((time.time() - t0) * 1000)
@@ -872,20 +891,20 @@ def predict_one_turn(
         parallel_inference=parallel_inference,
         turn_id=target.turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_before=a_before,
         current_user=target.current_user,
         q=q,
     )
     latency["trigger"] = int((time.time() - t0) * 1000)
 
-    # 3. e_n
+    # 3. e_n and a_current
     t0 = time.time()
-    e_short, e_content = decide_current_evidence(
+    e_short, e_content, a_current = decide_current_evidence(
         batch_zefeng_rag=batch_zefeng_rag,
         target=target,
         q=q,
         t=t,
-        active_evidence=active_evidence,
+        a_before=a_before,
         top_k=top_k,
     )
     latency["evidence"] = int((time.time() - t0) * 1000)
@@ -897,7 +916,7 @@ def predict_one_turn(
         parallel_inference=parallel_inference,
         turn_id=target.turn_id,
         history_state=history_state,
-        active_evidence=active_evidence,
+        a_current=a_current,
         current_user=target.current_user,
         q=q,
         t=t,
@@ -916,7 +935,7 @@ def predict_one_turn(
             parallel_inference=parallel_inference,
             turn_id=target.turn_id,
             history_state=history_state,
-            active_evidence=active_evidence,
+            a_current=a_current,
             current_user=target.current_user,
             q=q,
             t=t,
@@ -927,16 +946,15 @@ def predict_one_turn(
 
     latency["total"] = int((time.time() - start) * 1000)
 
-    # 6. update a_n
-    new_active_evidence = update_active_evidence(
-        previous_active=active_evidence,
-        current_evidence_content=e_content,
+    # 6. a_n
+    a_after = update_active_evidence_after_policy(
+        a_current=a_current,
+        e_content=e_content,
         current_trigger=t,
         current_policy=p,
     )
 
-    # 7. current turn state
-    # golden_response 只用于对比，不进入下一轮 history_state。
+    # 7. 保存当前轮
     turn_state = {
         "turn_id": target.turn_id,
         "u": target.current_user,
@@ -945,12 +963,19 @@ def predict_one_turn(
         "e": e_short,
         "p": p,
         "r": r,
+
+        # 只用于输出对比，不进入 history_state
         "golden_response": target.golden_response,
-        "active_evidence_after_turn": compact_active_evidence(new_active_evidence),
+
+        # 调试字段：不进入 history_state
+        "active_evidence_before_turn": keep_full_active_evidence(a_before),
+        "active_evidence_for_policy_response": keep_full_active_evidence(a_current),
+        "active_evidence_after_turn": keep_full_active_evidence(a_after),
+
         "latency_ms": latency,
     }
 
-    return turn_state, new_active_evidence
+    return turn_state, a_after
 
 
 # ============================================================
@@ -987,10 +1012,6 @@ def run_predict_state_incremental(args) -> List[Dict[str, Any]]:
                     top_k=args.top_k,
                     no_response=args.no_response,
                 )
-
-                # 注意：
-                # turn_state 里有 golden_response，
-                # 但 build_history_state 会自动忽略 golden_response。
                 turn_states.append(turn_state)
 
             except Exception as exc:
@@ -1006,7 +1027,9 @@ def run_predict_state_incremental(args) -> List[Dict[str, Any]]:
                     "p": {},
                     "r": "",
                     "golden_response": target.golden_response,
-                    "active_evidence_after_turn": compact_active_evidence(active_evidence),
+                    "active_evidence_before_turn": keep_full_active_evidence(active_evidence),
+                    "active_evidence_for_policy_response": keep_full_active_evidence(active_evidence),
+                    "active_evidence_after_turn": keep_full_active_evidence(active_evidence),
                     "latency_ms": {},
                     "error": repr(exc),
                 }
@@ -1018,7 +1041,7 @@ def run_predict_state_incremental(args) -> List[Dict[str, Any]]:
                 "case_ids": targets[0].case_ids,
                 "num_turns": len(targets),
                 "turns": turn_states,
-                "final_active_evidence": compact_active_evidence(active_evidence),
+                "final_active_evidence": keep_full_active_evidence(active_evidence),
             }
         )
 
