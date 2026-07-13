@@ -1,182 +1,1046 @@
-你是 IT 客服对话系统中的 Query Predictor。
+from __future__ import annotations
 
-你的任务是：根据前若干轮的压缩状态历史和当前用户输入，预测当前轮进入 RAG 之前应该生成的 query_mode 和 query_text。
+import argparse
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-你不是在回答用户问题，也不是在生成客服回复。你只预测当前轮 query。
+from tqdm import tqdm
 
-输入中，每一轮历史用以下字段表示：
-- u: 用户输入
-- q: query 状态，不包含 reason
-- t: trigger 状态，不包含 reason
-- e: evidence，只包含 case_id 和 title
-- p: policy 状态，不包含 reason
-- r: 客服回复
-
-重要原则：
-1. query 发生在 trigger、evidence、policy、response 之前。
-2. 当前 query 只能基于历史状态和当前用户输入生成。
-3. 不要利用未来信息。
-4. 不要把历史客服回复中未被用户确认的信息当成当前用户已知事实。
-5. 不要把案例标题中的具体系统、软件、报错、条件强行写进 query，除非用户已经说过。
-6. query_text 面向检索，不是客服回复句子。
-7. 信息不足以解决，不等于 query_mode = none。只要用户已形成可检索的问题现象，就应生成 query。
-
-query_mode 只能是：
-- none：当前没有明确可检索问题，也没有历史 query 可复用。
-- rewrite：当前轮首次形成新问题，或用户切换到新主题。
-- reuse：当前轮仍是同一问题，且没有新增改变检索目标的信息。
-- refine：当前轮仍是同一问题，但用户补充了新的已知关键信息，应细化 query。
-
-输出必须是合法 JSON，不要输出 markdown，不要输出额外解释。
-
-输出格式：
-{
-  "turn_id": 当前轮编号,
-  "query_mode": "none|rewrite|reuse|refine",
-  "query_text": "检索 query 或空字符串",
-  "reason": "一句简洁原因"
-}
+from .external import get_batch_rag, get_parallel_inference, run_llm_batch, run_rag_batch
+from .io import load_json_or_jsonl, write_json
+from .parsers import normalize_retrieval, parse_json_obj
 
 
+# ============================================================
+# Data schema
+# ============================================================
 
-你是 IT 客服对话系统中的 Trigger Predictor。
-
-你的任务是：根据前若干轮的压缩状态历史、当前用户输入、当前 query 和当前 evidence，预测当前轮 trigger 状态。
-
-trigger 表示：当前轮是否需要新调用 RAG 检索新的案例证据。
-
-输入中，每一轮历史用以下字段表示：
-- u: 用户输入
-- q: query 状态，不包含 reason
-- t: trigger 状态，不包含 reason
-- e: evidence，只包含 case_id 和 title
-- p: policy 状态，不包含 reason
-- r: 客服回复
-
-当前轮输入包括：
-- 当前用户输入 u
-- 当前 query q
-- 当前 evidence e
-
-核心定义：
-1. trigger = true：当前轮需要新调用 RAG 获取新的 evidence。
-2. trigger = false：当前轮不需要新调用 RAG。
-3. trigger = false 不代表不用知识，可能是复用已有 evidence。
-
-evidence_mode 只能是：
-- no_evidence_needed：当前轮不需要案例证据。
-- reuse_existing_evidence：当前轮需要知识证据，但已有 evidence 足够，不需要重新检索。
-- retrieve_new_evidence：当前轮需要新的 evidence，因此需要调用 RAG。
-
-强约束：
-1. trigger = true 时，evidence_mode 必须是 retrieve_new_evidence。
-2. trigger = false 时，evidence_mode 只能是 no_evidence_needed 或 reuse_existing_evidence。
-3. 不允许 trigger = false 且 evidence_mode = retrieve_new_evidence。
-
-判断原则：
-1. 如果当前 query 是新问题或细化后需要新证据，通常 trigger = true。
-2. 如果当前问题延续历史知识链路，且已有 evidence 足够，trigger = false，evidence_mode = reuse_existing_evidence。
-3. 如果当前轮只是寒暄、确认、等待、收尾，trigger = false，evidence_mode = no_evidence_needed。
-4. 客服系统没有独立专业经验。涉及 IT 专业判断、故障定位、案例适配、规则说明、操作步骤等，一般应视为依赖案例知识。
-5. 但是否新调用 RAG，要看当前 evidence 是否已经足够。
-
-输出必须是合法 JSON，不要输出 markdown，不要输出额外解释。
-
-输出格式：
-{
-  "turn_id": 当前轮编号,
-  "trigger": true 或 false,
-  "evidence_mode": "no_evidence_needed|reuse_existing_evidence|retrieve_new_evidence",
-  "evidence_status": "not_needed|sufficient|insufficient|uncertain",
-  "case_id": "案例ID或空字符串",
-  "reason": "一句简洁原因"
-}
+@dataclass
+class Pair:
+    user: str
+    assistant: str
 
 
-
-你是 IT 客服对话系统中的 Policy Predictor。
-
-你的任务是：根据前若干轮的压缩状态历史、当前用户输入、当前 query、当前 evidence 和当前 trigger，预测当前轮客服系统应该采取的主要 policy。
-
-输入中，每一轮历史用以下字段表示：
-- u: 用户输入
-- q: query 状态，不包含 reason
-- t: trigger 状态，不包含 reason
-- e: evidence，只包含 case_id 和 title
-- p: policy 状态，不包含 reason
-- r: 客服回复
-
-当前轮输入包括：
-- 当前用户输入 u
-- 当前 query q
-- 当前 evidence e
-- 当前 trigger t
-
-policy label 只能是以下六类之一：
-- AskMissingSlot：询问缺失的客观信息、环境、系统、报错、权限、账号状态、操作结果等。
-- AskClarification：澄清用户意图、指代、范围或问题含义。
-- ExplainedResponse：基于当前信息或证据给出解释、原因、规则、排查步骤或解决方案。
-- CaseRecommendation：主要推荐案例、FAQ、文档、手册或链接。
-- Handoff：转人工、二线、后台、工单或其他部门处理。
-- ProcessAcknowledgement：承接、确认、等待、安抚、流程推进或收尾。
-
-判断原则：
-1. 一轮只输出一个主要 policy。
-2. policy 是当前轮客服系统下一步主要动作，不是 query 或 trigger。
-3. 如果 evidence 足够且适合直接推荐案例，使用 CaseRecommendation。
-4. 如果 evidence 足够但更适合解释处理步骤，使用 ExplainedResponse。
-5. 如果 evidence 显示还缺关键条件，使用 AskMissingSlot。
-6. 如果用户表达太模糊，无法确定问题含义，使用 AskClarification。
-7. 如果当前问题需要人工、后台、二线或工单处理，使用 Handoff。
-8. 如果只是承接、确认、等待、收尾，使用 ProcessAcknowledgement。
-9. 有 evidence 不等于一定 CaseRecommendation。
-10. AskMissingSlot 可以是知识链路内部动作，因为案例适配可能暴露出缺失槽位。
-
-输出必须是合法 JSON，不要输出 markdown，不要输出额外解释。
-
-输出格式：
-{
-  "turn_id": 当前轮编号,
-  "label": "AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement",
-  "case_id": "案例ID或空字符串",
-  "reason": "一句简洁原因"
-}
+@dataclass
+class TargetTurn:
+    dialog_id: str
+    turn_id: int
+    history_pairs: List[Pair]
+    current_user: str
+    golden_response: str
+    case_ids: List[str]
 
 
-你是 IT 客服对话系统中的 Response Generator。
+# ============================================================
+# Prompt bank
+# ============================================================
 
-你的任务是：根据前若干轮的压缩状态历史、当前用户输入、当前 query、当前 evidence、当前 trigger 和当前 policy，生成当前轮客服回复。
+class PromptBank:
+    """
+    Expected prompt files:
 
-输入中，每一轮历史用以下字段表示：
-- u: 用户输入
-- q: query 状态，不包含 reason
-- t: trigger 状态，不包含 reason
-- e: evidence，只包含 case_id 和 title
-- p: policy 状态，不包含 reason
-- r: 客服回复
+    prompt_dir/
+    ├── predict_query.prompt
+    ├── predict_trigger.prompt
+    ├── predict_policy.prompt
+    └── predict_response.prompt
+    """
 
-当前轮输入包括：
-- 当前用户输入 u
-- 当前 query q
-- 当前 evidence e
-- 当前 trigger t
-- 当前 policy p
+    def __init__(self, prompt_dir: str | Path):
+        self.prompt_dir = Path(prompt_dir)
+        self.query = self._read("predict_query.prompt")
+        self.trigger = self._read("predict_trigger.prompt")
+        self.policy = self._read("predict_policy.prompt")
+        self.response = self._read("predict_response.prompt")
 
-生成要求：
-1. 回复要符合当前 policy。
-2. 如果 policy = AskMissingSlot，直接询问最关键的缺失信息。
-3. 如果 policy = AskClarification，澄清用户意图或问题范围。
-4. 如果 policy = ExplainedResponse，给出清晰、简洁、可执行的解释或操作建议。
-5. 如果 policy = CaseRecommendation，推荐对应案例或文档。
-6. 如果 policy = Handoff，说明需要转人工、后台、二线或工单处理。
-7. 如果 policy = ProcessAcknowledgement，进行承接、确认、等待、安抚或收尾。
-8. 不要编造 evidence 中没有的 case_id。
-9. 不要输出与当前 policy 冲突的内容。
-10. 回复应简洁、专业、自然，符合 IT 客服场景。
+    def _read(self, filename: str) -> str:
+        path = self.prompt_dir / filename
+        if not path.exists():
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+        return path.read_text(encoding="utf-8").strip()
 
-输出必须是合法 JSON，不要输出 markdown，不要输出额外解释。
 
-输出格式：
-{
-  "response": "当前轮客服回复"
-}
+# ============================================================
+# Load and parse dialogues
+# ============================================================
+
+def normalize_dialogues(data: Any) -> List[Dict[str, Any]]:
+    """
+    Support:
+
+    1. list-of-dialogues
+    2. dict-of-dialogues:
+       {
+         "220599461": {
+           "text": [{"用户": "..."}, {"客服": "..."}],
+           "caseId": [...]
+         }
+       }
+    """
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for key in ("data", "dialogues", "items", "records"):
+            if isinstance(data.get(key), list):
+                return data[key]
+
+        rows: List[Dict[str, Any]] = []
+        for dialog_id, sample in data.items():
+            if isinstance(sample, dict):
+                x = dict(sample)
+                x.setdefault("dialog_id", str(dialog_id))
+                rows.append(x)
+        return rows
+
+    raise ValueError(f"Unsupported data type: {type(data)}")
+
+
+def load_dialogues(path: str | Path) -> List[Dict[str, Any]]:
+    data = load_json_or_jsonl(str(path))
+    return normalize_dialogues(data)
+
+
+def parse_message(item: Any) -> Optional[Dict[str, str]]:
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            return None
+
+        if text.startswith(("用户:", "用户：")):
+            content = text.replace("用户:", "", 1).replace("用户：", "", 1).strip()
+            return {"role": "user", "text": content}
+
+        if text.startswith(("客服:", "客服：")):
+            content = text.replace("客服:", "", 1).replace("客服：", "", 1).strip()
+            return {"role": "assistant", "text": content}
+
+        return {"role": "user", "text": text}
+
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("用户", "user", "human", "客户"):
+        if key in item and str(item[key]).strip():
+            return {"role": "user", "text": str(item[key]).strip()}
+
+    for key in ("客服", "assistant", "agent", "system"):
+        if key in item and str(item[key]).strip():
+            return {"role": "assistant", "text": str(item[key]).strip()}
+
+    role = str(item.get("role") or item.get("speaker") or item.get("from") or "").lower()
+    text = str(
+        item.get("text")
+        or item.get("content")
+        or item.get("utterance")
+        or item.get("value")
+        or ""
+    ).strip()
+
+    if not text:
+        return None
+
+    if role in {"user", "human", "客户", "用户"}:
+        return {"role": "user", "text": text}
+
+    if role in {"assistant", "agent", "客服", "system", "gpt"}:
+        return {"role": "assistant", "text": text}
+
+    return {"role": "user", "text": text}
+
+
+def get_messages(raw: Dict[str, Any]) -> List[Dict[str, str]]:
+    for key in ("text", "messages", "turns", "dialogue", "conversation", "dialogue_history"):
+        if isinstance(raw.get(key), list):
+            msgs: List[Dict[str, str]] = []
+            for item in raw[key]:
+                msg = parse_message(item)
+                if msg:
+                    msgs.append(msg)
+            return msgs
+
+    raise ValueError("Cannot find dialogue messages in sample.")
+
+
+def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
+    dialog_id = str(raw.get("dialog_id") or raw.get("id") or raw.get("dialogue_id") or "")
+    case_ids = [
+        str(x).strip()
+        for x in raw.get("caseId", raw.get("case_ids", []))
+        if str(x).strip()
+    ]
+
+    messages = get_messages(raw)
+
+    completed: List[Pair] = []
+    user_buffer: List[str] = []
+    targets: List[TargetTurn] = []
+    turn_id = 0
+
+    for msg in messages:
+        if msg["role"] == "user":
+            user_buffer.append(msg["text"])
+
+        elif msg["role"] == "assistant":
+            if not user_buffer:
+                continue
+
+            current_user = "\n".join(user_buffer).strip()
+            turn_id += 1
+
+            targets.append(
+                TargetTurn(
+                    dialog_id=dialog_id,
+                    turn_id=turn_id,
+                    history_pairs=list(completed),
+                    current_user=current_user,
+                    golden_response=msg["text"],
+                    case_ids=case_ids,
+                )
+            )
+
+            completed.append(Pair(user=current_user, assistant=msg["text"]))
+            user_buffer = []
+
+    return targets
+
+
+# ============================================================
+# JSON / LLM helpers
+# ============================================================
+
+def make_messages(system_prompt: str, payload: Dict[str, Any]) -> List[Dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(payload, ensure_ascii=False, indent=2),
+        },
+    ]
+
+
+def unwrap_llm_response(raw: Any) -> str:
+    if isinstance(raw, dict):
+        for key in ("response", "text", "content", "output"):
+            if key in raw:
+                return str(raw[key])
+        return json.dumps(raw, ensure_ascii=False)
+
+    return str(raw)
+
+
+def call_llm_json(parallel_inference, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    raw = run_llm_batch(parallel_inference, [messages], batch_size=1)
+
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"Empty LLM output: {raw}")
+
+    text = unwrap_llm_response(raw[0])
+    obj = parse_json_obj(text)
+
+    if not isinstance(obj, dict):
+        raise ValueError(f"LLM output is not a JSON object: {text}")
+
+    return obj
+
+
+def normalize_response_obj(obj: Dict[str, Any]) -> str:
+    return str(
+        obj.get("response")
+        or obj.get("text")
+        or obj.get("content")
+        or ""
+    ).strip()
+
+
+# ============================================================
+# Compression utilities
+# ============================================================
+
+def remove_reason(obj: Any) -> Any:
+    """
+    q/t/p 进入 history_state 时不保留 reason。
+    """
+    if isinstance(obj, dict):
+        return {
+            k: remove_reason(v)
+            for k, v in obj.items()
+            if k != "reason"
+        }
+
+    if isinstance(obj, list):
+        return [remove_reason(x) for x in obj]
+
+    return obj
+
+
+def get_case_id(case: Dict[str, Any]) -> str:
+    return str(
+        case.get("case_id")
+        or case.get("caseId")
+        or case.get("id")
+        or case.get("doc_id")
+        or case.get("knowledge_id")
+        or ""
+    ).strip()
+
+
+def get_case_title(case: Dict[str, Any]) -> str:
+    return str(
+        case.get("title")
+        or case.get("case_title")
+        or case.get("name")
+        or case.get("subject")
+        or case.get("summary")
+        or ""
+    ).strip()
+
+
+def get_case_content(case: Dict[str, Any]) -> str:
+    return str(
+        case.get("content")
+        or case.get("text")
+        or case.get("body")
+        or case.get("case_content")
+        or case.get("answer")
+        or case.get("solution")
+        or case.get("summary")
+        or ""
+    ).strip()
+
+
+def has_evidence(evidence: Dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("cases")
+        or evidence.get("retrieved_cases")
+        or evidence.get("selected_case_ids")
+    )
+
+
+def compact_evidence_metadata(evidence: Any) -> Dict[str, Any]:
+    """
+    e_i 写入历史时，只保留 case_id / title，不保留内容。
+    """
+    if not isinstance(evidence, dict):
+        return {
+            "selected_case_ids": [],
+            "cases": [],
+        }
+
+    raw_cases = (
+        evidence.get("retrieved_cases")
+        or evidence.get("cases")
+        or evidence.get("evidence")
+        or []
+    )
+
+    cases: List[Dict[str, str]] = []
+    if isinstance(raw_cases, list):
+        for case in raw_cases:
+            if not isinstance(case, dict):
+                continue
+
+            case_id = get_case_id(case)
+            title = get_case_title(case)
+
+            if case_id or title:
+                cases.append(
+                    {
+                        "case_id": case_id,
+                        "title": title,
+                    }
+                )
+
+    selected_case_ids = evidence.get("selected_case_ids") or evidence.get("case_ids") or []
+
+    return {
+        "selected_case_ids": selected_case_ids,
+        "cases": cases,
+    }
+
+
+def compact_active_evidence(evidence: Any, max_chars: int = 800) -> Dict[str, Any]:
+    """
+    active_evidence = a，作为外部证据内容空间。
+
+    它不是每轮状态的一部分，而是当前可用案例知识内容。
+    可以保留 content/summary，但做截断，避免过长。
+    """
+    if not isinstance(evidence, dict):
+        return empty_active_evidence()
+
+    raw_cases = (
+        evidence.get("retrieved_cases")
+        or evidence.get("cases")
+        or evidence.get("evidence")
+        or []
+    )
+
+    cases: List[Dict[str, str]] = []
+
+    if isinstance(raw_cases, list):
+        for case in raw_cases:
+            if not isinstance(case, dict):
+                continue
+
+            case_id = get_case_id(case)
+            title = get_case_title(case)
+            content = get_case_content(case)
+
+            if case_id or title or content:
+                cases.append(
+                    {
+                        "case_id": case_id,
+                        "title": title,
+                        "content": content[:max_chars],
+                    }
+                )
+
+    selected_case_ids = evidence.get("selected_case_ids") or evidence.get("case_ids") or []
+
+    scope = evidence.get("scope") or evidence.get("evidence_scope") or ""
+    if not scope:
+        if len(cases) == 0:
+            scope = "none"
+        elif len(cases) == 1:
+            scope = "selected_case"
+        else:
+            scope = "candidate_set"
+
+    source = evidence.get("source") or evidence.get("evidence_source") or "unknown"
+
+    return {
+        "scope": scope,
+        "source": source,
+        "selected_case_ids": selected_case_ids,
+        "cases": cases,
+    }
+
+
+def empty_evidence_metadata() -> Dict[str, Any]:
+    return {
+        "selected_case_ids": [],
+        "cases": [],
+    }
+
+
+def empty_active_evidence() -> Dict[str, Any]:
+    return {
+        "scope": "none",
+        "source": "empty",
+        "selected_case_ids": [],
+        "cases": [],
+    }
+
+
+def build_history_state(turn_states: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    history_state 只保存前 n-1 轮：
+    (u, q, t, e, p, r)
+
+    注意：
+    - 不保存 golden_response
+    - 不保存 active_evidence
+    - q/t/p 去掉 reason
+    - e 只保留 case_id/title
+    """
+    history: List[Dict[str, Any]] = []
+
+    for s in turn_states:
+        history.append(
+            {
+                "turn_id": s.get("turn_id"),
+                "u": s.get("u", ""),
+                "q": remove_reason(s.get("q", {})),
+                "t": remove_reason(s.get("t", {})),
+                "e": compact_evidence_metadata(s.get("e", {})),
+                "p": remove_reason(s.get("p", {})),
+                "r": s.get("r", ""),
+            }
+        )
+
+    return history
+
+
+# ============================================================
+# Evidence update
+# ============================================================
+
+def needs_query(q: Dict[str, Any]) -> bool:
+    return q.get("query_mode") in {"rewrite", "refine", "reuse"} and bool(q.get("query_text"))
+
+
+def run_rag_once(
+    batch_zefeng_rag,
+    target: TargetTurn,
+    q: Dict[str, Any],
+    top_k: int,
+) -> Dict[str, Any]:
+    if not needs_query(q):
+        return empty_active_evidence()
+
+    history_text = "\n".join(
+        [f"用户：{p.user}\n客服：{p.assistant}" for p in target.history_pairs]
+    )
+    if history_text:
+        history_text += "\n"
+
+    history_text += f"用户：{target.current_user}"
+
+    raw = run_rag_batch(batch_zefeng_rag, [history_text], [q["query_text"]])
+
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+
+    retrieval = normalize_retrieval(raw, top_k=top_k)
+    retrieval["source"] = "new_retrieval"
+    retrieval["scope"] = "candidate_set"
+
+    return retrieval
+
+
+def select_case_from_evidence(evidence: Dict[str, Any], case_id: str) -> Dict[str, Any]:
+    if not case_id:
+        return empty_active_evidence()
+
+    raw_cases = (
+        evidence.get("retrieved_cases")
+        or evidence.get("cases")
+        or evidence.get("evidence")
+        or []
+    )
+
+    selected_cases: List[Dict[str, Any]] = []
+
+    for case in raw_cases:
+        if not isinstance(case, dict):
+            continue
+
+        cid = get_case_id(case)
+        if cid == case_id:
+            selected_cases.append(case)
+
+    if not selected_cases:
+        return empty_active_evidence()
+
+    return {
+        "scope": "selected_case",
+        "source": "selected_by_policy",
+        "selected_case_ids": [case_id],
+        "cases": selected_cases,
+    }
+
+
+def decide_current_evidence(
+    batch_zefeng_rag,
+    target: TargetTurn,
+    q: Dict[str, Any],
+    t: Dict[str, Any],
+    active_evidence: Dict[str, Any],
+    top_k: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    根据 t_n 决定当前轮 evidence。
+
+    返回两个对象：
+    1. e_short: 写入当前轮历史状态，只含 case_id/title
+    2. e_content: 当前轮供 policy/response 使用的证据内容
+
+    逻辑：
+    - retrieve_new_evidence: 调 RAG，得到新内容
+    - reuse_existing_evidence: 使用 active_evidence
+    - no_evidence_needed: 当前轮 e 为空，但 active_evidence 不在这里清空
+    """
+    evidence_mode = t.get("evidence_mode")
+    trigger = bool(t.get("trigger"))
+
+    if trigger is True or evidence_mode == "retrieve_new_evidence":
+        retrieved_content = run_rag_once(
+            batch_zefeng_rag=batch_zefeng_rag,
+            target=target,
+            q=q,
+            top_k=top_k,
+        )
+        return compact_evidence_metadata(retrieved_content), compact_active_evidence(retrieved_content)
+
+    if evidence_mode == "reuse_existing_evidence":
+        return compact_evidence_metadata(active_evidence), compact_active_evidence(active_evidence)
+
+    return empty_evidence_metadata(), empty_active_evidence()
+
+
+def update_active_evidence(
+    previous_active: Dict[str, Any],
+    current_evidence_content: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    current_policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    更新外部证据空间 a。
+
+    a 不进入每轮 history_state，只作为下一轮外部变量。
+
+    规则：
+    1. 如果本轮 policy 明确选中 case_id，则 a 收敛为该 case。
+    2. 如果本轮新检索且未选中单个 case，则 a 更新为候选集合。
+    3. 如果本轮复用证据，则 a 默认保持 previous_active，除非 policy 收敛到单 case。
+    4. 如果本轮不需要证据，不清空 a，避免短反馈导致证据丢失。
+    """
+    label = current_policy.get("label", "")
+    case_id = str(current_policy.get("case_id") or "").strip()
+    evidence_mode = current_trigger.get("evidence_mode")
+
+    base = current_evidence_content if has_evidence(current_evidence_content) else previous_active
+
+    if case_id:
+        selected = select_case_from_evidence(base, case_id)
+        if has_evidence(selected):
+            return compact_active_evidence(selected)
+
+    if evidence_mode == "retrieve_new_evidence":
+        if has_evidence(current_evidence_content):
+            updated = compact_active_evidence(current_evidence_content)
+            if label in {"CaseRecommendation", "ExplainedResponse"} and len(updated.get("cases", [])) == 1:
+                updated["scope"] = "selected_case"
+                updated["source"] = "used_for_response"
+            else:
+                updated["scope"] = "candidate_set" if len(updated.get("cases", [])) > 1 else updated.get("scope", "candidate_set")
+                updated["source"] = "new_retrieval"
+            return updated
+
+    if evidence_mode == "reuse_existing_evidence":
+        return compact_active_evidence(previous_active)
+
+    if label in {"AskMissingSlot", "AskClarification"}:
+        if has_evidence(current_evidence_content):
+            updated = compact_active_evidence(current_evidence_content)
+            updated["scope"] = "candidate_set"
+            updated["source"] = "candidate_for_missing_info"
+            return updated
+        return compact_active_evidence(previous_active)
+
+    if label in {"CaseRecommendation", "ExplainedResponse"}:
+        if has_evidence(current_evidence_content):
+            updated = compact_active_evidence(current_evidence_content)
+            updated["source"] = "used_for_response"
+            return updated
+        return compact_active_evidence(previous_active)
+
+    return compact_active_evidence(previous_active)
+
+
+# ============================================================
+# Prompt builders
+# ============================================================
+
+def build_query_messages(
+    bank: PromptBank,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+) -> List[Dict[str, str]]:
+    payload = {
+        "turn_id": turn_id,
+        "history_state": history_state,
+        "active_evidence": compact_active_evidence(active_evidence),
+        "current": {
+            "u": current_user,
+        },
+    }
+    return make_messages(bank.query, payload)
+
+
+def build_trigger_messages(
+    bank: PromptBank,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    current_query: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """
+    Trigger 在 evidence 更新之前执行。
+    所以 trigger 不能看到当前新 evidence，只能看到 active_evidence。
+    """
+    payload = {
+        "turn_id": turn_id,
+        "history_state": history_state,
+        "active_evidence": compact_active_evidence(active_evidence),
+        "current": {
+            "u": current_user,
+            "q": remove_reason(current_query),
+        },
+    }
+    return make_messages(bank.trigger, payload)
+
+
+def build_policy_messages(
+    bank: PromptBank,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    current_evidence_content: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    payload = {
+        "turn_id": turn_id,
+        "history_state": history_state,
+        "active_evidence": compact_active_evidence(active_evidence),
+        "current": {
+            "u": current_user,
+            "q": remove_reason(current_query),
+            "t": remove_reason(current_trigger),
+            "e": compact_active_evidence(current_evidence_content),
+        },
+    }
+    return make_messages(bank.policy, payload)
+
+
+def build_response_messages(
+    bank: PromptBank,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    current_query: Dict[str, Any],
+    current_trigger: Dict[str, Any],
+    current_evidence_content: Dict[str, Any],
+    current_policy: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    payload = {
+        "turn_id": turn_id,
+        "history_state": history_state,
+        "active_evidence": compact_active_evidence(active_evidence),
+        "current": {
+            "u": current_user,
+            "q": remove_reason(current_query),
+            "t": remove_reason(current_trigger),
+            "e": compact_active_evidence(current_evidence_content),
+            "p": remove_reason(current_policy),
+        },
+    }
+    return make_messages(bank.response, payload)
+
+
+# ============================================================
+# Prediction
+# ============================================================
+
+def predict_query(
+    bank: PromptBank,
+    parallel_inference,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+) -> Dict[str, Any]:
+    messages = build_query_messages(
+        bank=bank,
+        turn_id=turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=current_user,
+    )
+    return call_llm_json(parallel_inference, messages)
+
+
+def predict_trigger(
+    bank: PromptBank,
+    parallel_inference,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    q: Dict[str, Any],
+) -> Dict[str, Any]:
+    messages = build_trigger_messages(
+        bank=bank,
+        turn_id=turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=current_user,
+        current_query=q,
+    )
+    return call_llm_json(parallel_inference, messages)
+
+
+def predict_policy(
+    bank: PromptBank,
+    parallel_inference,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    q: Dict[str, Any],
+    t: Dict[str, Any],
+    e_content: Dict[str, Any],
+) -> Dict[str, Any]:
+    messages = build_policy_messages(
+        bank=bank,
+        turn_id=turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=current_user,
+        current_query=q,
+        current_trigger=t,
+        current_evidence_content=e_content,
+    )
+    return call_llm_json(parallel_inference, messages)
+
+
+def predict_response(
+    bank: PromptBank,
+    parallel_inference,
+    turn_id: int,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    current_user: str,
+    q: Dict[str, Any],
+    t: Dict[str, Any],
+    e_content: Dict[str, Any],
+    p: Dict[str, Any],
+) -> str:
+    messages = build_response_messages(
+        bank=bank,
+        turn_id=turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=current_user,
+        current_query=q,
+        current_trigger=t,
+        current_evidence_content=e_content,
+        current_policy=p,
+    )
+    obj = call_llm_json(parallel_inference, messages)
+    return normalize_response_obj(obj)
+
+
+def predict_one_turn(
+    target: TargetTurn,
+    turn_states: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    bank: PromptBank,
+    parallel_inference,
+    batch_zefeng_rag,
+    top_k: int,
+    no_response: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    第 n 轮执行顺序：
+
+    history_state + active_evidence + u_n
+    → q_n
+    → t_n
+    → e_n = retrieve / reuse / empty
+    → p_n
+    → r_n
+    → update active_evidence
+
+    返回：
+    - turn_state: 当前轮 (u,q,t,e,p,r,golden_response)
+    - new_active_evidence: 更新后的外部证据空间 a_n
+    """
+    start = time.time()
+    latency: Dict[str, int] = {}
+    history_state = build_history_state(turn_states)
+
+    # 1. q_n
+    t0 = time.time()
+    q = predict_query(
+        bank=bank,
+        parallel_inference=parallel_inference,
+        turn_id=target.turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=target.current_user,
+    )
+    latency["query"] = int((time.time() - t0) * 1000)
+
+    # 2. t_n
+    t0 = time.time()
+    t = predict_trigger(
+        bank=bank,
+        parallel_inference=parallel_inference,
+        turn_id=target.turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=target.current_user,
+        q=q,
+    )
+    latency["trigger"] = int((time.time() - t0) * 1000)
+
+    # 3. e_n
+    t0 = time.time()
+    e_short, e_content = decide_current_evidence(
+        batch_zefeng_rag=batch_zefeng_rag,
+        target=target,
+        q=q,
+        t=t,
+        active_evidence=active_evidence,
+        top_k=top_k,
+    )
+    latency["evidence"] = int((time.time() - t0) * 1000)
+
+    # 4. p_n
+    t0 = time.time()
+    p = predict_policy(
+        bank=bank,
+        parallel_inference=parallel_inference,
+        turn_id=target.turn_id,
+        history_state=history_state,
+        active_evidence=active_evidence,
+        current_user=target.current_user,
+        q=q,
+        t=t,
+        e_content=e_content,
+    )
+    latency["policy"] = int((time.time() - t0) * 1000)
+
+    # 5. r_n
+    if no_response:
+        r = ""
+        latency["response"] = 0
+    else:
+        t0 = time.time()
+        r = predict_response(
+            bank=bank,
+            parallel_inference=parallel_inference,
+            turn_id=target.turn_id,
+            history_state=history_state,
+            active_evidence=active_evidence,
+            current_user=target.current_user,
+            q=q,
+            t=t,
+            e_content=e_content,
+            p=p,
+        )
+        latency["response"] = int((time.time() - t0) * 1000)
+
+    latency["total"] = int((time.time() - start) * 1000)
+
+    # 6. update a_n
+    new_active_evidence = update_active_evidence(
+        previous_active=active_evidence,
+        current_evidence_content=e_content,
+        current_trigger=t,
+        current_policy=p,
+    )
+
+    # 7. current turn state
+    # golden_response 只用于对比，不进入下一轮 history_state。
+    turn_state = {
+        "turn_id": target.turn_id,
+        "u": target.current_user,
+        "q": q,
+        "t": t,
+        "e": e_short,
+        "p": p,
+        "r": r,
+        "golden_response": target.golden_response,
+        "active_evidence_after_turn": compact_active_evidence(new_active_evidence),
+        "latency_ms": latency,
+    }
+
+    return turn_state, new_active_evidence
+
+
+# ============================================================
+# Main loop
+# ============================================================
+
+def run_predict_state_incremental(args) -> List[Dict[str, Any]]:
+    raw_dialogues = load_dialogues(args.data_path)[: args.max_dialogues]
+
+    bank = PromptBank(args.prompt_dir)
+    parallel_inference = get_parallel_inference(args.project_root)
+    batch_zefeng_rag = get_batch_rag(args.project_root)
+
+    outputs: List[Dict[str, Any]] = []
+
+    for raw in tqdm(raw_dialogues, desc="Predict-state dialogues"):
+        targets = build_target_turns(raw)
+        if not targets:
+            continue
+
+        dialog_id = targets[0].dialog_id
+        turn_states: List[Dict[str, Any]] = []
+        active_evidence = empty_active_evidence()
+
+        for target in targets:
+            try:
+                turn_state, active_evidence = predict_one_turn(
+                    target=target,
+                    turn_states=turn_states,
+                    active_evidence=active_evidence,
+                    bank=bank,
+                    parallel_inference=parallel_inference,
+                    batch_zefeng_rag=batch_zefeng_rag,
+                    top_k=args.top_k,
+                    no_response=args.no_response,
+                )
+
+                # 注意：
+                # turn_state 里有 golden_response，
+                # 但 build_history_state 会自动忽略 golden_response。
+                turn_states.append(turn_state)
+
+            except Exception as exc:
+                if not args.continue_on_error:
+                    raise
+
+                error_turn = {
+                    "turn_id": target.turn_id,
+                    "u": target.current_user,
+                    "q": {},
+                    "t": {},
+                    "e": empty_evidence_metadata(),
+                    "p": {},
+                    "r": "",
+                    "golden_response": target.golden_response,
+                    "active_evidence_after_turn": compact_active_evidence(active_evidence),
+                    "latency_ms": {},
+                    "error": repr(exc),
+                }
+                turn_states.append(error_turn)
+
+        outputs.append(
+            {
+                "dialog_id": dialog_id,
+                "case_ids": targets[0].case_ids,
+                "num_turns": len(targets),
+                "turns": turn_states,
+                "final_active_evidence": compact_active_evidence(active_evidence),
+            }
+        )
+
+    return outputs
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--prompt_dir", default="prompts/predict_state")
+    parser.add_argument("--project_root", default=".")
+    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--max_dialogues", type=int, default=300)
+    parser.add_argument("--no_response", action="store_true")
+    parser.add_argument("--continue_on_error", action="store_true")
+    args = parser.parse_args()
+
+    rows = run_predict_state_incremental(args)
+    write_json(args.output_path, rows)
+    print(f"Saved {len(rows)} dialogues to {args.output_path}")
+
+
+if __name__ == "__main__":
+    main()
