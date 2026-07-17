@@ -2,382 +2,921 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Set
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from .io import write_json
-from .schema import extract_case_ids
+from tqdm import tqdm
 
-
-KNOWLEDGE_LABELS = {"ExplainedResponse", "CaseRecommendation"}
-QUERY_POSITIVE_MODES = {"rewrite", "refine", "reuse"}
-
-
-def safe_div(a: float, b: float) -> float:
-    return float(a) / float(b) if b else 0.0
-
-
-def f1_score(precision: float, recall: float) -> float:
-    return safe_div(2 * precision * recall, precision + recall)
+from .external import (
+    get_batch_rag,
+    get_parallel_inference,
+    run_llm_batch,
+    run_rag_batch,
+)
+from .io import load_json_or_jsonl, write_json
+from .parsers import normalize_retrieval, parse_json_obj
 
 
-def normalize_case_id(value: Any) -> str:
-    return str(value or "").strip().upper()
+@dataclass
+class TargetTurn:
+    dialog_id: str
+    turn_id: int
+    current_user: str
+    golden_response: str
+    case_ids: List[str]
 
 
-def unique_keep_order(values: List[str]) -> List[str]:
-    seen: Set[str] = set()
-    output: List[str] = []
-    for value in values:
-        value = normalize_case_id(value)
-        if value and value not in seen:
-            seen.add(value)
-            output.append(value)
-    return output
+class PromptBank:
+    def __init__(self, prompt_dir: str | Path):
+        prompt_dir = Path(prompt_dir)
+        self.query = self._read(prompt_dir / "query.prompt")
+        self.trigger = self._read(prompt_dir / "trigger.prompt")
+        self.policy = self._read(prompt_dir / "policy.prompt")
+        self.response = self._read(prompt_dir / "response.prompt")
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        if not path.exists():
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+        return path.read_text(encoding="utf-8").strip()
 
 
-def flatten_predictions(data: Any) -> List[Dict[str, Any]]:
-    if not isinstance(data, list):
-        raise ValueError(f"Prediction file should contain a list, got {type(data)}")
+def normalize_dialogues(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return data
 
-    rows: List[Dict[str, Any]] = []
-    for item in data:
-        if not isinstance(item, dict):
+    if isinstance(data, dict):
+        for key in ("data", "dialogues", "items", "records"):
+            if isinstance(data.get(key), list):
+                return data[key]
+
+        rows = []
+        for dialog_id, sample in data.items():
+            if isinstance(sample, dict):
+                row = dict(sample)
+                row.setdefault("dialog_id", str(dialog_id))
+                rows.append(row)
+        return rows
+
+    raise ValueError(f"Unsupported data type: {type(data)}")
+
+
+def load_dialogues(path: str | Path) -> List[Dict[str, Any]]:
+    return normalize_dialogues(load_json_or_jsonl(str(path)))
+
+
+def parse_message(item: Any) -> Optional[Dict[str, str]]:
+    if isinstance(item, str):
+        text = item.strip()
+        if not text:
+            return None
+
+        if text.startswith(("用户:", "用户：")):
+            return {
+                "role": "user",
+                "text": text.replace("用户:", "", 1).replace("用户：", "", 1).strip(),
+            }
+
+        if text.startswith(("客服:", "客服：")):
+            return {
+                "role": "assistant",
+                "text": text.replace("客服:", "", 1).replace("客服：", "", 1).strip(),
+            }
+
+        return {"role": "user", "text": text}
+
+    if not isinstance(item, dict):
+        return None
+
+    for key in ("用户", "user", "human", "客户"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return {"role": "user", "text": value}
+
+    for key in ("客服", "assistant", "agent", "system"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return {"role": "assistant", "text": value}
+
+    role = str(
+        item.get("role")
+        or item.get("speaker")
+        or item.get("from")
+        or ""
+    ).lower()
+
+    text = str(
+        item.get("text")
+        or item.get("content")
+        or item.get("utterance")
+        or item.get("value")
+        or ""
+    ).strip()
+
+    if not text:
+        return None
+
+    if role in {"assistant", "agent", "客服", "system", "gpt"}:
+        return {"role": "assistant", "text": text}
+
+    return {"role": "user", "text": text}
+
+
+def get_messages(raw: Dict[str, Any]) -> List[Dict[str, str]]:
+    for key in (
+        "text",
+        "messages",
+        "turns",
+        "dialogue",
+        "conversation",
+        "dialogue_history",
+    ):
+        if isinstance(raw.get(key), list):
+            messages = []
+            for item in raw[key]:
+                message = parse_message(item)
+                if message:
+                    messages.append(message)
+            return messages
+
+    raise ValueError("Cannot find dialogue messages in sample.")
+
+
+def build_target_turns(raw: Dict[str, Any]) -> List[TargetTurn]:
+    dialog_id = str(
+        raw.get("dialog_id")
+        or raw.get("id")
+        or raw.get("dialogue_id")
+        or ""
+    )
+
+    case_ids = [
+        str(case_id).strip()
+        for case_id in raw.get("caseId", raw.get("case_ids", []))
+        if str(case_id).strip()
+    ]
+
+    targets = []
+    user_buffer = []
+    turn_id = 0
+
+    for message in get_messages(raw):
+        if message["role"] == "user":
+            user_buffer.append(message["text"])
             continue
 
-        if isinstance(item.get("turns"), list):
-            dialog_id = str(item.get("dialog_id") or "")
-            for turn in item["turns"]:
-                if not isinstance(turn, dict):
-                    continue
-                row = dict(turn)
-                row.setdefault("dialog_id", dialog_id)
-                rows.append(row)
-        else:
-            rows.append(item)
+        if not user_buffer:
+            continue
 
-    return rows
+        turn_id += 1
+        targets.append(
+            TargetTurn(
+                dialog_id=dialog_id,
+                turn_id=turn_id,
+                current_user="\n".join(user_buffer).strip(),
+                golden_response=message["text"],
+                case_ids=case_ids,
+            )
+        )
+        user_buffer = []
 
-
-def get_query(row: Dict[str, Any]) -> Dict[str, Any]:
-    value = row.get("q")
-    return value if isinstance(value, dict) else {}
-
-
-def get_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
-    value = row.get("t")
-    return value if isinstance(value, dict) else {}
+    return targets
 
 
-def get_policy(row: Dict[str, Any]) -> Dict[str, Any]:
-    value = row.get("p")
-    return value if isinstance(value, dict) else {}
+def make_messages(
+    system_prompt: str,
+    payload: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": json.dumps(payload, ensure_ascii=False),
+        },
+    ]
 
 
-def get_case_id(case: Any) -> str:
-    if not isinstance(case, dict):
-        return ""
-    return normalize_case_id(
+def unwrap_llm_response(raw: Any) -> str:
+    if isinstance(raw, dict):
+        for key in ("response", "text", "content", "output"):
+            if key in raw:
+                return str(raw[key])
+        return json.dumps(raw, ensure_ascii=False)
+
+    return str(raw)
+
+
+def parse_llm_json(raw: Any) -> Dict[str, Any]:
+    text = unwrap_llm_response(raw)
+    result = parse_json_obj(text)
+
+    if not isinstance(result, dict):
+        raise ValueError(f"LLM output is not a JSON object: {text}")
+
+    return result
+
+
+def run_llm_json_batch(
+    parallel_inference,
+    messages: List[List[Dict[str, str]]],
+    batch_size: int,
+) -> List[Dict[str, Any]]:
+    outputs = []
+
+    for start in range(0, len(messages), batch_size):
+        batch = messages[start:start + batch_size]
+        raw_batch = run_llm_batch(
+            parallel_inference,
+            batch,
+            batch_size=len(batch),
+        )
+
+        if not isinstance(raw_batch, list):
+            raw_batch = [raw_batch]
+
+        if len(raw_batch) != len(batch):
+            raise ValueError(
+                f"LLM batch length mismatch: expected {len(batch)}, got {len(raw_batch)}"
+            )
+
+        outputs.extend(parse_llm_json(item) for item in raw_batch)
+
+    return outputs
+
+
+def run_llm_response_batch(
+    parallel_inference,
+    messages: List[List[Dict[str, str]]],
+    batch_size: int,
+) -> List[str]:
+    outputs = run_llm_json_batch(
+        parallel_inference,
+        messages,
+        batch_size,
+    )
+
+    return [
+        str(
+            output.get("response")
+            or output.get("text")
+            or output.get("content")
+            or ""
+        ).strip()
+        for output in outputs
+    ]
+
+
+def remove_reason(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {
+            key: remove_reason(value)
+            for key, value in obj.items()
+            if key != "reason"
+        }
+
+    if isinstance(obj, list):
+        return [remove_reason(item) for item in obj]
+
+    return obj
+
+
+def get_case_id(case: Dict[str, Any]) -> str:
+    return str(
         case.get("case_id")
         or case.get("caseId")
         or case.get("id")
         or case.get("doc_id")
         or case.get("knowledge_id")
+        or ""
+    ).strip()
+
+
+def get_case_title(case: Dict[str, Any]) -> str:
+    return str(
+        case.get("title")
+        or case.get("case_title")
+        or case.get("name")
+        or case.get("subject")
+        or case.get("summary")
+        or ""
+    ).strip()
+
+
+def empty_evidence() -> Dict[str, Any]:
+    return {
+        "scope": "none",
+        "source": "empty",
+        "selected_case_ids": [],
+        "cases": [],
+    }
+
+
+def has_evidence(evidence: Dict[str, Any]) -> bool:
+    return bool(
+        evidence.get("cases")
+        or evidence.get("retrieved_cases")
+        or evidence.get("selected_case_ids")
     )
 
 
-def collect_case_ids_from_evidence(evidence: Any) -> List[str]:
+def normalize_evidence(evidence: Any) -> Dict[str, Any]:
     if not isinstance(evidence, dict):
-        return []
+        return empty_evidence()
 
-    case_ids: List[str] = []
-    selected = evidence.get("selected_case_ids") or evidence.get("case_ids") or []
-    if isinstance(selected, list):
-        case_ids.extend(
-            normalize_case_id(case_id)
-            for case_id in selected
-            if normalize_case_id(case_id)
-        )
-
-    cases = (
-        evidence.get("cases")
-        or evidence.get("retrieved_cases")
+    raw_cases = (
+        evidence.get("retrieved_cases")
+        or evidence.get("cases")
         or evidence.get("evidence")
         or []
     )
-    if isinstance(cases, list):
-        for case in cases:
-            case_id = get_case_id(case)
-            if case_id:
-                case_ids.append(case_id)
 
-    return unique_keep_order(case_ids)
+    cases = [
+        dict(case)
+        for case in raw_cases
+        if isinstance(case, dict)
+    ]
 
-
-def get_gold_case_ids(row: Dict[str, Any]) -> List[str]:
-    explicit_ids = row.get("gold_case_ids")
-    if isinstance(explicit_ids, list):
-        return unique_keep_order(
-            [normalize_case_id(case_id) for case_id in explicit_ids if normalize_case_id(case_id)]
-        )
-
-    golden_response = str(row.get("golden_response") or "")
-    return unique_keep_order(
-        [normalize_case_id(case_id) for case_id in extract_case_ids(golden_response)]
+    selected_case_ids = (
+        evidence.get("selected_case_ids")
+        or evidence.get("case_ids")
+        or []
     )
 
-
-def get_retrieved_case_ids(row: Dict[str, Any]) -> List[str]:
-    active_ids = collect_case_ids_from_evidence(
-        row.get("active_evidence_for_policy_response")
+    scope = (
+        evidence.get("scope")
+        or evidence.get("evidence_scope")
     )
-    if active_ids:
-        return active_ids
-    return collect_case_ids_from_evidence(row.get("e"))
+
+    if not scope:
+        if not cases:
+            scope = "none"
+        elif len(cases) == 1:
+            scope = "selected_case"
+        else:
+            scope = "candidate_set"
+
+    return {
+        "scope": scope,
+        "source": (
+            evidence.get("source")
+            or evidence.get("evidence_source")
+            or "unknown"
+        ),
+        "selected_case_ids": selected_case_ids,
+        "cases": cases,
+    }
 
 
-def get_predicted_case_id(row: Dict[str, Any]) -> str:
-    return normalize_case_id(get_policy(row).get("case_id"))
+def compact_evidence(evidence: Any) -> Dict[str, Any]:
+    evidence = normalize_evidence(evidence)
+
+    return {
+        "selected_case_ids": evidence["selected_case_ids"],
+        "cases": [
+            {
+                "case_id": get_case_id(case),
+                "title": get_case_title(case),
+            }
+            for case in evidence["cases"]
+            if get_case_id(case) or get_case_title(case)
+        ],
+    }
 
 
-def knowledge_link_called(row: Dict[str, Any]) -> bool:
-    query = get_query(row)
-    trigger = get_trigger(row)
+def get_history_response(
+    turn_state: Dict[str, Any],
+    response_source: str,
+) -> str:
+    if response_source == "golden":
+        return str(turn_state.get("golden_response") or "").strip()
 
-    query_called = (
-        query.get("query_mode") in QUERY_POSITIVE_MODES
+    if response_source == "generated":
+        return str(turn_state.get("r") or "").strip()
+
+    raise ValueError(f"Unsupported history response source: {response_source}")
+
+
+def build_history_state(
+    turn_states: List[Dict[str, Any]],
+    response_source: str,
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "turn_id": turn.get("turn_id"),
+            "u": turn.get("u", ""),
+            "q": remove_reason(turn.get("q", {})),
+            "t": remove_reason(turn.get("t", {})),
+            "e": compact_evidence(turn.get("e", {})),
+            "p": remove_reason(turn.get("p", {})),
+            "r": get_history_response(turn, response_source),
+        }
+        for turn in turn_states
+    ]
+
+
+def needs_query(query: Dict[str, Any]) -> bool:
+    return (
+        query.get("query_mode") in {"rewrite", "refine", "reuse"}
         and bool(str(query.get("query_text") or "").strip())
     )
-    evidence_called = trigger.get("evidence_mode") in {
-        "retrieve_new_evidence",
-        "reuse_existing_evidence",
-    }
-    return query_called or evidence_called
 
 
-def knowledge_policy_selected(row: Dict[str, Any]) -> bool:
-    return get_policy(row).get("label") in KNOWLEDGE_LABELS
+def format_history_for_rag(
+    history_state: List[Dict[str, Any]],
+    current_user: str,
+) -> str:
+    lines = []
+
+    for turn in history_state:
+        if turn.get("u"):
+            lines.append(f"用户：{turn['u']}")
+        if turn.get("r"):
+            lines.append(f"客服：{turn['r']}")
+
+    lines.append(f"用户：{current_user}")
+    return "\n".join(lines)
 
 
-def recommendation_made(row: Dict[str, Any]) -> bool:
-    return knowledge_policy_selected(row) and bool(get_predicted_case_id(row))
+def retrieve_batch(
+    batch_zefeng_rag,
+    targets: List[TargetTurn],
+    history_states: List[List[Dict[str, Any]]],
+    queries: List[Dict[str, Any]],
+    triggers: List[Dict[str, Any]],
+    batch_size: int,
+    top_k: int,
+) -> List[Optional[Dict[str, Any]]]:
+    results: List[Optional[Dict[str, Any]]] = [None] * len(targets)
 
+    indices = []
+    histories = []
+    query_texts = []
 
-def case_hit(row: Dict[str, Any]) -> bool:
-    predicted_case_id = get_predicted_case_id(row)
-    return bool(predicted_case_id) and predicted_case_id in set(get_gold_case_ids(row))
-
-
-def topk_hit(row: Dict[str, Any], k: int) -> bool:
-    gold_case_ids = set(get_gold_case_ids(row))
-    retrieved_case_ids = get_retrieved_case_ids(row)[:k]
-    return bool(gold_case_ids.intersection(retrieved_case_ids))
-
-
-def binary_metrics(
-    rows: List[Dict[str, Any]],
-    pred_fn: Callable[[Dict[str, Any]], bool],
-    gold_fn: Callable[[Dict[str, Any]], bool],
-) -> Dict[str, Any]:
-    tp = fp = fn = tn = 0
-
-    for row in rows:
-        pred = bool(pred_fn(row))
-        gold = bool(gold_fn(row))
-
-        if pred and gold:
-            tp += 1
-        elif pred and not gold:
-            fp += 1
-        elif not pred and gold:
-            fn += 1
-        else:
-            tn += 1
-
-    precision = safe_div(tp, tp + fp)
-    recall = safe_div(tp, tp + fn)
-
-    return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1_score(precision, recall),
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "tn": tn,
-    }
-
-
-def evaluate_case_turns(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    case_rows = [row for row in rows if get_gold_case_ids(row)]
-    linked_rows = [row for row in case_rows if knowledge_link_called(row)]
-    top5_hit_rows = [row for row in linked_rows if topk_hit(row, 5)]
-    knowledge_policy_rows = [
-        row for row in top5_hit_rows if knowledge_policy_selected(row)
-    ]
-    concrete_selection_rows = [
-        row for row in knowledge_policy_rows if get_predicted_case_id(row)
-    ]
-
-    return {
-        "case_turn_count": len(case_rows),
-        "knowledge_link_call_rate": safe_div(len(linked_rows), len(case_rows)),
-        "top1_recall_given_link": safe_div(
-            sum(topk_hit(row, 1) for row in linked_rows), len(linked_rows)
-        ),
-        "top3_recall_given_link": safe_div(
-            sum(topk_hit(row, 3) for row in linked_rows), len(linked_rows)
-        ),
-        "top5_recall_given_link": safe_div(
-            sum(topk_hit(row, 5) for row in linked_rows), len(linked_rows)
-        ),
-        "case_policy_accuracy_given_top5_hit": safe_div(
-            len(knowledge_policy_rows), len(top5_hit_rows)
-        ),
-        "case_selection_accuracy_given_policy": safe_div(
-            sum(case_hit(row) for row in concrete_selection_rows),
-            len(concrete_selection_rows),
-        ),
-        "final_recommendation_success_rate": safe_div(
-            sum(case_hit(row) for row in case_rows), len(case_rows)
-        ),
-        "linked_case_turn_count": len(linked_rows),
-        "top5_hit_count": len(top5_hit_rows),
-        "knowledge_policy_count": len(knowledge_policy_rows),
-        "concrete_selection_count": len(concrete_selection_rows),
-    }
-
-
-def evaluate_recommendation_timing(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    metrics = binary_metrics(
-        rows=rows,
-        pred_fn=recommendation_made,
-        gold_fn=lambda row: bool(get_gold_case_ids(row)),
-    )
-    metrics["recommendation_rate"] = safe_div(
-        sum(recommendation_made(row) for row in rows), len(rows)
-    )
-    metrics["gold_case_turn_rate"] = safe_div(
-        sum(bool(get_gold_case_ids(row)) for row in rows), len(rows)
-    )
-    metrics["early_recommendation_rate"] = safe_div(
-        metrics["fp"], metrics["fp"] + metrics["tn"]
-    )
-    metrics["missed_recommendation_rate"] = safe_div(
-        metrics["fn"], metrics["tp"] + metrics["fn"]
-    )
-    return metrics
-
-
-def evaluate_dialogues(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    by_dialog: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        by_dialog[str(row.get("dialog_id") or "")].append(row)
-
-    dialogue_count_with_gold = 0
-    successful_dialogue_count = 0
-    offsets: List[int] = []
-
-    for dialogue_rows in by_dialog.values():
-        dialogue_rows = sorted(
-            dialogue_rows,
-            key=lambda row: int(row.get("turn_id") or 0),
+    for index, (target, history, query, trigger) in enumerate(
+        zip(targets, history_states, queries, triggers)
+    ):
+        should_retrieve = (
+            bool(trigger.get("trigger"))
+            or trigger.get("evidence_mode") == "retrieve_new_evidence"
         )
 
-        gold_first_turn: Dict[str, int] = {}
-        for row in dialogue_rows:
-            turn_id = int(row.get("turn_id") or 0)
-            for case_id in get_gold_case_ids(row):
-                gold_first_turn.setdefault(case_id, turn_id)
-
-        if not gold_first_turn:
-            continue
-
-        dialogue_count_with_gold += 1
-        successful_events = []
-
-        for row in dialogue_rows:
-            if not recommendation_made(row):
-                continue
-
-            predicted_case_id = get_predicted_case_id(row)
-            if predicted_case_id in gold_first_turn:
-                successful_events.append(
-                    (int(row.get("turn_id") or 0), predicted_case_id)
+        if should_retrieve and needs_query(query):
+            indices.append(index)
+            histories.append(
+                format_history_for_rag(
+                    history,
+                    target.current_user,
                 )
+            )
+            query_texts.append(str(query["query_text"]).strip())
 
-        if not successful_events:
+    for start in range(0, len(indices), batch_size):
+        batch_indices = indices[start:start + batch_size]
+        history_batch = histories[start:start + batch_size]
+        query_batch = query_texts[start:start + batch_size]
+
+        raw_batch = run_rag_batch(
+            batch_zefeng_rag,
+            history_batch,
+            query_batch,
+        )
+
+        if not isinstance(raw_batch, list):
+            raw_batch = [raw_batch]
+
+        if len(raw_batch) != len(batch_indices):
+            raise ValueError(
+                f"RAG batch length mismatch: expected {len(batch_indices)}, got {len(raw_batch)}"
+            )
+
+        for index, raw in zip(batch_indices, raw_batch):
+            evidence = normalize_retrieval(raw, top_k=top_k)
+            evidence["scope"] = "candidate_set"
+            evidence["source"] = "new_retrieval"
+            results[index] = evidence
+
+    return results
+
+
+def decide_evidence_batch(
+    batch_zefeng_rag,
+    targets: List[TargetTurn],
+    history_states: List[List[Dict[str, Any]]],
+    queries: List[Dict[str, Any]],
+    triggers: List[Dict[str, Any]],
+    active_evidences: List[Dict[str, Any]],
+    batch_size: int,
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    retrievals = retrieve_batch(
+        batch_zefeng_rag,
+        targets,
+        history_states,
+        queries,
+        triggers,
+        batch_size,
+        top_k,
+    )
+
+    outputs = []
+
+    for index, (trigger, active_evidence) in enumerate(
+        zip(triggers, active_evidences)
+    ):
+        mode = trigger.get("evidence_mode")
+
+        if bool(trigger.get("trigger")) or mode == "retrieve_new_evidence":
+            current = normalize_evidence(
+                retrievals[index] or empty_evidence()
+            )
+
+        elif mode == "reuse_existing_evidence":
+            current = normalize_evidence(active_evidence)
+
+        else:
+            current = empty_evidence()
+
+        outputs.append(
+            {
+                "e_short": compact_evidence(current),
+                "e_content": current,
+                "a_current": (
+                    normalize_evidence(active_evidence)
+                    if mode == "no_evidence_needed"
+                    else current
+                ),
+            }
+        )
+
+    return outputs
+
+
+def select_case(
+    evidence: Dict[str, Any],
+    case_id: str,
+) -> Optional[Dict[str, Any]]:
+    for case in normalize_evidence(evidence)["cases"]:
+        if get_case_id(case) == case_id:
+            return {
+                "scope": "selected_case",
+                "source": "selected_by_policy",
+                "selected_case_ids": [case_id],
+                "cases": [case],
+            }
+
+    return None
+
+
+def update_active_evidence(
+    a_current: Dict[str, Any],
+    e_content: Dict[str, Any],
+    trigger: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    label = str(policy.get("label") or "")
+    case_id = str(policy.get("case_id") or "").strip()
+    mode = str(trigger.get("evidence_mode") or "")
+
+    base = (
+        normalize_evidence(e_content)
+        if has_evidence(e_content)
+        else normalize_evidence(a_current)
+    )
+
+    if case_id:
+        selected = select_case(base, case_id)
+        if selected:
+            return selected
+
+    if mode == "reuse_existing_evidence":
+        return normalize_evidence(a_current)
+
+    if mode == "retrieve_new_evidence":
+        return base
+
+    if label in {
+        "AskMissingSlot",
+        "AskClarification",
+        "CaseRecommendation",
+        "ExplainedResponse",
+    }:
+        return base
+
+    return normalize_evidence(a_current)
+
+
+def build_query_messages(
+    bank: PromptBank,
+    target: TargetTurn,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return make_messages(
+        bank.query,
+        {
+            "turn_id": target.turn_id,
+            "history_state": history_state,
+            "active_evidence": normalize_evidence(active_evidence),
+            "current": {"u": target.current_user},
+        },
+    )
+
+
+def build_trigger_messages(
+    bank: PromptBank,
+    target: TargetTurn,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    query: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return make_messages(
+        bank.trigger,
+        {
+            "turn_id": target.turn_id,
+            "history_state": history_state,
+            "active_evidence": normalize_evidence(active_evidence),
+            "current": {
+                "u": target.current_user,
+                "q": remove_reason(query),
+            },
+        },
+    )
+
+
+def build_policy_messages(
+    bank: PromptBank,
+    target: TargetTurn,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    query: Dict[str, Any],
+    trigger: Dict[str, Any],
+    evidence: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return make_messages(
+        bank.policy,
+        {
+            "turn_id": target.turn_id,
+            "history_state": history_state,
+            "active_evidence": normalize_evidence(active_evidence),
+            "current": {
+                "u": target.current_user,
+                "q": remove_reason(query),
+                "t": remove_reason(trigger),
+                "e": normalize_evidence(evidence),
+            },
+        },
+    )
+
+
+def build_response_messages(
+    bank: PromptBank,
+    target: TargetTurn,
+    history_state: List[Dict[str, Any]],
+    active_evidence: Dict[str, Any],
+    query: Dict[str, Any],
+    trigger: Dict[str, Any],
+    evidence: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return make_messages(
+        bank.response,
+        {
+            "turn_id": target.turn_id,
+            "history_state": history_state,
+            "active_evidence": normalize_evidence(active_evidence),
+            "current": {
+                "u": target.current_user,
+                "q": remove_reason(query),
+                "t": remove_reason(trigger),
+                "e": normalize_evidence(evidence),
+                "p": remove_reason(policy),
+            },
+        },
+    )
+
+
+def build_runtimes(
+    raw_dialogues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    runtimes = []
+
+    for raw in raw_dialogues:
+        targets = build_target_turns(raw)
+        if not targets:
             continue
 
-        successful_dialogue_count += 1
-        predicted_turn, predicted_case_id = min(
-            successful_events,
-            key=lambda item: item[0],
+        runtimes.append(
+            {
+                "dialog_id": targets[0].dialog_id,
+                "case_ids": targets[0].case_ids,
+                "targets": targets,
+                "turns": [],
+                "active_evidence": empty_evidence(),
+            }
         )
-        offsets.append(predicted_turn - gold_first_turn[predicted_case_id])
 
-    early_count = sum(offset < 0 for offset in offsets)
-    on_time_count = sum(offset == 0 for offset in offsets)
-    late_count = sum(offset > 0 for offset in offsets)
-
-    return {
-        "dialog_count": len(by_dialog),
-        "dialog_with_gold_count": dialogue_count_with_gold,
-        "successful_dialog_count": successful_dialogue_count,
-        "dialog_hit_rate": safe_div(
-            successful_dialogue_count, dialogue_count_with_gold
-        ),
-        "avg_signed_hit_offset": safe_div(sum(offsets), len(offsets)),
-        "avg_absolute_hit_offset": safe_div(
-            sum(abs(offset) for offset in offsets), len(offsets)
-        ),
-        "early_hit_rate_among_success": safe_div(early_count, len(offsets)),
-        "on_time_hit_rate_among_success": safe_div(on_time_count, len(offsets)),
-        "late_hit_rate_among_success": safe_div(late_count, len(offsets)),
-        "hit_offset_distribution": {
-            "early": early_count,
-            "on_time": on_time_count,
-            "late": late_count,
-        },
-    }
+    return runtimes
 
 
-def evaluate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
-        "basic_counts": {
-            "turn_count": len(rows),
-            "dialog_count": len(
-                {str(row.get("dialog_id") or "") for row in rows}
-            ),
-            "case_turn_count": sum(
-                bool(get_gold_case_ids(row)) for row in rows
-            ),
-        },
-        "case_turn_performance": evaluate_case_turns(rows),
-        "recommendation_timing": evaluate_recommendation_timing(rows),
-        "dialogue_level_performance": evaluate_dialogues(rows),
-    }
+def run_prediction(args) -> List[Dict[str, Any]]:
+    raw_dialogues = load_dialogues(args.data_path)[:args.max_dialogues]
 
+    bank = PromptBank(args.prompt_dir)
+    parallel_inference = get_parallel_inference(args.project_root)
+    batch_zefeng_rag = get_batch_rag(args.project_root)
 
-def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as file:
-        return json.load(file)
+    runtimes = build_runtimes(raw_dialogues)
+
+    if not runtimes:
+        return []
+
+    max_turns = max(len(runtime["targets"]) for runtime in runtimes)
+
+    for round_index in tqdm(range(max_turns), desc="Turns"):
+        active = [
+            runtime
+            for runtime in runtimes
+            if round_index < len(runtime["targets"])
+        ]
+
+        contexts = []
+
+        for runtime in active:
+            target = runtime["targets"][round_index]
+            history_state = build_history_state(
+                runtime["turns"],
+                args.history_response_source,
+            )
+
+            contexts.append(
+                {
+                    "runtime": runtime,
+                    "target": target,
+                    "history_state": history_state,
+                    "active_evidence": normalize_evidence(
+                        runtime["active_evidence"]
+                    ),
+                }
+            )
+
+        query_messages = [
+            build_query_messages(
+                bank,
+                context["target"],
+                context["history_state"],
+                context["active_evidence"],
+            )
+            for context in contexts
+        ]
+
+        queries = run_llm_json_batch(
+            parallel_inference,
+            query_messages,
+            args.batch_size,
+        )
+
+        trigger_messages = [
+            build_trigger_messages(
+                bank,
+                context["target"],
+                context["history_state"],
+                context["active_evidence"],
+                queries[index],
+            )
+            for index, context in enumerate(contexts)
+        ]
+
+        triggers = run_llm_json_batch(
+            parallel_inference,
+            trigger_messages,
+            args.batch_size,
+        )
+
+        evidence_results = decide_evidence_batch(
+            batch_zefeng_rag=batch_zefeng_rag,
+            targets=[context["target"] for context in contexts],
+            history_states=[
+                context["history_state"]
+                for context in contexts
+            ],
+            queries=queries,
+            triggers=triggers,
+            active_evidences=[
+                context["active_evidence"]
+                for context in contexts
+            ],
+            batch_size=args.rag_batch_size,
+            top_k=args.top_k,
+        )
+
+        policy_messages = [
+            build_policy_messages(
+                bank,
+                context["target"],
+                context["history_state"],
+                evidence_results[index]["a_current"],
+                queries[index],
+                triggers[index],
+                evidence_results[index]["e_content"],
+            )
+            for index, context in enumerate(contexts)
+        ]
+
+        policies = run_llm_json_batch(
+            parallel_inference,
+            policy_messages,
+            args.batch_size,
+        )
+
+        if args.no_response:
+            responses = [""] * len(contexts)
+        else:
+            response_messages = [
+                build_response_messages(
+                    bank,
+                    context["target"],
+                    context["history_state"],
+                    evidence_results[index]["a_current"],
+                    queries[index],
+                    triggers[index],
+                    evidence_results[index]["e_content"],
+                    policies[index],
+                )
+                for index, context in enumerate(contexts)
+            ]
+
+            responses = run_llm_response_batch(
+                parallel_inference,
+                response_messages,
+                args.batch_size,
+            )
+
+        for index, context in enumerate(contexts):
+            runtime = context["runtime"]
+            target = context["target"]
+            evidence_result = evidence_results[index]
+
+            runtime["turns"].append(
+                {
+                    "turn_id": target.turn_id,
+                    "u": target.current_user,
+                    "q": queries[index],
+                    "t": triggers[index],
+                    "e": evidence_result["e_short"],
+                    "p": policies[index],
+                    "r": responses[index],
+                    "golden_response": target.golden_response,
+                }
+            )
+
+            runtime["active_evidence"] = update_active_evidence(
+                a_current=evidence_result["a_current"],
+                e_content=evidence_result["e_content"],
+                trigger=triggers[index],
+                policy=policies[index],
+            )
+
+    return [
+        {
+            "dialog_id": runtime["dialog_id"],
+            "case_ids": runtime["case_ids"],
+            "num_turns": len(runtime["targets"]),
+            "turns": runtime["turns"],
+        }
+        for runtime in runtimes
+    ]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pred_path", required=True)
-    parser.add_argument("--output_path", default="")
+
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--prompt_dir", default="prompts")
+    parser.add_argument("--project_root", default=".")
+    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--max_dialogues", type=int, default=300)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--rag_batch_size", type=int, default=32)
+    parser.add_argument("--no_response", action="store_true")
+    parser.add_argument(
+        "--history_response_source",
+        choices=["golden", "generated"],
+        default="golden",
+    )
+
     args = parser.parse_args()
 
-    data = load_json(args.pred_path)
-    rows = flatten_predictions(data)
-    result = evaluate(rows)
+    if args.no_response and args.history_response_source == "generated":
+        parser.error(
+            "--no_response cannot be used with generated history."
+        )
 
-    if args.output_path:
-        write_json(args.output_path, result)
+    outputs = run_prediction(args)
+    write_json(args.output_path, outputs)
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
 
 
 if __name__ == "__main__":
