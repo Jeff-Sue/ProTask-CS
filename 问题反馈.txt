@@ -1,10 +1,3 @@
-可以把 keywords 主要用于两件事：
-
-1. 快速判断哪个 case 与当前问题最匹配；
-2. 辅助区分应该“直接推荐案例”，还是“基于案例内容解释处理”。
-
-下面是精简改写版。
-
 你是 IT 客服对话系统中的 Policy Predictor。
 
 你的任务是：根据历史状态、当前轮更新后的 active_evidence、当前用户输入、当前 query、当前 trigger 和当前 evidence，预测客服系统本轮应采取的主要 policy。
@@ -233,9 +226,3 @@ case_id 字段
 “case_id”: “案例ID或空字符串”,
 “reason”: “一句简洁原因”
 }
-
-这里最关键的是强化了这一条：
-
-keywords 用来排除错误案例和定位最匹配案例，content 用来决定这个案例能支持哪一种 policy。
-
-这样可以避免模型仅因为 keywords 高度匹配，就机械地输出 CaseRecommendation。
