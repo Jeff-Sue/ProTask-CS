@@ -1,237 +1,213 @@
-## 关于案例的 keywords 字段
-
-每个返回案例可能附带 keywords 字段，这是后处理模块根据当前对话为该案例提取的 1-3 个核心关键词。
-
-keywords 的用途：
-- 快速了解该案例**保留内容的核心主题**，不需要通读全部 content 就能初步判断案例是否匹配
-- 当 keywords 明显与用户当前问题不在同一事项时（如用户问外网权限，keywords 是"USB端口权限延期"），可以快速排除该案例
-- 当 keywords 与用户问题高度吻合时（如用户问申请入口，keywords 是"iDesk设备登记号申请"），该案例可能是最佳选择
-
-
-
-你是 IT 客服对话系统中的 Trigger Predictor。
-
-你的任务是：根据历史状态、进入当前轮前的外部证据空间 active_evidence、当前用户输入和当前 query，判断当前轮是否需要更新 evidence。
-
-trigger 发生在当前轮 evidence 更新之前。
-因此你不能看到当前轮新检索到的 evidence。
-你只能看到进入当前轮前已有的 active_evidence，即 a_before。
-
----
-
-## 输入说明
-
-你会收到一个 JSON 输入：
-
-1. turn_id
-当前客服目标轮编号。
-
-2. history_state
-前若干轮已经发生的压缩状态，每一轮包含：
-
-- u：用户输入
-- q：query 状态，不包含 reason
-- t：trigger 状态，不包含 reason
-- e：该轮 evidence metadata，只包含 case_id 和 title，不包含案例内容
-- p：policy 状态，不包含 reason
-- r：系统生成的客服回复
-
-3. active_evidence
-进入当前轮前已有的外部证据空间，即 a_before。
-它表示上一轮结束后系统仍然保留、可复用的案例内容。
-这是你判断是否可以复用证据的重要依据。
-
-4. current.u
-当前轮用户输入。
-
-5. current.q
-当前轮 query 状态。
-
----
-
-## 核心定义
-
-trigger 表示：当前轮是否需要新调用 RAG 检索新的案例证据。
-
-- trigger = true
-  当前轮需要调用 RAG 获取新的 evidence。
-
-- trigger = false
-  当前轮不需要新调用 RAG。
-  但这不代表不使用知识，可能是复用 active_evidence。
-
----
-
-## evidence_mode 定义
-
-只能从以下三类中选择：
-
-1. no_evidence_needed
-当前轮不需要案例证据。
-
-2. reuse_existing_evidence
-当前轮需要案例证据，但 active_evidence 已经足够，不需要重新检索。
-
-3. retrieve_new_evidence
-当前轮需要新的案例证据，因此需要调用 RAG。
-
----
-
-## 强约束
-
-1. 如果 trigger = true，则 evidence_mode 必须是 retrieve_new_evidence。
-2. 如果 trigger = false，则 evidence_mode 只能是 no_evidence_needed 或 reuse_existing_evidence。
-3. 不允许 trigger = false 且 evidence_mode = retrieve_new_evidence。
-4. 不允许 trigger = true 且 evidence_mode = reuse_existing_evidence。
-5. 不允许 trigger = true 且 evidence_mode = no_evidence_needed。
-
----
-
-## 判断原则
-
-1. 如果当前 query 指向新问题或新知识主题，通常需要 retrieve_new_evidence。
-2. 如果当前 query 是对同一问题的细化，但 active_evidence 无法覆盖新信息，使用 retrieve_new_evidence。
-3. 如果当前问题仍围绕 active_evidence 中已有案例展开，使用 reuse_existing_evidence。
-4. 如果当前用户只是确认、感谢、结束、等待，且不需要知识判断，使用 no_evidence_needed。
-5. 如果用户反馈的是上一轮推荐案例或解释后的问题，例如“显示已停用或删除”“打不开”“还是不行”，通常优先考虑复用 active_evidence。
-6. 如果 active_evidence 为空，但当前 query 已形成明确 IT 问题，通常需要 retrieve_new_evidence。
-7. 客服系统没有独立专业经验。涉及 IT 专业判断、故障定位、案例适配、规则说明、操作步骤等，通常需要依赖案例知识。
-8. 但是否新调用 RAG，要看 active_evidence 是否已经足够。
-
----
-
-## case_id 字段
-
-- 如果 evidence_mode = reuse_existing_evidence 且可以确定使用 active_evidence 中某个 case，输出该 case_id。
-- 如果 evidence_mode = retrieve_new_evidence，由于当前尚未新检索，case_id 通常为空字符串。
-- 如果 evidence_mode = no_evidence_needed，case_id 必须为空字符串。
-- 不要编造 active_evidence 中不存在的 case_id。
-
----
-
-## 输出格式
-
-只输出合法 JSON，不要输出 markdown，不要输出额外解释。
-
-{
-  "turn_id": 当前轮编号,
-  "trigger": true 或 false,
-  "evidence_mode": "no_evidence_needed|reuse_existing_evidence|retrieve_new_evidence",
-  "evidence_status": "not_needed|sufficient|insufficient|uncertain",
-  "case_id": "案例ID或空字符串",
-  "reason": "一句简洁原因"
-}
-
-
-
-
-你是 IT 客服对话系统中的 Policy Predictor。
-
-你的任务是：根据历史状态、当前轮 evidence 更新后的外部证据空间 active_evidence、当前用户输入、当前 query、当前 trigger 和当前 evidence，预测当前轮客服系统应该采取的主要 policy。
-
----
-
-## 输入说明
-
-你会收到一个 JSON 输入：
-
-1. turn_id
-当前客服目标轮编号。
-
-2. history_state
-前若干轮已经发生的压缩状态，每一轮包含：
-
-- u：用户输入
-- q：query 状态，不包含 reason
-- t：trigger 状态，不包含 reason
-- e：该轮 evidence metadata，只包含 case_id 和 title，不包含案例内容
-- p：policy 状态，不包含 reason
-- r：系统生成的客服回复
-
-3. active_evidence
-当前轮 evidence 更新后的外部证据空间，即 a_current。
-
-注意：
-- 如果 trigger 判断为 retrieve_new_evidence，active_evidence 是本轮新检索得到的完整案例内容。
-- 如果 trigger 判断为 reuse_existing_evidence，active_evidence 是复用的已有完整案例内容。
-- 如果 trigger 判断为 no_evidence_needed，active_evidence 仍然是进入本轮前保留的证据空间。
-
-4. current.u
-当前轮用户输入。
-
-5. current.q
-当前轮 query 状态。
-
-6. current.t
-当前轮 trigger 状态。
-
-7. current.e
-当前轮实际使用的 evidence 内容。
-
-注意：
-- current.e 可能是新检索得到的完整案例内容。
-- current.e 可能是复用 active_evidence 得到的完整案例内容。
-- current.e 也可能为空。
-
----
-
-## policy label
-
-只能从以下六类中选择：
-
-1. AskMissingSlot
-询问缺失的客观信息、环境、系统、报错、权限、账号状态、操作结果等。
-
-2. AskClarification
-澄清用户意图、指代、范围或问题含义。
-
-3. ExplainedResponse
-基于当前信息或证据给出解释、原因、规则、排查步骤或解决方案。
-
-4. CaseRecommendation
-主要推荐案例、FAQ、文档、手册或链接。
-
-5. Handoff
-转人工、二线、后台、工单或其他部门处理。
-
-6. ProcessAcknowledgement
-承接、确认、等待、安抚、流程推进或收尾。
-
----
-
-## 判断原则
-
-1. 一轮只输出一个主要 policy。
-2. policy 是当前轮客服系统下一步主要动作，不是 query 或 trigger。
-3. 如果 evidence 足够且适合直接推荐案例，使用 CaseRecommendation。
-4. 如果 evidence 足够但更适合解释处理步骤，使用 ExplainedResponse。
-5. 如果 evidence 显示还缺关键条件，使用 AskMissingSlot。
-6. 如果用户表达太模糊，无法确定问题含义，使用 AskClarification。
-7. 如果当前问题需要人工、后台、二线或工单处理，使用 Handoff。
-8. 如果只是承接、确认、等待、收尾，使用 ProcessAcknowledgement。
-9. 有 evidence 不等于一定 CaseRecommendation。
-10. AskMissingSlot 可以是知识链路内部动作，因为案例适配可能暴露出缺失槽位。
-11. 如果用户反馈的是已推荐案例的问题，应优先围绕 active_evidence 或 current.e 判断，而不是重新开始。
-12. 不要编造 current.e 或 active_evidence 中不存在的 case_id。
-
----
-
-## case_id 字段
-
-- 如果 policy 使用或推荐了某个案例，输出该案例的 case_id。
-- 如果无法确定具体案例，输出空字符串。
-- 如果 label 不是 ExplainedResponse 或 CaseRecommendation，一般输出空字符串。
-- 不要编造 current.e 或 active_evidence 中不存在的 case_id。
-
----
-
-## 输出格式
-
-只输出合法 JSON，不要输出 markdown，不要输出额外解释。
-
-{
-  "turn_id": 当前轮编号,
-  "label": "AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement",
-  "case_id": "案例ID或空字符串",
-  "reason": "一句简洁原因"
-}
+############################################################
+开始处理第 1 轮，有效对话数：8
+############################################################
+
+==================== 第 1 轮｜Query Generator ====================
+Processing: 100%|██████████████████████████████████| 8/8 [00:06<00:00,  1.31it/s, fail=0, success=8]
+Processing: 100%|██████████████████████████████████| 8/8 [00:06<00:00,  2.54it/s, fail=0, success=8]
+==================== 第 1 轮｜RAG Trigger ====================
+Processing: 100%|██████████████████████████████████| 8/8 [00:06<00:00,  1.17it/s, fail=0, success=8]
+Processing: 100%|██████████████████████████████████| 8/8 [00:06<00:00,  2.56it/s, fail=0, success=8]
+==================== 第 1 轮｜Evidence Retrieval ====================
+Processing: 100%|██████████████████████████████████████████████████████████████████████████| 6/6 [00:20<00:00,  3.39s/it]
+Processing: 100%|██████████████████████████████████████████████████████████████████████████| 6/6 [00:20<00:00,  2.57s/it]
+==================== 第 1 轮｜Policy Predictor ====================
+Processing: 100%|██████████████████████████████████| 8/8 [00:15<00:00,  1.88s/it, fail=0, success=8]
+Processing: 100%|██████████████████████████████████| 8/8 [00:15<00:00,  1.17s/it, fail=0, success=8]
+==================== 第 1 轮｜Response Generator ====================
+Processing: 100%|██████████████████████████████████| 8/8 [00:14<00:00,  1.76s/it, fail=0, success=8]
+Processing: 100%|██████████████████████████████████| 8/8 [00:14<00:00,  1.59s/it, fail=0, success=8]
+
+
+
+
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from openai import OpenAI
+from tqdm import tqdm
+
+## Qwen3-32B
+MODEL_NAME = "qwen3-32b"
+OPENAI_API_BASES = [
+    "http://localhost:8848/v1",
+    "http://localhost:8849/v1",
+    # "http://localhost:8850/v1",
+    # "http://localhost:8851/v1",
+]
+OPENAI_API_KEY = "EMPTY"
+
+MAX_WORKERS = 16
+MAX_RETRY = 3
+
+
+class ClientRouter:
+    """
+    多 endpoint 轮询路由器
+    - 线程安全
+    - 每次请求轮流分配到不同端口
+    """
+    def __init__(self, api_bases, api_key):
+        self.api_bases = api_bases
+        self.api_key = api_key
+        self._idx = 0
+        self._lock = threading.Lock()
+        self._clients = {
+            base: OpenAI(api_key=api_key, base_url=base)
+            for base in api_bases
+        }
+
+    def get_next_client(self):
+        with self._lock:
+            base = self.api_bases[self._idx]
+            self._idx = (self._idx + 1) % len(self.api_bases)
+        return self._clients[base], base
+
+
+client_router = ClientRouter(OPENAI_API_BASES, OPENAI_API_KEY)
+
+
+def call_qwen_api(messages):
+    client, base = client_router.get_next_client()
+
+    chat_response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=2048,
+        top_p=0.5,
+        presence_penalty=1.5,
+        extra_body={
+            "top_k": 1,
+            "chat_template_kwargs": {"enable_thinking": False}
+        },
+    )
+    return chat_response.choices[0].message.content
+
+
+def build_retry_messages(base_messages, bad_response, format_error):
+    retry_messages = list(base_messages)
+    retry_messages.append({"role": "assistant", "content": bad_response})
+    retry_messages.append({
+        "role": "user",
+        "content": (
+            "你刚才的输出不符合要求。"
+            f"错误原因：{format_error}。"
+            "请严格按原要求重新输出，且只输出合法结果，不要输出任何解释、前缀、后缀或 markdown 代码块。"
+        )
+    })
+    return retry_messages
+
+
+def process_one_sample(sample, validator=None, max_retry=MAX_RETRY):
+    # sample_id = sample.get("id")
+    # base_messages = sample.get("messages", [])
+
+    # current_messages = list(base_messages)
+    base_messages = sample
+    current_messages = sample
+    last_error = None
+    last_response = None
+    parsed_response = None
+
+    for attempt in range(1, max_retry + 1):
+        try:
+            response = call_qwen_api(current_messages)
+            last_response = response
+
+            if validator is None:
+                return {
+                    # "id": sample_id,
+                    "messages": base_messages,
+                    "response": response,
+                    "parsed_response": None,
+                    "success": True,
+                    "error": None,
+                    "retry_count": attempt - 1,
+                    "format_valid": True
+                }
+
+            is_valid, parsed_or_error = validator(response)
+
+            if is_valid:
+                parsed_response = parsed_or_error
+                return {
+                    # "id": sample_id,
+                    "messages": base_messages,
+                    "response": response,
+                    "parsed_response": parsed_response,
+                    "success": True,
+                    "error": None,
+                    "retry_count": attempt - 1,
+                    "format_valid": True
+                }
+
+            last_error = parsed_or_error
+            current_messages = build_retry_messages(
+                base_messages,
+                response,
+                parsed_or_error
+            )
+
+        except Exception as e:
+            last_error = str(e)
+
+        time.sleep(1)
+
+    return {
+        # "id": sample_id,
+        "messages": base_messages,
+        "response": last_response,
+        "parsed_response": None,
+        "success": False,
+        "error": last_error,
+        "retry_count": max_retry,
+        "format_valid": False
+    }
+
+
+def parallel_inference(samples, max_workers=MAX_WORKERS, max_retry=MAX_RETRY, validator=None):
+    results = [None] * len(samples)
+    start_time = time.time()
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(process_one_sample, sample, validator, max_retry): idx
+            for idx, sample in enumerate(samples)
+        }
+
+        success_count = 0
+        fail_count = 0
+
+        with tqdm(total=len(samples), desc="Processing", ncols=100) as pbar:
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = {
+                        # "id": samples[idx].get("id"),
+                        "messages": samples[idx],
+                        "response": None,
+                        "parsed_response": None,
+                        "success": False,
+                        "error": f"Worker crashed: {str(e)}",
+                        "retry_count": max_retry,
+                        "format_valid": False
+                    }
+
+                results[idx] = result
+                pbar.update(1)
+
+                if result["success"]:
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+                pbar.set_postfix(success=success_count, fail=fail_count)
+
+    elapsed = time.time() - start_time
+    # print(f"\n全部完成，总耗时: {elapsed:.2f} 秒")
+    # print(f"平均每条耗时: {elapsed / len(samples):.2f} 秒")
+
+    return results
