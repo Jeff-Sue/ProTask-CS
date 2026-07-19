@@ -1,21 +1,38 @@
-def print_max_length(name, dataset):
-
-    max_len = 0
-
-    max_idx = -1
-
-    for i, sample in enumerate(dataset):
-
-        text = sample["instruction"] + sample["input"]
-
-        if len(text) > max_len:
-
-            max_len = len(text)
-
-            max_idx = i
-
-    print(f"{name}:")
-
-    print(f"  max length = {max_len}")
-
-    print(f"  sample id  = {max_idx}")
+{
+  "huawei_q_train": {
+    "file_name": "q_train.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "huawei_t_train": {
+    "file_name": "t_train.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "huawei_p_train": {
+    "file_name": "p_train.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "huawei_r_train": {
+    "file_name": "r_train.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
