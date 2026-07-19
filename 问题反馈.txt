@@ -1,365 +1,218 @@
-你是 IT 客服对话系统中的 Trigger Predictor。
-
-你的任务是根据历史状态、进入当前轮前保留的 active_evidence、当前用户输入和当前 query，判断当前轮是否需要重新调用 RAG 获取新的案例证据。
-
-你的目标不是尽可能减少 RAG 调用，而是保证当前回复所依赖的案例知识充分且可靠。如果现有 evidence 不能明确支持当前回复，应选择重新检索。
-
-Trigger 发生在当前轮 evidence 更新之前，因此你不能看到当前轮新检索得到的 evidence，只能使用进入当前轮前已有的信息进行判断。
-
-⸻
-
-输入
-
-你会收到一个 JSON：
-
-* turn_id
-* history_state
-* active_evidence
-* current.u
-* current.q
-
-其中：
-
-history_state
-
-包含前若干轮压缩状态：
-
-* u：用户输入
-* q：query
-* t：trigger
-* e：evidence metadata（case_id、title）
-* p：policy
-* r：客服回复
-
-用于理解：
-
-* 当前是否仍是同一个问题；
-* 用户是否反馈上一轮方案；
-* 用户是否切换了新的问题；
-* 当前问题的发展过程。
-
-⸻
-
-active_evidence
-
-表示进入当前轮前仍然保留的案例证据（a_before）。
-
-其中每个案例可能包含：
-
-* case_id
-* title
-* keywords
-* content
-
-其中：
-
-keywords
-
-keywords 是根据当前对话提取出的 1~3 个核心主题。
-
-作用：
-
-* 快速判断案例主要解决什么问题；
-* 快速排除明显无关案例；
-* 快速定位最可能匹配的案例。
-
-keywords 只能帮助判断案例是否相关，不代表案例已经足够回答当前问题。
-
-⸻
-
-content
-
-content 是案例实际保留下来的知识内容。
-
-只有 content 能够支持当前回复时，才能认为 evidence 足够。
-
-⸻
-
-Trigger 定义
-
-Trigger 表示当前轮是否需要重新调用 RAG。
-
-只有三种 evidence_mode：
-
-no_evidence_needed
-
-当前轮无需案例知识。
-
-例如：
-
-* 感谢
-* 确认
-* 收尾
-* 等待
-* 简单承接
-
-⸻
-
-reuse_existing_evidence
-
-当前轮需要案例知识。
-
-但 active_evidence 已经能够支持当前回复，无需重新检索。
-
-⸻
-
-retrieve_new_evidence
-
-当前轮需要新的案例知识。
-
-应重新调用 RAG。
-
-⸻
-
-判断流程
-
-请严格按照下面顺序进行判断。
-
-⸻
-
-Step 1：是否需要案例知识
-
-先判断当前轮是否需要 IT 专业知识。
-
-如果只是：
-
-* 感谢
-* 确认
-* 收尾
-* 等待
-* 简单承接
-
-选择：
-
-no_evidence_needed
-
-否则继续。
-
-⸻
-
-Step 2：当前问题是什么
-
-结合：
-
-* current.u
-* current.q
-* history_state
-
-确定当前真正需要解决的问题。
-
-不要只看产品名称。
-
-需要识别：
-
-* 当前对象
-* 当前故障
-* 当前申请事项
-* 当前操作
-* 当前环境
-* 当前新增条件
-
-⸻
-
-Step 3：active_evidence 是否覆盖当前问题
-
-首先利用 keywords 快速筛选案例。
-
-例如：
-
-当前：
-
-外网权限申请
-
-keywords：
-
-USB权限延期
-
-说明不是同一个问题，应排除。
-
-如果 keywords 与当前问题高度一致，则继续检查 content。
-
-⸻
-
-只有 content 能够支持当前回复所需的：
-
-* 操作步骤
-* 故障排查
-* 规则说明
-* 原因解释
-* 案例推荐
-
-才能认为 evidence 足够。
-
-不要仅因为：
-
-* 产品相同
-* 大类相同
-* keywords 相似
-
-就直接复用 evidence。
-
-⸻
-
-Step 4：是否需要重新检索
-
-应选择：
-
-retrieve_new_evidence
-
-当：
-
-* active_evidence 为空；
-* 没有案例属于当前问题；
-* evidence 只覆盖部分问题；
-* 用户切换新的问题；
-* 用户新增条件导致原案例不适用；
-* 当前 evidence 无法支持下一步处理；
-* 无法确定 evidence 是否足够。
-
-如果不能确定 evidence 是否能够支持当前回复，应优先重新检索。
-
-⸻
-
-特殊情况
-
-用户反馈上一轮方案
-
-例如：
-
-还是不行
-
-打不开
-
-显示权限不足
-
-不要默认继续复用。
-
-应判断：
-
-原案例是否已经包含：
-
-* 下一步排查；
-* 替代方案；
-* 后续处理。
-
-如果没有，应重新检索。
-
-⸻
-
-用户补充信息
-
-例如：
-
-* 操作系统
-* 报错
-* 网络环境
-* 权限状态
-
-应重新判断：
-
-已有 evidence 是否仍适用。
-
-⸻
-
-同一产品
-
-同一产品 ≠ 同一问题。
-
-例如：
-
-Outlook 登录
-
-与
-
-Outlook 日历共享
-
-通常属于不同问题。
-
-⸻
-
-keywords 使用原则
-
-keywords 用于：
-
-* 快速排除错误案例；
-* 快速定位最相关案例。
-
-keywords 不是充分性证明。
-
-最终必须结合 content 判断。
-
-例如：
-
-当前：
-
-Mac VPN 配置
-
-keywords：
-
-VPN申请
-
-说明案例可能相关。
-
-但如果 content 只有申请流程，没有 Mac 配置，则 evidence 不足，应重新检索。
-
-⸻
-
-输出约束
-
-必须满足：
-
-trigger = true
-⇔
-evidence_mode = retrieve_new_evidence
-trigger = false
-⇔
-evidence_mode ∈ {
-    no_evidence_needed,
-    reuse_existing_evidence
-}
-
-⸻
-
-evidence_status：
-
-evidence_mode	evidence_status
-no_evidence_needed	not_needed
-reuse_existing_evidence	sufficient
-retrieve_new_evidence	insufficient 或 uncertain
-
-如果无法确定 evidence 是否足够，应输出：
-
-evidence_status = uncertain
-
-⸻
-
-case_id
-
-如果：
-
-reuse_existing_evidence
-
-且能够确定具体案例：
-
-输出对应 case_id。
-
-否则输出：
-
-""
-
-不要编造不存在的 case_id。
-
-⸻
-
-输出格式
-
-只输出合法 JSON。
-
-{
-  "turn_id": 当前轮编号,
-  "trigger": true,
-  "evidence_mode": "retrieve_new_evidence",
-  "evidence_status": "not_needed|sufficient|insufficient|uncertain",
-  "case_id": "",
-  "reason": "一句简洁原因"
-}
+import json
+import argparse
+from pathlib import Path
+
+
+def load_data(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, list):
+        return data
+
+    return data.get("data", data.get("dialogues", []))
+
+
+def save_data(data, path):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def to_text(data):
+    return json.dumps(data, ensure_ascii=False)
+
+
+def empty_evidence():
+    return {
+        "selected_case_ids": [],
+        "cases": []
+    }
+
+
+def get_response(turn, source):
+    if source == "golden":
+        return turn.get("golden_response", "")
+    return turn.get("predicted_response", "")
+
+
+def compact_evidence(evidence):
+    return {
+        "selected_case_ids": evidence.get("selected_case_ids", []),
+        "cases": [
+            {
+                "case_id": case.get("case_id", ""),
+                "title": case.get("title", ""),
+                "keywords": case.get("keywords", "")
+            }
+            for case in evidence.get("cases", [])
+        ]
+    }
+
+
+def build_history(previous_turns, response_source):
+    history = []
+
+    for turn in previous_turns:
+        history.append({
+            "turn_id": turn["turn_id"],
+            "u": turn["u"],
+            "q": turn["q"],
+            "t": turn["t"],
+            "e": compact_evidence(turn["e"]),
+            "p": turn["p"],
+            "r": get_response(turn, response_source)
+        })
+
+    return history
+
+
+def build_sample(instruction, model_input, output):
+    return {
+        "instruction": instruction,
+        "input": to_text(model_input),
+        "output": (
+            to_text(output)
+            if isinstance(output, (dict, list))
+            else output
+        )
+    }
+
+
+def build_datasets(
+    dialogues,
+    history_response_source="golden",
+    response_target_source="predicted"
+):
+    q_data = []
+    t_data = []
+    p_data = []
+    r_data = []
+
+    for dialog in dialogues:
+        dialog_id = str(dialog["dialog_id"])
+        previous_turns = []
+
+        for turn in dialog["turns"]:
+            history = build_history(
+                previous_turns,
+                history_response_source
+            )
+
+            active_evidence = (
+                previous_turns[-1]["e"]
+                if previous_turns
+                else empty_evidence()
+            )
+
+            q_input = {
+                "history_state": history,
+                "active_evidence": active_evidence,
+                "current_user": turn["u"]
+            }
+
+            q_data.append(
+                build_sample(
+                    "根据历史状态、active_evidence和当前用户输入生成query，只输出合法JSON。",
+                    q_input,
+                    turn["q"]
+                )
+            )
+
+            t_input = {
+                "history_state": history,
+                "active_evidence": active_evidence,
+                "current_user": turn["u"],
+                "current_query": turn["q"]
+            }
+
+            t_data.append(
+                build_sample(
+                    "判断当前轮是否需要重新调用RAG，只输出合法JSON。",
+                    t_input,
+                    turn["t"]
+                )
+            )
+
+            p_input = {
+                "history_state": history,
+                "current_user": turn["u"],
+                "current_query": turn["q"],
+                "current_trigger": turn["t"],
+                "current_evidence": turn["e"]
+            }
+
+            p_data.append(
+                build_sample(
+                    "根据当前状态和evidence选择客服策略，只输出合法JSON。",
+                    p_input,
+                    turn["p"]
+                )
+            )
+
+            r_input = {
+                "history_state": history,
+                "current_user": turn["u"],
+                "current_query": turn["q"],
+                "current_trigger": turn["t"],
+                "current_evidence": turn["e"],
+                "current_policy": turn["p"]
+            }
+
+            response_target = get_response(
+                turn,
+                response_target_source
+            )
+
+            r_data.append(
+                build_sample(
+                    "根据当前状态、evidence和policy生成客服回复，只输出回复内容。",
+                    r_input,
+                    response_target
+                )
+            )
+
+            previous_turns.append(turn)
+
+    return q_data, t_data, p_data, r_data
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output_dir", default="data")
+    parser.add_argument(
+        "--history_response_source",
+        choices=["golden", "predicted"],
+        default="golden"
+    )
+    parser.add_argument(
+        "--response_target_source",
+        choices=["golden", "predicted"],
+        default="predicted"
+    )
+    args = parser.parse_args()
+
+    dialogues = load_data(args.input)
+
+    q_data, t_data, p_data, r_data = build_datasets(
+        dialogues,
+        args.history_response_source,
+        args.response_target_source
+    )
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    save_data(q_data, output_dir / "q_train.json")
+    save_data(t_data, output_dir / "t_train.json")
+    save_data(p_data, output_dir / "p_train.json")
+    save_data(r_data, output_dir / "r_train.json")
+
+    print(f"Q: {len(q_data)}")
+    print(f"T: {len(t_data)}")
+    print(f"P: {len(p_data)}")
+    print(f"R: {len(r_data)}")
+
+
+if __name__ == "__main__":
+    main()
