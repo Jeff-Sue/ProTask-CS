@@ -35,6 +35,17 @@ def get_response(turn, source):
     return turn.get("predicted_response", "")
 
 
+def remove_reason(state):
+    if not isinstance(state, dict):
+        return state
+
+    return {
+        key: value
+        for key, value in state.items()
+        if key != "reason"
+    }
+
+
 def compact_evidence(evidence):
     return {
         "selected_case_ids": evidence.get("selected_case_ids", []),
@@ -56,10 +67,10 @@ def build_history(previous_turns, response_source):
         history.append({
             "turn_id": turn["turn_id"],
             "u": turn["u"],
-            "q": turn["q"],
-            "t": turn["t"],
+            "q": remove_reason(turn["q"]),
+            "t": remove_reason(turn["t"]),
             "e": compact_evidence(turn["e"]),
-            "p": turn["p"],
+            "p": remove_reason(turn["p"]),
             "r": get_response(turn, response_source)
         })
 
@@ -89,7 +100,6 @@ def build_datasets(
     r_data = []
 
     for dialog in dialogues:
-        dialog_id = str(dialog["dialog_id"])
         previous_turns = []
 
         for turn in dialog["turns"]:
@@ -104,6 +114,10 @@ def build_datasets(
                 else empty_evidence()
             )
 
+            current_q = remove_reason(turn["q"])
+            current_t = remove_reason(turn["t"])
+            current_p = remove_reason(turn["p"])
+
             q_input = {
                 "history_state": history,
                 "active_evidence": active_evidence,
@@ -114,7 +128,7 @@ def build_datasets(
                 build_sample(
                     "根据历史状态、active_evidence和当前用户输入生成query，只输出合法JSON。",
                     q_input,
-                    turn["q"]
+                    current_q
                 )
             )
 
@@ -122,22 +136,22 @@ def build_datasets(
                 "history_state": history,
                 "active_evidence": active_evidence,
                 "current_user": turn["u"],
-                "current_query": turn["q"]
+                "current_query": current_q
             }
 
             t_data.append(
                 build_sample(
                     "判断当前轮是否需要重新调用RAG，只输出合法JSON。",
                     t_input,
-                    turn["t"]
+                    current_t
                 )
             )
 
             p_input = {
                 "history_state": history,
                 "current_user": turn["u"],
-                "current_query": turn["q"],
-                "current_trigger": turn["t"],
+                "current_query": current_q,
+                "current_trigger": current_t,
                 "current_evidence": turn["e"]
             }
 
@@ -145,17 +159,17 @@ def build_datasets(
                 build_sample(
                     "根据当前状态和evidence选择客服策略，只输出合法JSON。",
                     p_input,
-                    turn["p"]
+                    current_p
                 )
             )
 
             r_input = {
                 "history_state": history,
                 "current_user": turn["u"],
-                "current_query": turn["q"],
-                "current_trigger": turn["t"],
+                "current_query": current_q,
+                "current_trigger": current_t,
                 "current_evidence": turn["e"],
-                "current_policy": turn["p"]
+                "current_policy": current_p
             }
 
             response_target = get_response(
