@@ -1,63 +1,43 @@
-#!/bin/bash
+### model
+model_name_or_path: /data/MODEL_ZOO/Qwen/Qwen3-8B
+trust_remote_code: true
 
-mkdir -p logs
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 16
+lora_target: q_proj,k_proj,v_proj,o_proj
 
-run_group_1() {
-    export CUDA_VISIBLE_DEVICES=0,1,2,3
-    export MASTER_ADDR=127.0.0.1
-    export MASTER_PORT=29501
+### dataset
+dataset: huawei_q_train
+template: qwen3_nothink
+cutoff_len: 4096
+max_samples: 100000
+preprocessing_num_workers: 8
+dataloader_num_workers: 0
 
-    echo "[$(date)] Start Q"
-    llamafactory-cli train train_q.yaml \
-        > logs/q.log 2>&1
+### output
+output_dir: saves/static_multi/query_generator
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
 
-    if [ $? -ne 0 ]; then
-        echo "[$(date)] Q failed"
-        return 1
-    fi
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+learning_rate: 5.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
 
-    echo "[$(date)] Start T"
-    llamafactory-cli train train_t.yaml \
-        > logs/t.log 2>&1
-}
+bf16: false
+fp16: true
 
-run_group_2() {
-    export CUDA_VISIBLE_DEVICES=4,5,6,7
-    export MASTER_ADDR=127.0.0.1
-    export MASTER_PORT=29502
-
-    echo "[$(date)] Start P"
-    llamafactory-cli train train_p.yaml \
-        > logs/p.log 2>&1
-
-    if [ $? -ne 0 ]; then
-        echo "[$(date)] P failed"
-        return 1
-    fi
-
-    echo "[$(date)] Start R"
-    llamafactory-cli train train_r.yaml \
-        > logs/r.log 2>&1
-}
-
-run_group_1 > logs/group1.log 2>&1 &
-pid1=$!
-
-run_group_2 > logs/group2.log 2>&1 &
-pid2=$!
-
-wait $pid1
-status1=$?
-
-wait $pid2
-status2=$?
-
-echo "Group 1 exit status: $status1"
-echo "Group 2 exit status: $status2"
-
-if [ $status1 -ne 0 ] || [ $status2 -ne 0 ]; then
-    echo "Some training jobs failed."
-    exit 1
-fi
-
-echo "All training jobs finished."
+ddp_find_unused_parameters: false
+ddp_timeout: 180000000
+resume_from_checkpoint: null
