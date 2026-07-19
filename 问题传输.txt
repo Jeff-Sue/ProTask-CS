@@ -1,1 +1,46 @@
-subprocess.CalledProcessError: Command '['torchrun', '--nnodes', '1', '--node_rank', '0', '--nproc_per_node', '4', '--master_addr', '127.0.0.1', '--master_port', '49841', '/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/llamafactory/launcher.py', 'train_q.yaml']' returned non-zero exit status 1.
+### model
+model_name_or_path: /data/MODEL_ZOO/Qwen/Qwen3-8B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 16
+lora_target: q_proj,v_proj,k_proj,o_proj
+
+### dataset
+dataset: huawei_q_train
+template: qwen3_nothink
+cutoff_len: 16384
+max_samples: 100000
+preprocessing_num_workers: 16
+dataloader_num_workers: 0
+
+### output
+output_dir: saves/static_multi/query_generator
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: false
+fp16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+# eval_dataset: alpaca_en_demo
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# eval_strategy: steps
+# eval_steps: 500
