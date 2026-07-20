@@ -1,47 +1,16 @@
-#!/usr/bin/env bash
+MAX_CASE_LEN = 800
 
-set -euo pipefail
+def truncate_evidence(active_evidence):
 
-MODEL_ROOT="/data/MODEL_ZOO/Qwen3-8B-Merged"
+    evidence = []
 
-LOG_DIR="./vllm_logs"
-PID_DIR="./vllm_pids"
+    for case in active_evidence:
 
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+        case = case.copy()          # 不修改原数据
 
-export TOKENIZERS_PARALLELISM=false
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
+        if "content" in case:
+            case["content"] = case["content"][:MAX_CASE_LEN]
 
+        evidence.append(case)
 
-start_service() {
-    local gpu_id="$1"
-    local port="$2"
-    local model_name="$3"
-    local model_path="${MODEL_ROOT}/${model_name}"
-
-    echo "[Start] ${model_name}, GPU=${gpu_id}, PORT=${port}"
-
-    CUDA_VISIBLE_DEVICES="${gpu_id}" nohup \
-    vllm serve "${model_path}" \
-        --host 0.0.0.0 \
-        --port "${port}" \
-        --served-model-name "${model_name}" \
-        --dtype float16 \
-        --trust-remote-code \
-        --tensor-parallel-size 1 \
-        --max-model-len 4096 \
-        --max-num-seqs 8 \
-        --gpu-memory-utilization 0.90 \
-        --enforce-eager \
-        > "${LOG_DIR}/${model_name}.log" 2>&1 &
-
-    echo $! > "${PID_DIR}/${model_name}.pid"
-}
-
-
-start_service 0 8001 query_generator
-start_service 1 8002 rag_trigger
-start_service 2 8003 policy_predictor
-start_service 3 8004 response_generator
-
-echo "[Done] 四个服务已启动"
+    return evidence
