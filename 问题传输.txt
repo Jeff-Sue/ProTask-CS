@@ -1,1 +1,1 @@
-vllm: error: unrecognized arguments: --default-chat-template-kwargs {"enable_thinking": false}
+AttributeError: Qwen2Tokenizer has no attribute all_special_tokens_extended. Did you mean: 'num_special_tokens_to_add'?
