@@ -1,8 +1,88 @@
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-nohup python inference.py \
-    --input test.json \
-    --output predictions_0.json \
-    --shard 0 \
-    --gpus 0,1,2,3 \
-    --history_response_source golden \
-    > inference_0.log 2>&1 &
+from concurrent.futures import ThreadPoolExecutor
+
+def load_runner(
+    name: str,
+    base_model: str,
+    lora_path: str,
+    gpu_id: int,
+    batch_size: int = 8,
+):
+    print(
+        f"[Model Loading] [{name}] 开始加载到 cuda:{gpu_id}",
+        flush=True,
+    )
+
+    start_time = time.time()
+
+    runner = ModelRunner(
+        base_model=base_model,
+        lora_path=lora_path,
+        gpu_id=gpu_id,
+        batch_size=batch_size,
+    )
+
+    print(
+        f"[Model Loading] [{name}] 加载完成，"
+        f"设备 cuda:{gpu_id}，"
+        f"耗时 {time.time() - start_time:.2f}s",
+        flush=True,
+    )
+
+    return runner
+
+
+print(
+    f"[Model Loading] 开始并行加载四个模型，GPU={gpu_ids}",
+    flush=True,
+)
+
+load_start_time = time.time()
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+
+    q_future = executor.submit(
+        load_runner,
+        "QUERY",
+        BASE_MODEL,
+        Q_LORA,
+        gpu_ids[0],
+        8,
+    )
+
+    t_future = executor.submit(
+        load_runner,
+        "TRIGGER",
+        BASE_MODEL,
+        T_LORA,
+        gpu_ids[1],
+        8,
+    )
+
+    p_future = executor.submit(
+        load_runner,
+        "POLICY",
+        BASE_MODEL,
+        P_LORA,
+        gpu_ids[2],
+        8,
+    )
+
+    r_future = executor.submit(
+        load_runner,
+        "RESPONSE",
+        BASE_MODEL,
+        R_LORA,
+        gpu_ids[3],
+        8,
+    )
+
+    q_model = q_future.result()
+    t_model = t_future.result()
+    p_model = p_future.result()
+    r_model = r_future.result()
+
+print(
+    f"[Model Loading] 四个模型全部加载完成，"
+    f"总耗时 {time.time() - load_start_time:.2f}s",
+    flush=True,
+)
