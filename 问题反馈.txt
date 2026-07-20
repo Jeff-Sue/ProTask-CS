@@ -7,10 +7,14 @@ class ModelRunner:
         gpu_id: int,
         batch_size: int = 8,
     ):
-        self.device = f"cuda:{gpu_id}"
+        self.gpu_id = gpu_id
+        self.device = torch.device(f"cuda:{gpu_id}")
         self.batch_size = batch_size
 
-        torch.cuda.set_device(gpu_id)
+        print(
+            f"[Model Loading] 开始加载 {lora_path} -> {self.device}",
+            flush=True,
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             base_model,
@@ -23,41 +27,50 @@ class ModelRunner:
                 self.tokenizer.eos_token_id
             )
 
+        # 基座直接加载到指定 GPU
         base = AutoModelForCausalLM.from_pretrained(
             base_model,
             trust_remote_code=True,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
-            device_map={
-                "": self.device,
-            },
+            device_map={"": gpu_id},
         )
 
+        # 检查基础模型是否已经完全实体化
+        base_meta_params = [
+            name
+            for name, parameter in base.named_parameters()
+            if parameter.is_meta
+        ]
+
+        if base_meta_params:
+            raise RuntimeError(
+                f"基础模型加载后仍有 meta 参数："
+                f"{base_meta_params[:20]}"
+            )
+
+        # 基础模型已经在目标 GPU，不需要再次给 PEFT 分配 device_map
         self.model = PeftModel.from_pretrained(
             base,
             lora_path,
+            is_trainable=False,
         )
 
         self.model.eval()
 
+        model_meta_params = [
+            name
+            for name, parameter in self.model.named_parameters()
+            if parameter.is_meta
+        ]
 
+        if model_meta_params:
+            raise RuntimeError(
+                f"LoRA 加载后仍有 meta 参数："
+                f"{model_meta_params[:20]}"
+            )
 
-with ThreadPoolExecutor(max_workers=4) as executor:
-    futures = [
-        executor.submit(
-            ModelRunner,
-            BASE_MODEL,
-            lora_path,
-            gpu_id,
-            8,
+        print(
+            f"[Model Loading] 加载完成 {lora_path} -> {self.device}",
+            flush=True,
         )
-        for lora_path, gpu_id in zip(
-            [Q_LORA, T_LORA, P_LORA, R_LORA],
-            gpu_ids,
-        )
-    ]
-
-    q_model, t_model, p_model, r_model = [
-        future.result()
-        for future in futures
-    ]
