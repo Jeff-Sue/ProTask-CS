@@ -1,104 +1,768 @@
-#!/usr/bin/env bash
+from __future__ import annotations
 
-set -euo pipefail
-
-echo "[Patch] 检查 vLLM tokenizer 兼容性..."
-
-python - <<'PY'
+import argparse
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import vllm.transformers_utils.tokenizer as tokenizer_module
+from typing import Any
 
-path = Path(tokenizer_module.__file__)
-text = path.read_text(encoding="utf-8")
+import requests
+from json_repair import repair_json
 
-old = """    tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended)"""
+from utils.rag import batch_zefeng_rag
 
-new = """    tokenizer_all_special_tokens_extended = getattr(
-        tokenizer,
-        "all_special_tokens_extended",
-        tokenizer_all_special_tokens,
-    )"""
 
-if old in text:
-    backup_path = Path(str(path) + ".bak")
+# ============================================================
+# vLLM services
+# ============================================================
 
-    if not backup_path.exists():
-        backup_path.write_text(text, encoding="utf-8")
+QUERY_URL = "http://127.0.0.1:8001/v1/chat/completions"
+TRIGGER_URL = "http://127.0.0.1:8002/v1/chat/completions"
+POLICY_URL = "http://127.0.0.1:8003/v1/chat/completions"
+RESPONSE_URL = "http://127.0.0.1:8004/v1/chat/completions"
 
-    path.write_text(
-        text.replace(old, new, 1),
-        encoding="utf-8",
+QUERY_MODEL = "query_generator"
+TRIGGER_MODEL = "rag_trigger"
+POLICY_MODEL = "policy_predictor"
+RESPONSE_MODEL = "response_generator"
+
+
+# ============================================================
+# Prompts
+# ============================================================
+
+QUERY_PROMPT = """
+根据历史状态、active_evidence和当前用户输入生成检索query。
+严格遵循训练时的输出格式，只输出合法JSON。
+/no_think
+""".strip()
+
+TRIGGER_PROMPT = """
+根据历史状态、active_evidence、当前用户输入和当前query，
+判断当前轮是否需要重新调用RAG。
+严格遵循训练时的输出格式，只输出合法JSON。
+/no_think
+""".strip()
+
+POLICY_PROMPT = """
+根据历史状态、active_evidence、当前用户输入、query和trigger，
+预测当前客服策略。
+严格遵循训练时的输出格式，只输出合法JSON。
+/no_think
+""".strip()
+
+RESPONSE_PROMPT = """
+根据历史状态、active_evidence、当前用户输入、query、trigger和policy，
+生成当前客服回复。
+只输出最终客服回复，不要输出解释或思考过程。
+/no_think
+""".strip()
+
+
+# ============================================================
+# vLLM client
+# ============================================================
+
+class VLLMRunner:
+
+    def __init__(
+        self,
+        url: str,
+        model: str,
+        max_workers: int,
+        timeout: int = 600,
+    ):
+        self.url = url
+        self.model = model
+        self.max_workers = max_workers
+        self.timeout = timeout
+
+    def generate_one(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> str:
+
+        response = requests.post(
+            self.url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer EMPTY",
+            },
+            json={
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "stream": False,
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                },
+            },
+            timeout=self.timeout,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"{self.model} request failed: "
+                f"{response.status_code}\n{response.text}"
+            )
+
+        data = response.json()
+
+        return data["choices"][0]["message"]["content"].strip()
+
+    def generate(
+        self,
+        messages_batch: list[list[dict[str, str]]],
+        max_tokens: int,
+    ) -> list[str]:
+
+        if not messages_batch:
+            return []
+
+        results = [None] * len(messages_batch)
+
+        with ThreadPoolExecutor(
+            max_workers=min(self.max_workers, len(messages_batch))
+        ) as executor:
+
+            future_to_index = {
+                executor.submit(
+                    self.generate_one,
+                    messages,
+                    max_tokens,
+                ): index
+                for index, messages in enumerate(messages_batch)
+            }
+
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                results[index] = future.result()
+
+        return results
+
+
+# ============================================================
+# Data processing
+# ============================================================
+
+def reformat_dialogues(
+    raw_dialogues: dict[str, Any],
+) -> list[dict[str, Any]]:
+
+    dialogues = []
+
+    for dialog_id, dialog_data in raw_dialogues.items():
+
+        messages = dialog_data["text"]
+        all_case_ids = dialog_data.get("caseId", [])
+
+        turns = []
+
+        for index, message in enumerate(messages):
+
+            if "用户" not in message:
+                continue
+
+            if index + 1 >= len(messages):
+                continue
+
+            next_message = messages[index + 1]
+
+            if "客服" not in next_message:
+                continue
+
+            user_text = message["用户"]
+            golden_response = next_message["客服"]
+
+            case_ids = [
+                case_id
+                for case_id in all_case_ids
+                if case_id in golden_response
+            ]
+
+            turns.append(
+                {
+                    "turn_id": len(turns),
+                    "current_user": user_text,
+                    "golden_response": golden_response,
+                    "case_ids": case_ids,
+                }
+            )
+
+        dialogues.append(
+            {
+                "dialog_id": dialog_id,
+                "turns": turns,
+            }
+        )
+
+    return dialogues
+
+
+def make_messages(
+    prompt: str,
+    payload: dict[str, Any],
+) -> list[dict[str, str]]:
+
+    return [
+        {
+            "role": "system",
+            "content": prompt,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+
+def parse_json(text: str) -> dict[str, Any]:
+
+    try:
+        parsed = json.loads(repair_json(text))
+
+        if isinstance(parsed, dict):
+            return parsed
+
+        return {
+            "raw_output": text,
+            "parse_error": True,
+        }
+
+    except Exception:
+        return {
+            "raw_output": text,
+            "parse_error": True,
+        }
+
+
+# ============================================================
+# Evidence
+# ============================================================
+
+def compact_evidence(
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+
+    compacted = []
+
+    for case in evidence:
+
+        compacted.append(
+            {
+                "case_id": (
+                    case.get("case_id")
+                    or case.get("caseId")
+                    or case.get("id")
+                    or ""
+                ),
+                "title": (
+                    case.get("title")
+                    or case.get("case_title")
+                    or case.get("name")
+                    or ""
+                ),
+                "keywords": case.get("keywords", []),
+            }
+        )
+
+    return compacted
+
+
+def should_retrieve(
+    trigger: dict[str, Any],
+    query: dict[str, Any],
+) -> bool:
+
+    retrieve = (
+        trigger.get("trigger") is True
+        or trigger.get("evidence_mode")
+        == "retrieve_new_evidence"
     )
 
-    print(f"[Patch] 已修复：{path}")
+    query_text = str(
+        query.get("query_text", "")
+    ).strip()
 
-elif '"all_special_tokens_extended",' in text and "getattr(" in text:
-    print(f"[Patch] 已经修复，无需重复修改：{path}")
-
-else:
-    print(f"[Patch] 未找到原始代码，请检查：{path}")
-    raise SystemExit(1)
-PY
-
-BASE_MODEL="/data/MODEL_ZOO/Qwen/Qwen3-8B"
-
-Q_LORA="/home/ma-user/work/jiahui/静态多轮微调/LlamaFactory/saves/static_multi/query_generator"
-T_LORA="/home/ma-user/work/jiahui/静态多轮微调/LlamaFactory/saves/static_multi/rag_trigger"
-P_LORA="/home/ma-user/work/jiahui/静态多轮微调/LlamaFactory/saves/static_multi/policy_predictor"
-R_LORA="/home/ma-user/work/jiahui/静态多轮微调/LlamaFactory/saves/static_multi/response_generator"
-
-LOG_DIR="./vllm_logs"
-PID_DIR="./vllm_pids"
-
-mkdir -p "${LOG_DIR}"
-mkdir -p "${PID_DIR}"
-
-# 避免多个服务共享同一个临时编译目录
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export TOKENIZERS_PARALLELISM=false
+    return retrieve and bool(query_text)
 
 
-start_service() {
-    local gpu_id=$1
-    local port=$2
-    local model_name=$3
-    local lora_path=$4
-    local log_path="${LOG_DIR}/${model_name}.log"
-    local pid_path="${PID_DIR}/${model_name}.pid"
+def format_rag_history(
+    history_state: list[dict[str, Any]],
+    current_user: str,
+) -> str:
 
-    echo "启动 ${model_name}: GPU=${gpu_id}, PORT=${port}"
+    messages = []
 
-    CUDA_VISIBLE_DEVICES="${gpu_id}" nohup \
-    vllm serve "${BASE_MODEL}" \
-        --host 0.0.0.0 \
-        --port "${port}" \
-        --served-model-name "${model_name}" \
-        --dtype float16 \
-        --trust-remote-code \
-        --tensor-parallel-size 1 \
-        --max-model-len 8192 \
-        --gpu-memory-utilization 0.90 \
-        --max-num-seqs 16 \
-        --enable-lora \
-        --max-loras 1 \
-        --max-lora-rank 64 \
-        --lora-modules "${model_name}=${lora_path}" \
-        --default-chat-template-kwargs '{"enable_thinking": false}' \
-        > "${log_path}" 2>&1 &
+    for turn in history_state:
+        messages.append(f"用户：{turn['u']}")
+        messages.append(f"客服：{turn['r']}")
 
-    echo $! > "${pid_path}"
+    messages.append(f"用户：{current_user}")
 
-    echo "${model_name} PID=$(cat "${pid_path}")"
-}
+    return "\n".join(messages)
 
 
-start_service 0 8001 "query_generator"    "${Q_LORA}"
-start_service 1 8002 "rag_trigger"        "${T_LORA}"
-start_service 2 8003 "policy_predictor"   "${P_LORA}"
-start_service 3 8004 "response_generator" "${R_LORA}"
+# ============================================================
+# Logging
+# ============================================================
 
-echo
-echo "四个服务已启动。"
-echo "日志目录：${LOG_DIR}"
-echo "PID 目录：${PID_DIR}"
+def log(
+    wave: int,
+    module: str,
+    active_num: int,
+    start_time: float,
+) -> None:
+
+    elapsed = time.time() - start_time
+
+    print(
+        f"[Wave {wave}] "
+        f"[{module}] "
+        f"Active={active_num} "
+        f"Time={elapsed:.2f}s",
+        flush=True,
+    )
+
+
+# ============================================================
+# Pipeline
+# ============================================================
+
+def run_pipeline(
+    dialogues: list[dict[str, Any]],
+    history_response_source: str,
+) -> list[dict[str, Any]]:
+
+    query_model = VLLMRunner(
+        url=QUERY_URL,
+        model=QUERY_MODEL,
+        max_workers=16,
+    )
+
+    trigger_model = VLLMRunner(
+        url=TRIGGER_URL,
+        model=TRIGGER_MODEL,
+        max_workers=16,
+    )
+
+    policy_model = VLLMRunner(
+        url=POLICY_URL,
+        model=POLICY_MODEL,
+        max_workers=16,
+    )
+
+    response_model = VLLMRunner(
+        url=RESPONSE_URL,
+        model=RESPONSE_MODEL,
+        max_workers=8,
+        timeout=900,
+    )
+
+    states = [
+        {
+            "dialogue": dialogue,
+            "current_index": 0,
+            "history_state": [],
+            "active_evidence": [],
+            "outputs": [],
+        }
+        for dialogue in dialogues
+    ]
+
+    wave = 0
+
+    while True:
+
+        active_states = [
+            state
+            for state in states
+            if state["current_index"]
+            < len(state["dialogue"]["turns"])
+        ]
+
+        if not active_states:
+            break
+
+        wave += 1
+        active_num = len(active_states)
+
+        current_turns = [
+            state["dialogue"]["turns"][state["current_index"]]
+            for state in active_states
+        ]
+
+        print(
+            f"\n[Wave {wave}] Start, active dialogues={active_num}",
+            flush=True,
+        )
+
+        # ====================================================
+        # Query
+        # ====================================================
+
+        start_time = time.time()
+
+        query_messages = [
+            make_messages(
+                QUERY_PROMPT,
+                {
+                    "history_state": state["history_state"],
+                    "active_evidence": state["active_evidence"],
+                    "current_user": turn["current_user"],
+                },
+            )
+            for state, turn in zip(
+                active_states,
+                current_turns,
+            )
+        ]
+
+        query_outputs = query_model.generate(
+            query_messages,
+            max_tokens=128,
+        )
+
+        query_states = [
+            parse_json(output)
+            for output in query_outputs
+        ]
+
+        log(wave, "QUERY", active_num, start_time)
+
+        # ====================================================
+        # Trigger
+        # ====================================================
+
+        start_time = time.time()
+
+        trigger_messages = [
+            make_messages(
+                TRIGGER_PROMPT,
+                {
+                    "history_state": state["history_state"],
+                    "active_evidence": state["active_evidence"],
+                    "current_user": turn["current_user"],
+                    "current_query": query,
+                },
+            )
+            for state, turn, query in zip(
+                active_states,
+                current_turns,
+                query_states,
+            )
+        ]
+
+        trigger_outputs = trigger_model.generate(
+            trigger_messages,
+            max_tokens=128,
+        )
+
+        trigger_states = [
+            parse_json(output)
+            for output in trigger_outputs
+        ]
+
+        log(wave, "TRIGGER", active_num, start_time)
+
+        # ====================================================
+        # RAG
+        # ====================================================
+
+        start_time = time.time()
+
+        rag_indices = [
+            index
+            for index, (trigger, query) in enumerate(
+                zip(trigger_states, query_states)
+            )
+            if should_retrieve(trigger, query)
+        ]
+
+        if rag_indices:
+
+            rag_histories = [
+                format_rag_history(
+                    active_states[index]["history_state"],
+                    current_turns[index]["current_user"],
+                )
+                for index in rag_indices
+            ]
+
+            rag_queries = [
+                query_states[index]["query_text"]
+                for index in rag_indices
+            ]
+
+            rag_results = batch_zefeng_rag(
+                rag_histories,
+                rag_queries,
+            )
+
+            if len(rag_results) != len(rag_indices):
+                raise RuntimeError(
+                    "RAG result number does not match request number"
+                )
+
+            for index, evidence in zip(
+                rag_indices,
+                rag_results,
+            ):
+                active_states[index]["active_evidence"] = (
+                    evidence if evidence else []
+                )
+
+        print(
+            f"[Wave {wave}] "
+            f"[RAG] "
+            f"Retrieve={len(rag_indices)}/{active_num} "
+            f"Time={time.time() - start_time:.2f}s",
+            flush=True,
+        )
+
+        # ====================================================
+        # Policy
+        # ====================================================
+
+        start_time = time.time()
+
+        policy_messages = [
+            make_messages(
+                POLICY_PROMPT,
+                {
+                    "history_state": state["history_state"],
+                    "active_evidence": state["active_evidence"],
+                    "current_user": turn["current_user"],
+                    "current_query": query,
+                    "current_trigger": trigger,
+                },
+            )
+            for state, turn, query, trigger in zip(
+                active_states,
+                current_turns,
+                query_states,
+                trigger_states,
+            )
+        ]
+
+        policy_outputs = policy_model.generate(
+            policy_messages,
+            max_tokens=128,
+        )
+
+        policy_states = [
+            parse_json(output)
+            for output in policy_outputs
+        ]
+
+        log(wave, "POLICY", active_num, start_time)
+
+        # ====================================================
+        # Response
+        # ====================================================
+
+        start_time = time.time()
+
+        response_messages = [
+            make_messages(
+                RESPONSE_PROMPT,
+                {
+                    "history_state": state["history_state"],
+                    "active_evidence": state["active_evidence"],
+                    "current_user": turn["current_user"],
+                    "current_query": query,
+                    "current_trigger": trigger,
+                    "current_policy": policy,
+                },
+            )
+            for state, turn, query, trigger, policy in zip(
+                active_states,
+                current_turns,
+                query_states,
+                trigger_states,
+                policy_states,
+            )
+        ]
+
+        predicted_responses = response_model.generate(
+            response_messages,
+            max_tokens=512,
+        )
+
+        log(wave, "RESPONSE", active_num, start_time)
+
+        # ====================================================
+        # Update states
+        # ====================================================
+
+        for (
+            state,
+            turn,
+            query,
+            trigger,
+            policy,
+            predicted_response,
+        ) in zip(
+            active_states,
+            current_turns,
+            query_states,
+            trigger_states,
+            policy_states,
+            predicted_responses,
+        ):
+
+            state["outputs"].append(
+                {
+                    **turn,
+                    "predicted_q": query,
+                    "predicted_t": trigger,
+                    "predicted_evidence": state[
+                        "active_evidence"
+                    ],
+                    "predicted_p": policy,
+                    "predicted_response": predicted_response,
+                }
+            )
+
+            if history_response_source == "golden":
+                history_response = turn["golden_response"]
+            else:
+                history_response = predicted_response
+
+            state["history_state"].append(
+                {
+                    "turn_id": turn["turn_id"],
+                    "u": turn["current_user"],
+                    "q": query,
+                    "t": trigger,
+                    "e": compact_evidence(
+                        state["active_evidence"]
+                    ),
+                    "p": policy,
+                    "r": history_response,
+                }
+            )
+
+            state["current_index"] += 1
+
+        completed_num = sum(
+            state["current_index"]
+            >= len(state["dialogue"]["turns"])
+            for state in states
+        )
+
+        print(
+            f"[Wave {wave}] Finish, "
+            f"completed={completed_num}/{len(states)}",
+            flush=True,
+        )
+
+    return [
+        {
+            "dialog_id": state["dialogue"]["dialog_id"],
+            "turns": state["outputs"],
+        }
+        for state in states
+    ]
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input_path",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--output_path",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--history_response_source",
+        choices=["golden", "predicted"],
+        default="golden",
+    )
+
+    parser.add_argument(
+        "--start_index",
+        type=int,
+        default=0,
+    )
+
+    parser.add_argument(
+        "--sample_num",
+        type=int,
+        default=None,
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input_path)
+    output_path = Path(args.output_path)
+
+    with input_path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        raw_dialogues = json.load(file)
+
+    dialogues = reformat_dialogues(raw_dialogues)
+
+    start = args.start_index
+
+    if args.sample_num is None:
+        dialogues = dialogues[start:]
+    else:
+        dialogues = dialogues[
+            start:start + args.sample_num
+        ]
+
+    print(
+        f"Loaded {len(dialogues)} dialogues",
+        flush=True,
+    )
+
+    results = run_pipeline(
+        dialogues=dialogues,
+        history_response_source=(
+            args.history_response_source
+        ),
+    )
+
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with output_path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            results,
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    print(
+        f"Saved results to {output_path}",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
