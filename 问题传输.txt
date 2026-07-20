@@ -1,1 +1,154 @@
-AttributeError: Qwen2Tokenizer has no attribute all_special_tokens_extended. Did you mean: 'num_special_tokens_to_add'?
+Process SpawnProcess-1:
+Traceback (most recent call last):
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 458, in run_mp_engine
+    raise e from None
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 444, in run_mp_engine
+    engine = MQLLMEngine.from_vllm_config(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 133, in from_vllm_config
+    return cls(
+           ^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 87, in __init__
+    self.engine = LLMEngine(*args, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/llm_engine.py", line 266, in __init__
+    self._initialize_kv_caches()
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/llm_engine.py", line 409, in _initialize_kv_caches
+    self.model_executor.determine_num_available_blocks())
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/executor/executor_base.py", line 104, in determine_num_available_blocks
+    results = self.collective_rpc("determine_num_available_blocks")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/executor/uniproc_executor.py", line 58, in collective_rpc
+    answer = run_method(self.driver_worker, method, args, kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/utils/__init__.py", line 2985, in run_method
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/worker.py", line 257, in determine_num_available_blocks
+    self.model_runner.profile_run()
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1206, in profile_run
+    self._dummy_run(max_num_batched_tokens, max_num_seqs)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1332, in _dummy_run
+    self.execute_model(model_input, kv_caches, intermediate_tensors)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1703, in execute_model
+    hidden_or_intermediate_states = model_executable(
+                                    ^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 301, in forward
+    hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/compilation/decorators.py", line 206, in __call__
+    return self.forward(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen2.py", line 354, in forward
+    hidden_states, residual = layer(
+                              ^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 214, in forward
+    hidden_states = self.self_attn(
+                    ^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 133, in forward
+    qkv, _ = self.qkv_proj(hidden_states)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/layers.py", line 581, in forward
+    output_parallel = self.apply(input_, bias)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/layers.py", line 422, in apply
+    torch.Tensor] = self.punica_wrapper.add_lora_linear(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/punica_wrapper/punica_gpu.py", line 222, in add_lora_linear
+    self.add_shrink(
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/punica_wrapper/punica_gpu.py", line 84, in add_shrink
+    lora_shrink(
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/_ops.py", line 1158, in __call__
+    return self._op(*args, **(kwargs or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/ops/triton_ops/lora_shrink_op.py", line 185, in _lora_shrink
+    _lora_shrink_kernel[grid](
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/runtime/jit.py", line 347, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/runtime/jit.py", line 569, in run
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/compiler/compiler.py", line 284, in compile
+    next_module = compile_ir(module, metadata)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/backends/nvidia/compiler.py", line 450, in <lambda>
+    stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options, capability)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/backends/nvidia/compiler.py", line 341, in make_llir
+    pm.run(mod)
+RuntimeError: PassManager::run failed
+Traceback (most recent call last):
+  File "/home/ma-user/miniconda3/envs/vllm/bin/vllm", line 7, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/main.py", line 54, in main
+    args.dispatch_function(args)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/serve.py", line 52, in cmd
+    uvloop.run(run_server(args))
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 92, in run
+    return runner.run(wrapper())
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 48, in wrapper
+    return await main
+           ^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1791, in run_server
+    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1811, in run_server_worker
+    async with build_async_engine_client(args, client_config) as engine_client:
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 158, in build_async_engine_client
+    async with build_async_engine_client_from_engine_args(
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 291, in build_async_engine_client_from_engine_args
+    raise RuntimeError(
+RuntimeError: Engine process failed to start. See stack trace for the root cause.
