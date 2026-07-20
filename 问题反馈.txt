@@ -1,63 +1,47 @@
-from pathlib import Path
+#!/usr/bin/env bash
 
-import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+set -euo pipefail
+
+MODEL_ROOT="/data/MODEL_ZOO/Qwen3-8B-Merged"
+
+LOG_DIR="./vllm_logs"
+PID_DIR="./vllm_pids"
+
+mkdir -p "${LOG_DIR}" "${PID_DIR}"
+
+export TOKENIZERS_PARALLELISM=false
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 
-BASE_MODEL = "/data/MODEL_ZOO/Qwen/Qwen3-8B"
+start_service() {
+    local gpu_id="$1"
+    local port="$2"
+    local model_name="$3"
+    local model_path="${MODEL_ROOT}/${model_name}"
 
-LORAS = {
-    "query_generator": "/path/to/query_generator",
-    "rag_trigger": "/path/to/rag_trigger",
-    "policy_predictor": "/path/to/policy_predictor",
-    "response_generator": "/path/to/response_generator",
+    echo "[Start] ${model_name}, GPU=${gpu_id}, PORT=${port}"
+
+    CUDA_VISIBLE_DEVICES="${gpu_id}" nohup \
+    vllm serve "${model_path}" \
+        --host 0.0.0.0 \
+        --port "${port}" \
+        --served-model-name "${model_name}" \
+        --dtype float16 \
+        --trust-remote-code \
+        --tensor-parallel-size 1 \
+        --max-model-len 4096 \
+        --max-num-seqs 8 \
+        --gpu-memory-utilization 0.90 \
+        --enforce-eager \
+        > "${LOG_DIR}/${model_name}.log" 2>&1 &
+
+    echo $! > "${PID_DIR}/${model_name}.pid"
 }
 
-OUTPUT_ROOT = Path("/data/MODEL_ZOO/Qwen3-8B-Merged")
 
+start_service 0 8001 query_generator
+start_service 1 8002 rag_trigger
+start_service 2 8003 policy_predictor
+start_service 3 8004 response_generator
 
-def merge_lora(name: str, lora_path: str) -> None:
-    output_path = OUTPUT_ROOT / name
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    print(f"[Merge] {name}")
-
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        torch_dtype=torch.float16,
-        device_map="cpu",
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    )
-
-    model = PeftModel.from_pretrained(
-        base_model,
-        lora_path,
-        device_map="cpu",
-    )
-
-    model = model.merge_and_unload()
-
-    model.save_pretrained(
-        output_path,
-        safe_serialization=True,
-        max_shard_size="5GB",
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        BASE_MODEL,
-        trust_remote_code=True,
-    )
-
-    tokenizer.save_pretrained(output_path)
-
-    del model
-    del base_model
-
-    print(f"[Done] {output_path}")
-
-
-if __name__ == "__main__":
-    for model_name, adapter_path in LORAS.items():
-        merge_lora(model_name, adapter_path)
+echo "[Done] 四个服务已启动"
