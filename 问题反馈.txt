@@ -1,7 +1,27 @@
+import json
 import copy
 
 
+# =========================
+# Utils
+# =========================
+
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+
+    try:
+        return json.loads(text)
+    except:
+        return {}
+
+
+# =========================
+# Memory
+# =========================
+
 def init_memory():
+
     return {
         "issue_state": {
             "current_issue": "",
@@ -21,63 +41,165 @@ def init_memory():
     }
 
 
-def update_issue_memory(memory, query):
+# =========================
+# Memory Update
+# =========================
 
-    memory["issue_state"]["current_issue"] = query
+def update_issue_memory(memory, query_state):
 
-    memory["issue_state"]["query_history"].append(query)
+    mode = query_state.get(
+        "query_mode",
+        "none"
+    )
+
+    query = query_state.get(
+        "query_text",
+        ""
+    )
+
+
+    # 新问题
+    if mode == "rewrite":
+
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+
+    # 同一问题补充信息
+    elif mode == "refine":
+
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+
+    # 沿用，不修改
+    elif mode == "reuse":
+
+        pass
+
+
+    # 无问题，不修改
+    elif mode == "none":
+
+        pass
+
 
     return memory
 
 
 
-def update_evidence_memory(memory, evidence):
+def update_evidence_memory(
+        memory,
+        trigger_state,
+        evidence):
 
-    memory["evidence_state"]["active_cases"] = evidence
+
+    mode = trigger_state.get(
+        "evidence_mode",
+        "no_evidence_needed"
+    )
+
+
+    # 新检索结果覆盖旧 evidence
+    if mode == "retrieve_new_evidence":
+
+        memory["evidence_state"][
+            "active_cases"
+        ] = evidence
+
+        memory["evidence_state"][
+            "selected_case"
+        ] = ""
+
+
+    # reuse / none 都保持
 
     return memory
 
 
 
-def update_interaction_memory(memory, policy):
-
-    memory["interaction_state"]["last_action"] = policy
-
-    memory["interaction_state"]["action_history"].append(policy)
+def update_interaction_memory(
+        memory,
+        policy_state):
 
 
-    # 简单 stage update
-    if policy in [
+    label = policy_state.get(
+        "label",
+        ""
+    )
+
+
+    memory["interaction_state"][
+        "last_action"
+    ] = label
+
+
+    memory["interaction_state"][
+        "action_history"
+    ].append(label)
+
+
+
+    # stage transition
+
+    if label in [
         "AskMissingSlot",
         "AskClarification"
     ]:
-        memory["interaction_state"]["stage"] = "Clarification"
+
+        memory["interaction_state"][
+            "stage"
+        ] = "Clarification"
 
 
-    elif policy in [
+
+    elif label in [
         "ExplainedResponse",
         "CaseRecommendation"
     ]:
-        memory["interaction_state"]["stage"] = "Resolution"
+
+        memory["interaction_state"][
+            "stage"
+        ] = "Resolution"
 
 
-    elif policy == "ProcessAcknowledgement":
-        memory["interaction_state"]["stage"] = "End"
+
+    elif label == "Handoff":
+
+        memory["interaction_state"][
+            "stage"
+        ] = "End"
 
 
-    elif policy == "Handoff":
-        memory["interaction_state"]["stage"] = "End"
+    # ProcessAcknowledgement:
+    # 不改变stage
 
 
     return memory
 
 
+
+# =========================
+# Prompt Input Builder
+# =========================
 
 def build_query_input(memory, user):
 
     return {
-        "issue_state": memory["issue_state"],
-        "current": {
+        "issue_state":
+            memory["issue_state"],
+
+        "current":{
             "u": user
         }
     }
@@ -87,8 +209,13 @@ def build_query_input(memory, user):
 def build_trigger_input(memory):
 
     return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": memory["evidence_state"]
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state":
+            memory["evidence_state"]
+
     }
 
 
@@ -96,25 +223,50 @@ def build_trigger_input(memory):
 def build_policy_input(memory):
 
     return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": memory["evidence_state"],
-        "interaction_state": memory["interaction_state"]
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state":
+            memory["evidence_state"],
+
+        "interaction_state":
+            memory["interaction_state"]
+
     }
 
 
 
-def build_response_input(memory, user):
+def build_response_input(
+        memory,
+        user,
+        policy):
 
     return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": memory["evidence_state"],
-        "interaction_state": memory["interaction_state"],
-        "current": {
-            "u": user
-        }
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state":
+            memory["evidence_state"],
+
+        "interaction_state":
+            memory["interaction_state"],
+
+        "current":{
+            "u":user
+        },
+
+        "policy":
+            policy.get("label","")
+
     }
 
 
+
+# =========================
+# Main
+# =========================
 
 def run_memory_agent(data):
 
@@ -123,15 +275,14 @@ def run_memory_agent(data):
 
     for dialog_id, item in data.items():
 
+
         memory = init_memory()
 
         turns = []
 
 
-        messages = item["text"]
+        for msg in item["text"]:
 
-
-        for i, msg in enumerate(messages):
 
             if "用户" not in msg:
                 continue
@@ -140,57 +291,73 @@ def run_memory_agent(data):
             user = msg["用户"]
 
 
-            ##############################
-            # 1. Query Predictor
-            ##############################
 
-            query_input = build_query_input(
-                memory,
-                user
-            )
+            # =====================
+            # 1 Query
+            # =====================
 
-
-            query = parallel_inference(
-                [query_input]
+            query_output = parallel_inference(
+                [
+                    build_query_input(
+                        memory,
+                        user
+                    )
+                ]
             )[0]
+
+
+            query_state = parse_json(
+                query_output
+            )
 
 
             memory = update_issue_memory(
                 memory,
-                query
+                query_state
             )
 
 
-            ##############################
-            # 2. Trigger Predictor
-            ##############################
 
-            trigger_input = build_trigger_input(
-                memory
-            )
+            # =====================
+            # 2 Trigger
+            # =====================
 
-
-            trigger = parallel_inference(
-                [trigger_input]
+            trigger_output = parallel_inference(
+                [
+                    build_trigger_input(
+                        memory
+                    )
+                ]
             )[0]
 
 
-            evidence = []
+            trigger_state = parse_json(
+                trigger_output
+            )
 
 
-            if trigger["evidence_mode"] == "retrieve_new_evidence":
+
+            # =====================
+            # 3 Evidence
+            # =====================
+
+            if trigger_state.get(
+                "evidence_mode"
+            ) == "retrieve_new_evidence":
 
 
-                ##############################
-                # 3. RAG
-                ##############################
+                query = memory[
+                    "issue_state"
+                ][
+                    "current_issue"
+                ]
+
 
                 evidence = rag_zefeng_batch(
                     [
-                        {
-                            "issue_state":
-                            memory["issue_state"]
-                        }
+                        memory[
+                            "issue_state"
+                        ]
                     ],
                     [
                         query
@@ -200,67 +367,84 @@ def run_memory_agent(data):
 
             else:
 
-                evidence = (
-                    memory["evidence_state"]
-                    ["active_cases"]
-                )
+                evidence = memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ]
+
 
 
             memory = update_evidence_memory(
                 memory,
+                trigger_state,
                 evidence
             )
 
 
-            ##############################
-            # 4. Policy Predictor
-            ##############################
 
-            policy_input = build_policy_input(
-                memory
-            )
+            # =====================
+            # 4 Policy
+            # =====================
 
-
-            policy = parallel_inference(
-                [policy_input]
+            policy_output = parallel_inference(
+                [
+                    build_policy_input(
+                        memory
+                    )
+                ]
             )[0]
+
+
+            policy_state = parse_json(
+                policy_output
+            )
 
 
             memory = update_interaction_memory(
                 memory,
-                policy["label"]
+                policy_state
             )
 
 
-            ##############################
-            # 5. Response Generator
-            ##############################
 
-            response_input = build_response_input(
-                memory,
-                user
-            )
-
-
-            response_input["policy"] = (
-                policy["label"]
-            )
-
+            # =====================
+            # 5 Response
+            # =====================
 
             response = parallel_inference(
-                [response_input]
+                [
+                    build_response_input(
+                        memory,
+                        user,
+                        policy_state
+                    )
+                ]
             )[0]
+
 
 
             turns.append(
                 {
                     "user": user,
-                    "query": query,
-                    "trigger": trigger,
-                    "evidence": evidence,
-                    "policy": policy,
-                    "response": response,
-                    "memory": copy.deepcopy(memory)
+
+                    "query":
+                        query_state,
+
+                    "trigger":
+                        trigger_state,
+
+                    "evidence":
+                        evidence,
+
+                    "policy":
+                        policy_state,
+
+                    "response":
+                        response,
+
+                    "memory":
+                        copy.deepcopy(memory)
                 }
             )
 
