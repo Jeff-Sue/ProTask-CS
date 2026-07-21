@@ -1,1125 +1,251 @@
-from __future__ import annotations
+import copy
 
-import argparse
-import json
-import re
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Set
-
-
-# ============================================================
-# Constants
-# ============================================================
-
-KNOWLEDGE_LABELS = {
-    "ExplainedResponse",
-    "CaseRecommendation",
-}
-
-QUERY_POSITIVE_MODES = {
-    "rewrite",
-    "refine",
-    "reuse",
-}
-
-EVIDENCE_POSITIVE_MODES = {
-    "retrieve_new_evidence",
-    "reuse_existing_evidence",
-}
-
-
-# ============================================================
-# Basic utilities
-# ============================================================
-
-def safe_div(a: float, b: float) -> float:
-    return float(a) / float(b) if b else 0.0
-
-
-def f1_score(
-    precision: float,
-    recall: float,
-) -> float:
-    return safe_div(
-        2 * precision * recall,
-        precision + recall,
-    )
-
-
-def normalize_case_id(value: Any) -> str:
-    return str(value or "").strip().upper()
-
-
-def unique_keep_order(
-    values: List[str],
-) -> List[str]:
-
-    seen: Set[str] = set()
-    output: List[str] = []
-
-    for value in values:
-        value = normalize_case_id(value)
-
-        if value and value not in seen:
-            seen.add(value)
-            output.append(value)
-
-    return output
-
-
-def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as file:
-        return json.load(file)
-
-
-def write_json(
-    path: str,
-    data: Any,
-) -> None:
-
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(
-            data,
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-# ============================================================
-# Prediction format normalization
-# ============================================================
-
-def flatten_predictions(
-    data: Any,
-) -> List[Dict[str, Any]]:
-    """
-    Supported format 1:
-
-    [
-        {
-            "dialog_id": "...",
-            "turns": [
-                {...},
-                {...}
-            ]
-        }
-    ]
-
-    Supported format 2:
-
-    [
-        {
-            "dialog_id": "...",
-            "turn_id": 0,
-            ...
-        }
-    ]
-    """
-
-    if not isinstance(data, list):
-        raise ValueError(
-            f"Prediction file must contain a list, got {type(data)}"
-        )
-
-    rows: List[Dict[str, Any]] = []
-
-    for item in data:
-
-        if not isinstance(item, dict):
-            continue
-
-        turns = item.get("turns")
-
-        if isinstance(turns, list):
-
-            dialog_id = str(
-                item.get("dialog_id")
-                or item.get("dialogue_id")
-                or ""
-            )
-
-            for turn in turns:
-
-                if not isinstance(turn, dict):
-                    continue
-
-                row = dict(turn)
-
-                row.setdefault(
-                    "dialog_id",
-                    dialog_id,
-                )
-
-                rows.append(row)
-
-        else:
-            rows.append(dict(item))
-
-    return rows
-
-
-# ============================================================
-# State getters
-# ============================================================
-
-def get_query(
-    row: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    value = row.get("predicted_q")
-
-    if not isinstance(value, dict):
-        value = row.get("q")
-
-    return value if isinstance(value, dict) else {}
-
-
-def get_trigger(
-    row: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    value = row.get("predicted_t")
-
-    if not isinstance(value, dict):
-        value = row.get("t")
-
-    return value if isinstance(value, dict) else {}
-
-
-def get_policy(
-    row: Dict[str, Any],
-) -> Dict[str, Any]:
-
-    value = row.get("predicted_p")
-
-    if not isinstance(value, dict):
-        value = row.get("p")
-
-    return value if isinstance(value, dict) else {}
-
-
-def get_predicted_response(
-    row: Dict[str, Any],
-) -> str:
-
-    return str(
-        row.get("predicted_response")
-        or row.get("r")
-        or ""
-    )
-
-
-# ============================================================
-# Case ID extraction
-# ============================================================
-
-def get_case_id(
-    case: Any,
-) -> str:
-
-    if not isinstance(case, dict):
-        return ""
-
-    return normalize_case_id(
-        case.get("case_id")
-        or case.get("caseId")
-        or case.get("id")
-        or case.get("doc_id")
-        or case.get("knowledge_id")
-    )
-
-
-def extract_case_ids_from_text(
-    text: str,
-) -> List[str]:
-    """
-    Fallback extraction.
-
-    Prefer explicit case_ids in the prediction file.
-    This regex is only used when explicit labels are unavailable.
-    """
-
-    if not text:
-        return []
-
-    patterns = [
-        r"\bCASE[-_\s]?[A-Za-z0-9]+\b",
-        r"\b[A-Z]{2,10}[-_]\d{2,}\b",
-        r"\b\d{5,}\b",
-    ]
-
-    case_ids: List[str] = []
-
-    for pattern in patterns:
-        case_ids.extend(
-            re.findall(
-                pattern,
-                text,
-                flags=re.IGNORECASE,
-            )
-        )
-
-    return unique_keep_order(case_ids)
-
-
-def get_gold_case_ids(
-    row: Dict[str, Any],
-) -> List[str]:
-    """
-    Priority:
-
-    1. gold_case_ids
-    2. case_ids
-    3. caseId
-    4. extract from golden_response
-    """
-
-    for key in [
-        "gold_case_ids",
-        "case_ids",
-        "caseId",
-    ]:
-        value = row.get(key)
-
-        if isinstance(value, list):
-            return unique_keep_order(
-                [
-                    normalize_case_id(case_id)
-                    for case_id in value
-                    if normalize_case_id(case_id)
-                ]
-            )
-
-        if isinstance(value, str) and value.strip():
-            return unique_keep_order([value])
-
-    golden_response = str(
-        row.get("golden_response")
-        or row.get("gold_response")
-        or ""
-    )
-
-    return extract_case_ids_from_text(
-        golden_response
-    )
-
-
-# ============================================================
-# Evidence normalization
-# ============================================================
-
-def collect_case_ids_from_evidence(
-    evidence: Any,
-) -> List[str]:
-    """
-    Supports:
-
-    1. list[case]
-    2. {
-           "cases": [...],
-           "retrieved_cases": [...],
-           "selected_case_ids": [...]
-       }
-    3. nested evidence structures
-    """
-
-    case_ids: List[str] = []
-
-    if isinstance(evidence, list):
-
-        for case in evidence:
-
-            if isinstance(case, str):
-                case_id = normalize_case_id(case)
-
-            else:
-                case_id = get_case_id(case)
-
-            if case_id:
-                case_ids.append(case_id)
-
-        return unique_keep_order(case_ids)
-
-    if not isinstance(evidence, dict):
-        return []
-
-    selected_ids = (
-        evidence.get("selected_case_ids")
-        or evidence.get("case_ids")
-        or evidence.get("selected_ids")
-        or []
-    )
-
-    if isinstance(selected_ids, list):
-
-        for case_id in selected_ids:
-            case_id = normalize_case_id(case_id)
-
-            if case_id:
-                case_ids.append(case_id)
-
-    elif isinstance(selected_ids, str):
-
-        case_id = normalize_case_id(selected_ids)
-
-        if case_id:
-            case_ids.append(case_id)
-
-    selected_case = evidence.get("selected_case")
-
-    if isinstance(selected_case, dict):
-        case_id = get_case_id(selected_case)
-
-        if case_id:
-            case_ids.append(case_id)
-
-    cases = (
-        evidence.get("cases")
-        or evidence.get("retrieved_cases")
-        or evidence.get("evidence")
-        or evidence.get("documents")
-        or evidence.get("docs")
-        or []
-    )
-
-    if isinstance(cases, list):
-
-        for case in cases:
-
-            if isinstance(case, str):
-                case_id = normalize_case_id(case)
-
-            else:
-                case_id = get_case_id(case)
-
-            if case_id:
-                case_ids.append(case_id)
-
-    return unique_keep_order(case_ids)
-
-
-def get_retrieved_case_ids(
-    row: Dict[str, Any],
-) -> List[str]:
-    """
-    Current inference output uses predicted_evidence.
-
-    Older outputs may use:
-    active_evidence_for_policy_response
-    active_evidence
-    e
-    """
-
-    evidence_candidates = [
-        row.get("predicted_evidence"),
-        row.get("active_evidence_for_policy_response"),
-        row.get("active_evidence"),
-        row.get("e"),
-    ]
-
-    for evidence in evidence_candidates:
-
-        case_ids = collect_case_ids_from_evidence(
-            evidence
-        )
-
-        if case_ids:
-            return case_ids
-
-    return []
-
-
-# ============================================================
-# Prediction decisions
-# ============================================================
-
-def get_predicted_case_id(
-    row: Dict[str, Any],
-) -> str:
-
-    policy = get_policy(row)
-
-    return normalize_case_id(
-        policy.get("case_id")
-        or policy.get("caseId")
-        or policy.get("selected_case_id")
-    )
-
-
-def knowledge_link_called(
-    row: Dict[str, Any],
-) -> bool:
-    """
-    Knowledge link is considered activated when:
-
-    1. Query model produces an effective query; or
-    2. Trigger model chooses retrieval/reuse.
-    """
-
-    query = get_query(row)
-    trigger = get_trigger(row)
-
-    query_mode = str(
-        query.get("query_mode")
-        or ""
-    ).strip()
-
-    query_text = str(
-        query.get("query_text")
-        or ""
-    ).strip()
-
-    query_called = (
-        query_mode in QUERY_POSITIVE_MODES
-        and bool(query_text)
-    )
-
-    evidence_mode = str(
-        trigger.get("evidence_mode")
-        or ""
-    ).strip()
-
-    trigger_called = (
-        evidence_mode in EVIDENCE_POSITIVE_MODES
-        or trigger.get("trigger") is True
-    )
-
-    return query_called or trigger_called
-
-
-def knowledge_policy_selected(
-    row: Dict[str, Any],
-) -> bool:
-
-    label = str(
-        get_policy(row).get("label")
-        or ""
-    ).strip()
-
-    return label in KNOWLEDGE_LABELS
-
-
-def recommendation_made(
-    row: Dict[str, Any],
-) -> bool:
-    """
-    A concrete recommendation requires:
-
-    1. Knowledge-related policy
-    2. A predicted case ID
-    """
-
-    return (
-        knowledge_policy_selected(row)
-        and bool(get_predicted_case_id(row))
-    )
-
-
-def case_hit(
-    row: Dict[str, Any],
-) -> bool:
-
-    predicted_case_id = get_predicted_case_id(
-        row
-    )
-
-    gold_case_ids = set(
-        get_gold_case_ids(row)
-    )
-
-    return (
-        bool(predicted_case_id)
-        and predicted_case_id in gold_case_ids
-    )
-
-
-def topk_hit(
-    row: Dict[str, Any],
-    k: int,
-) -> bool:
-
-    gold_case_ids = set(
-        get_gold_case_ids(row)
-    )
-
-    retrieved_case_ids = (
-        get_retrieved_case_ids(row)[:k]
-    )
-
-    return bool(
-        gold_case_ids.intersection(
-            retrieved_case_ids
-        )
-    )
-
-
-# ============================================================
-# Binary metrics
-# ============================================================
-
-def binary_metrics(
-    rows: List[Dict[str, Any]],
-    pred_fn: Callable[[Dict[str, Any]], bool],
-    gold_fn: Callable[[Dict[str, Any]], bool],
-) -> Dict[str, Any]:
-
-    tp = 0
-    fp = 0
-    fn = 0
-    tn = 0
-
-    for row in rows:
-
-        pred = bool(pred_fn(row))
-        gold = bool(gold_fn(row))
-
-        if pred and gold:
-            tp += 1
-
-        elif pred and not gold:
-            fp += 1
-
-        elif not pred and gold:
-            fn += 1
-
-        else:
-            tn += 1
-
-    precision = safe_div(
-        tp,
-        tp + fp,
-    )
-
-    recall = safe_div(
-        tp,
-        tp + fn,
-    )
+def init_memory():
 
     return {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1_score(
-            precision,
-            recall,
-        ),
-        "tp": tp,
-        "fp": fp,
-        "fn": fn,
-        "tn": tn,
-    }
 
+        "issue_state": {
 
-# ============================================================
-# 1. Case-turn performance
-# ============================================================
+            "current_issue": "",
 
-def evaluate_case_turns(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+            "query_history": []
 
-    # Gold case recommendation turns
-    case_rows = [
-        row
-        for row in rows
-        if get_gold_case_ids(row)
-    ]
+        },
 
-    # Knowledge/query link activated
-    linked_rows = [
-        row
-        for row in case_rows
-        if knowledge_link_called(row)
-    ]
+        "evidence_state": {
 
-    # Retrieval Top-5 contains gold case
-    top5_hit_rows = [
-        row
-        for row in linked_rows
-        if topk_hit(row, 5)
-    ]
+            "cases": [],
 
-    # Correctly chooses a knowledge-related policy
-    knowledge_policy_rows = [
-        row
-        for row in top5_hit_rows
-        if knowledge_policy_selected(row)
-    ]
+            "selected_case": None
 
-    # Policy also outputs a concrete case ID
-    concrete_selection_rows = [
-        row
-        for row in knowledge_policy_rows
-        if get_predicted_case_id(row)
-    ]
+        },
 
-    return {
-        "case_turn_count": len(case_rows),
+        "interaction_state": {
 
-        # Query/Trigger recall on gold case turns
-        "knowledge_link_call_rate": safe_div(
-            len(linked_rows),
-            len(case_rows),
-        ),
+            "last_policy": "",
 
-        # Retrieval quality conditioned on link activation
-        "top1_recall_given_link": safe_div(
-            sum(
-                topk_hit(row, 1)
-                for row in linked_rows
-            ),
-            len(linked_rows),
-        ),
+            "history_policy": []
 
-        "top3_recall_given_link": safe_div(
-            sum(
-                topk_hit(row, 3)
-                for row in linked_rows
-            ),
-            len(linked_rows),
-        ),
-
-        "top5_recall_given_link": safe_div(
-            sum(
-                topk_hit(row, 5)
-                for row in linked_rows
-            ),
-            len(linked_rows),
-        ),
-
-        # Policy correctness conditioned on Top-5 retrieval hit
-        "case_policy_accuracy_given_top5_hit": safe_div(
-            len(knowledge_policy_rows),
-            len(top5_hit_rows),
-        ),
-
-        # Case selection correctness conditioned on concrete selection
-        "case_selection_accuracy_given_policy": safe_div(
-            sum(
-                case_hit(row)
-                for row in concrete_selection_rows
-            ),
-            len(concrete_selection_rows),
-        ),
-
-        # End-to-end case recommendation success
-        "final_recommendation_success_rate": safe_div(
-            sum(
-                case_hit(row)
-                for row in case_rows
-            ),
-            len(case_rows),
-        ),
-
-        "linked_case_turn_count": len(linked_rows),
-        "top5_hit_count": len(top5_hit_rows),
-        "knowledge_policy_count": len(
-            knowledge_policy_rows
-        ),
-        "concrete_selection_count": len(
-            concrete_selection_rows
-        ),
-        "final_hit_count": sum(
-            case_hit(row)
-            for row in case_rows
-        ),
-    }
-
-
-# ============================================================
-# 2. All-turn recommendation timing
-# ============================================================
-
-def evaluate_recommendation_timing(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-
-    metrics = binary_metrics(
-        rows=rows,
-        pred_fn=recommendation_made,
-        gold_fn=lambda row: bool(
-            get_gold_case_ids(row)
-        ),
-    )
-
-    metrics.update(
-        {
-            "recommendation_rate": safe_div(
-                sum(
-                    recommendation_made(row)
-                    for row in rows
-                ),
-                len(rows),
-            ),
-
-            "gold_case_turn_rate": safe_div(
-                sum(
-                    bool(get_gold_case_ids(row))
-                    for row in rows
-                ),
-                len(rows),
-            ),
-
-            # Among non-case turns, how often the model
-            # recommends a case too early or incorrectly
-            "early_recommendation_rate": safe_div(
-                metrics["fp"],
-                metrics["fp"] + metrics["tn"],
-            ),
-
-            # Among gold case turns, how often the model
-            # fails to make a concrete recommendation
-            "missed_recommendation_rate": safe_div(
-                metrics["fn"],
-                metrics["tp"] + metrics["fn"],
-            ),
         }
-    )
 
-    return metrics
+    }
 
+def update_memory(memory, query, evidence, policy):
 
-# ============================================================
-# 3. Dialogue-level performance
-# ============================================================
+    # issue memory
 
-def evaluate_dialogues(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    memory["issue_state"]["current_issue"] = query
 
-    by_dialog: Dict[
-        str,
-        List[Dict[str, Any]],
-    ] = defaultdict(list)
+    memory["issue_state"]["query_history"].append(query)
 
-    for row in rows:
+    # evidence memory
 
-        dialog_id = str(
-            row.get("dialog_id")
-            or row.get("dialogue_id")
-            or ""
-        )
+    if evidence:
 
-        by_dialog[dialog_id].append(row)
+        memory["evidence_state"]["cases"] = evidence
 
-    dialogue_count_with_gold = 0
-    successful_dialogue_count = 0
+    # interaction memory
 
-    offsets: List[int] = []
+    memory["interaction_state"]["last_policy"] = policy
 
-    for dialogue_rows in by_dialog.values():
+    memory["interaction_state"]["history_policy"].append(policy)
 
-        dialogue_rows = sorted(
-            dialogue_rows,
-            key=lambda row: int(
-                row.get("turn_id") or 0
-            ),
-        )
+    return memory
 
-        # First gold appearance of every case
-        gold_first_turn: Dict[str, int] = {}
+def build_prompt(memory, user):
 
-        for row in dialogue_rows:
+    return f"""
 
-            turn_id = int(
-                row.get("turn_id") or 0
-            )
+当前用户问题:
 
-            for case_id in get_gold_case_ids(row):
+{user}
 
-                gold_first_turn.setdefault(
-                    case_id,
-                    turn_id,
-                )
+当前Memory状态:
 
-        if not gold_first_turn:
-            continue
+{memory}
 
-        dialogue_count_with_gold += 1
+请根据当前问题和历史状态完成任务。
 
-        successful_events = []
+"""
 
-        for row in dialogue_rows:
+def run_memory_dialogues(data):
 
-            if not recommendation_made(row):
+    results = {}
+
+    for dialog_id, item in data.items():
+
+        messages = item["text"]
+
+        memory = init_memory()
+
+        turns = []
+
+        for i in range(len(messages)):
+
+            msg = messages[i]
+
+            # 只处理用户轮
+
+            if "用户" not in msg:
+
                 continue
 
-            predicted_case_id = (
-                get_predicted_case_id(row)
+            user = msg["用户"]
+
+            ##################################
+
+            # 1. Query Generation
+
+            ##################################
+
+            query_prompt = build_prompt(
+
+                memory,
+
+                user
+
             )
 
-            if predicted_case_id in gold_first_turn:
+            query = parallel_inference(
 
-                predicted_turn = int(
-                    row.get("turn_id") or 0
-                )
+                [query_prompt]
 
-                successful_events.append(
-                    (
-                        predicted_turn,
-                        predicted_case_id,
-                    )
-                )
+            )[0]
 
-        if not successful_events:
-            continue
+            ##################################
 
-        successful_dialogue_count += 1
+            # 2. RAG
 
-        predicted_turn, predicted_case_id = min(
-            successful_events,
-            key=lambda item: item[0],
-        )
+            ##################################
 
-        gold_turn = gold_first_turn[
-            predicted_case_id
-        ]
+            rag_input = [
 
-        offsets.append(
-            predicted_turn - gold_turn
-        )
+                {
 
-    early_count = sum(
-        offset < 0
-        for offset in offsets
-    )
+                    "history": memory,
 
-    on_time_count = sum(
-        offset == 0
-        for offset in offsets
-    )
+                    "user": user
 
-    late_count = sum(
-        offset > 0
-        for offset in offsets
-    )
+                }
 
-    return {
-        "dialog_count": len(by_dialog),
+            ]
 
-        "dialog_with_gold_count": (
-            dialogue_count_with_gold
-        ),
+            evidence = rag_zefeng_batch(
 
-        "successful_dialog_count": (
-            successful_dialogue_count
-        ),
+                rag_input,
 
-        # At least one correct case recommendation
-        # somewhere in the dialogue
-        "dialog_hit_rate": safe_div(
-            successful_dialogue_count,
-            dialogue_count_with_gold,
-        ),
+                [query]
 
-        # Negative: early recommendation
-        # Zero: on-time recommendation
-        # Positive: late recommendation
-        "avg_signed_hit_offset": safe_div(
-            sum(offsets),
-            len(offsets),
-        ),
+            )[0]
 
-        "avg_absolute_hit_offset": safe_div(
-            sum(
-                abs(offset)
-                for offset in offsets
-            ),
-            len(offsets),
-        ),
+            ##################################
 
-        "early_hit_rate_among_success": safe_div(
-            early_count,
-            len(offsets),
-        ),
+            # 3. Policy Prediction
 
-        "on_time_hit_rate_among_success": safe_div(
-            on_time_count,
-            len(offsets),
-        ),
+            ##################################
 
-        "late_hit_rate_among_success": safe_div(
-            late_count,
-            len(offsets),
-        ),
+            policy_prompt = f"""
 
-        "hit_offset_distribution": {
-            "early": early_count,
-            "on_time": on_time_count,
-            "late": late_count,
-        },
-    }
+用户:
 
+{user}
 
-# ============================================================
-# Diagnostics
-# ============================================================
+Memory:
 
-def evaluate_output_quality(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+{memory}
 
-    query_parse_error_count = sum(
-        bool(
-            get_query(row).get("parse_error")
-        )
-        for row in rows
-    )
+Evidence:
 
-    trigger_parse_error_count = sum(
-        bool(
-            get_trigger(row).get("parse_error")
-        )
-        for row in rows
-    )
+{evidence}
 
-    policy_parse_error_count = sum(
-        bool(
-            get_policy(row).get("parse_error")
-        )
-        for row in rows
-    )
+预测客服策略。
 
-    empty_response_count = sum(
-        not bool(
-            get_predicted_response(row).strip()
-        )
-        for row in rows
-    )
+"""
 
-    return {
-        "query_parse_error_count": (
-            query_parse_error_count
-        ),
-        "trigger_parse_error_count": (
-            trigger_parse_error_count
-        ),
-        "policy_parse_error_count": (
-            policy_parse_error_count
-        ),
-        "empty_response_count": (
-            empty_response_count
-        ),
-        "query_parse_error_rate": safe_div(
-            query_parse_error_count,
-            len(rows),
-        ),
-        "trigger_parse_error_rate": safe_div(
-            trigger_parse_error_count,
-            len(rows),
-        ),
-        "policy_parse_error_rate": safe_div(
-            policy_parse_error_count,
-            len(rows),
-        ),
-        "empty_response_rate": safe_div(
-            empty_response_count,
-            len(rows),
-        ),
-    }
+            policy = parallel_inference(
 
+                [policy_prompt]
 
-# ============================================================
-# Final evaluation
-# ============================================================
+            )[0]
 
-def evaluate(
-    rows: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+            ##################################
 
-    dialog_ids = {
-        str(
-            row.get("dialog_id")
-            or row.get("dialogue_id")
-            or ""
-        )
-        for row in rows
-    }
+            # 4. Response Generation
 
-    return {
-        "basic_counts": {
-            "turn_count": len(rows),
-            "dialog_count": len(dialog_ids),
-            "case_turn_count": sum(
-                bool(get_gold_case_ids(row))
-                for row in rows
-            ),
-            "non_case_turn_count": sum(
-                not bool(get_gold_case_ids(row))
-                for row in rows
-            ),
-        },
+            ##################################
 
-        # 案例轮表现
-        "case_turn_performance": (
-            evaluate_case_turns(rows)
-        ),
+            response_prompt = f"""
 
-        # 全部轮推荐时机
-        "all_turn_performance": (
-            evaluate_recommendation_timing(rows)
-        ),
+用户:
 
-        # 整体对话表现
-        "dialogue_level_performance": (
-            evaluate_dialogues(rows)
-        ),
+{user}
 
-        # 推理输出质量诊断
-        "output_quality": (
-            evaluate_output_quality(rows)
-        ),
-    }
+Memory:
 
+{memory}
 
-# ============================================================
-# Main
-# ============================================================
+Evidence:
 
-def main() -> None:
+{evidence}
 
-    parser = argparse.ArgumentParser()
+Policy:
 
-    parser.add_argument(
-        "--pred_path",
-        required=True,
-        help="Inference output JSON path",
-    )
+{policy}
 
-    parser.add_argument(
-        "--output_path",
-        default="",
-        help="Optional evaluation result path",
-    )
+生成客服回复。
 
-    args = parser.parse_args()
+"""
 
-    data = load_json(
-        args.pred_path
-    )
+            response = parallel_inference(
 
-    rows = flatten_predictions(
-        data
-    )
+                [response_prompt]
 
-    result = evaluate(
-        rows
-    )
+            )[0]
 
-    if args.output_path:
-        write_json(
-            args.output_path,
-            result,
-        )
+            ##################################
 
-    print(
-        json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+            # 5. Update Memory
 
+            ##################################
 
-if __name__ == "__main__":
-    main()
+            memory = update_memory(
+
+                memory,
+
+                query,
+
+                evidence,
+
+                policy
+
+            )
+
+            turns.append(
+
+                {
+
+                    "user": user,
+
+                    "query": query,
+
+                    "evidence": evidence,
+
+                    "policy": policy,
+
+                    "response": response,
+
+                    "memory": copy.deepcopy(memory)
+
+                }
+
+            )
+
+        results[dialog_id] = {
+
+            "turns": turns,
+
+            "final_memory": memory
+
+        }
+
+    return results
