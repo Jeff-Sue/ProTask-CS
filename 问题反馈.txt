@@ -1,72 +1,55 @@
 import copy
 
+
 def init_memory():
-
     return {
-
         "issue_state": {
-
             "current_issue": "",
-
             "query_history": []
-
         },
-
         "evidence_state": {
-
             "cases": [],
-
             "selected_case": None
-
         },
-
         "interaction_state": {
-
             "last_policy": "",
-
             "history_policy": []
-
         }
-
     }
+
 
 def update_memory(memory, query, evidence, policy):
 
     # issue memory
-
     memory["issue_state"]["current_issue"] = query
-
     memory["issue_state"]["query_history"].append(query)
 
+
     # evidence memory
-
     if evidence:
-
         memory["evidence_state"]["cases"] = evidence
 
+
     # interaction memory
-
     memory["interaction_state"]["last_policy"] = policy
-
     memory["interaction_state"]["history_policy"].append(policy)
 
     return memory
 
+
+
 def build_prompt(memory, user):
 
     return f"""
-
 当前用户问题:
-
 {user}
 
 当前Memory状态:
-
 {memory}
 
 请根据当前问题和历史状态完成任务。
-
 """
+
 
 def run_memory_dialogues(data):
 
@@ -80,172 +63,127 @@ def run_memory_dialogues(data):
 
         turns = []
 
+
         for i in range(len(messages)):
 
             msg = messages[i]
 
             # 只处理用户轮
-
             if "用户" not in msg:
-
                 continue
+
 
             user = msg["用户"]
 
+
             ##################################
-
             # 1. Query Generation
-
             ##################################
 
             query_prompt = build_prompt(
-
                 memory,
-
                 user
-
             )
 
             query = parallel_inference(
-
                 [query_prompt]
-
             )[0]
 
+
             ##################################
-
             # 2. RAG
-
             ##################################
 
             rag_input = [
-
                 {
-
                     "history": memory,
-
                     "user": user
-
                 }
-
             ]
 
             evidence = rag_zefeng_batch(
-
                 rag_input,
-
                 [query]
-
             )[0]
 
+
             ##################################
-
             # 3. Policy Prediction
-
             ##################################
 
             policy_prompt = f"""
-
 用户:
-
 {user}
 
 Memory:
-
 {memory}
 
 Evidence:
-
 {evidence}
 
 预测客服策略。
-
 """
 
+
             policy = parallel_inference(
-
                 [policy_prompt]
-
             )[0]
 
+
             ##################################
-
             # 4. Response Generation
-
             ##################################
 
             response_prompt = f"""
-
 用户:
-
 {user}
 
 Memory:
-
 {memory}
 
 Evidence:
-
 {evidence}
 
 Policy:
-
 {policy}
 
 生成客服回复。
-
 """
 
+
             response = parallel_inference(
-
                 [response_prompt]
-
             )[0]
 
+
             ##################################
-
             # 5. Update Memory
-
             ##################################
 
             memory = update_memory(
-
                 memory,
-
                 query,
-
                 evidence,
-
                 policy
-
             )
+
 
             turns.append(
-
                 {
-
                     "user": user,
-
                     "query": query,
-
                     "evidence": evidence,
-
                     "policy": policy,
-
                     "response": response,
-
                     "memory": copy.deepcopy(memory)
-
                 }
-
             )
 
+
         results[dialog_id] = {
-
             "turns": turns,
-
             "final_memory": memory
-
         }
+
 
     return results
