@@ -1,154 +1,384 @@
-Process SpawnProcess-1:
-Traceback (most recent call last):
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
-    self.run()
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 458, in run_mp_engine
-    raise e from None
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 444, in run_mp_engine
-    engine = MQLLMEngine.from_vllm_config(
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 133, in from_vllm_config
-    return cls(
-           ^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/multiprocessing/engine.py", line 87, in __init__
-    self.engine = LLMEngine(*args, **kwargs)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/llm_engine.py", line 266, in __init__
-    self._initialize_kv_caches()
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/llm_engine.py", line 409, in _initialize_kv_caches
-    self.model_executor.determine_num_available_blocks())
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/executor/executor_base.py", line 104, in determine_num_available_blocks
-    results = self.collective_rpc("determine_num_available_blocks")
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/executor/uniproc_executor.py", line 58, in collective_rpc
-    answer = run_method(self.driver_worker, method, args, kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/utils/__init__.py", line 2985, in run_method
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/worker.py", line 257, in determine_num_available_blocks
-    self.model_runner.profile_run()
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1206, in profile_run
-    self._dummy_run(max_num_batched_tokens, max_num_seqs)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1332, in _dummy_run
-    self.execute_model(model_input, kv_caches, intermediate_tensors)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/worker/model_runner.py", line 1703, in execute_model
-    hidden_or_intermediate_states = model_executable(
-                                    ^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 301, in forward
-    hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/compilation/decorators.py", line 206, in __call__
-    return self.forward(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen2.py", line 354, in forward
-    hidden_states, residual = layer(
-                              ^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 214, in forward
-    hidden_states = self.self_attn(
-                    ^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/model_executor/models/qwen3.py", line 133, in forward
-    qkv, _ = self.qkv_proj(hidden_states)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
-    return self._call_impl(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
-    return forward_call(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/layers.py", line 581, in forward
-    output_parallel = self.apply(input_, bias)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/layers.py", line 422, in apply
-    torch.Tensor] = self.punica_wrapper.add_lora_linear(
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/punica_wrapper/punica_gpu.py", line 222, in add_lora_linear
-    self.add_shrink(
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/punica_wrapper/punica_gpu.py", line 84, in add_shrink
-    lora_shrink(
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/_ops.py", line 1158, in __call__
-    return self._op(*args, **(kwargs or {}))
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 116, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/lora/ops/triton_ops/lora_shrink_op.py", line 185, in _lora_shrink
-    _lora_shrink_kernel[grid](
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/runtime/jit.py", line 347, in <lambda>
-    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
-                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/runtime/jit.py", line 569, in run
-    kernel = self.compile(src, target=target, options=options.__dict__)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/compiler/compiler.py", line 284, in compile
-    next_module = compile_ir(module, metadata)
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/backends/nvidia/compiler.py", line 450, in <lambda>
-    stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options, capability)
-                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/triton/backends/nvidia/compiler.py", line 341, in make_llir
-    pm.run(mod)
-RuntimeError: PassManager::run failed
-Traceback (most recent call last):
-  File "/home/ma-user/miniconda3/envs/vllm/bin/vllm", line 7, in <module>
-    sys.exit(main())
-             ^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/main.py", line 54, in main
-    args.dispatch_function(args)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/serve.py", line 52, in cmd
-    uvloop.run(run_server(args))
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 92, in run
-    return runner.run(wrapper())
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/asyncio/runners.py", line 118, in run
-    return self._loop.run_until_complete(task)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 48, in wrapper
-    return await main
-           ^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1791, in run_server
-    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1811, in run_server_worker
-    async with build_async_engine_client(args, client_config) as engine_client:
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 158, in build_async_engine_client
-    async with build_async_engine_client_from_engine_args(
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 291, in build_async_engine_client_from_engine_args
-    raise RuntimeError(
-RuntimeError: Engine process failed to start. See stack trace for the root cause.
+from __future__ import annotations
+
+import argparse
+import json
+from collections import defaultdict
+from typing import Any, Callable, Dict, List, Set
+
+from .io import write_json
+from .schema import extract_case_ids
+
+
+KNOWLEDGE_LABELS = {"ExplainedResponse", "CaseRecommendation"}
+QUERY_POSITIVE_MODES = {"rewrite", "refine", "reuse"}
+
+
+def safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if b else 0.0
+
+
+def f1_score(precision: float, recall: float) -> float:
+    return safe_div(2 * precision * recall, precision + recall)
+
+
+def normalize_case_id(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def unique_keep_order(values: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    output: List[str] = []
+    for value in values:
+        value = normalize_case_id(value)
+        if value and value not in seen:
+            seen.add(value)
+            output.append(value)
+    return output
+
+
+def flatten_predictions(data: Any) -> List[Dict[str, Any]]:
+    if not isinstance(data, list):
+        raise ValueError(f"Prediction file should contain a list, got {type(data)}")
+
+    rows: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        if isinstance(item.get("turns"), list):
+            dialog_id = str(item.get("dialog_id") or "")
+            for turn in item["turns"]:
+                if not isinstance(turn, dict):
+                    continue
+                row = dict(turn)
+                row.setdefault("dialog_id", dialog_id)
+                rows.append(row)
+        else:
+            rows.append(item)
+
+    return rows
+
+
+def get_query(row: Dict[str, Any]) -> Dict[str, Any]:
+    value = row.get("q")
+    return value if isinstance(value, dict) else {}
+
+
+def get_trigger(row: Dict[str, Any]) -> Dict[str, Any]:
+    value = row.get("t")
+    return value if isinstance(value, dict) else {}
+
+
+def get_policy(row: Dict[str, Any]) -> Dict[str, Any]:
+    value = row.get("p")
+    return value if isinstance(value, dict) else {}
+
+
+def get_case_id(case: Any) -> str:
+    if not isinstance(case, dict):
+        return ""
+    return normalize_case_id(
+        case.get("case_id")
+        or case.get("caseId")
+        or case.get("id")
+        or case.get("doc_id")
+        or case.get("knowledge_id")
+    )
+
+
+def collect_case_ids_from_evidence(evidence: Any) -> List[str]:
+    if not isinstance(evidence, dict):
+        return []
+
+    case_ids: List[str] = []
+    selected = evidence.get("selected_case_ids") or evidence.get("case_ids") or []
+    if isinstance(selected, list):
+        case_ids.extend(
+            normalize_case_id(case_id)
+            for case_id in selected
+            if normalize_case_id(case_id)
+        )
+
+    cases = (
+        evidence.get("cases")
+        or evidence.get("retrieved_cases")
+        or evidence.get("evidence")
+        or []
+    )
+    if isinstance(cases, list):
+        for case in cases:
+            case_id = get_case_id(case)
+            if case_id:
+                case_ids.append(case_id)
+
+    return unique_keep_order(case_ids)
+
+
+def get_gold_case_ids(row: Dict[str, Any]) -> List[str]:
+    explicit_ids = row.get("gold_case_ids")
+    if isinstance(explicit_ids, list):
+        return unique_keep_order(
+            [normalize_case_id(case_id) for case_id in explicit_ids if normalize_case_id(case_id)]
+        )
+
+    golden_response = str(row.get("golden_response") or "")
+    return unique_keep_order(
+        [normalize_case_id(case_id) for case_id in extract_case_ids(golden_response)]
+    )
+
+
+def get_retrieved_case_ids(row: Dict[str, Any]) -> List[str]:
+    active_ids = collect_case_ids_from_evidence(
+        row.get("active_evidence_for_policy_response")
+    )
+    if active_ids:
+        return active_ids
+    return collect_case_ids_from_evidence(row.get("e"))
+
+
+def get_predicted_case_id(row: Dict[str, Any]) -> str:
+    return normalize_case_id(get_policy(row).get("case_id"))
+
+
+def knowledge_link_called(row: Dict[str, Any]) -> bool:
+    query = get_query(row)
+    trigger = get_trigger(row)
+
+    query_called = (
+        query.get("query_mode") in QUERY_POSITIVE_MODES
+        and bool(str(query.get("query_text") or "").strip())
+    )
+    evidence_called = trigger.get("evidence_mode") in {
+        "retrieve_new_evidence",
+        "reuse_existing_evidence",
+    }
+    return query_called or evidence_called
+
+
+def knowledge_policy_selected(row: Dict[str, Any]) -> bool:
+    return get_policy(row).get("label") in KNOWLEDGE_LABELS
+
+
+def recommendation_made(row: Dict[str, Any]) -> bool:
+    return knowledge_policy_selected(row) and bool(get_predicted_case_id(row))
+
+
+def case_hit(row: Dict[str, Any]) -> bool:
+    predicted_case_id = get_predicted_case_id(row)
+    return bool(predicted_case_id) and predicted_case_id in set(get_gold_case_ids(row))
+
+
+def topk_hit(row: Dict[str, Any], k: int) -> bool:
+    gold_case_ids = set(get_gold_case_ids(row))
+    retrieved_case_ids = get_retrieved_case_ids(row)[:k]
+    return bool(gold_case_ids.intersection(retrieved_case_ids))
+
+
+def binary_metrics(
+    rows: List[Dict[str, Any]],
+    pred_fn: Callable[[Dict[str, Any]], bool],
+    gold_fn: Callable[[Dict[str, Any]], bool],
+) -> Dict[str, Any]:
+    tp = fp = fn = tn = 0
+
+    for row in rows:
+        pred = bool(pred_fn(row))
+        gold = bool(gold_fn(row))
+
+        if pred and gold:
+            tp += 1
+        elif pred and not gold:
+            fp += 1
+        elif not pred and gold:
+            fn += 1
+        else:
+            tn += 1
+
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1_score(precision, recall),
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+    }
+
+
+def evaluate_case_turns(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    case_rows = [row for row in rows if get_gold_case_ids(row)]
+    linked_rows = [row for row in case_rows if knowledge_link_called(row)]
+    top5_hit_rows = [row for row in linked_rows if topk_hit(row, 5)]
+    knowledge_policy_rows = [
+        row for row in top5_hit_rows if knowledge_policy_selected(row)
+    ]
+    concrete_selection_rows = [
+        row for row in knowledge_policy_rows if get_predicted_case_id(row)
+    ]
+
+    return {
+        "case_turn_count": len(case_rows),
+        "knowledge_link_call_rate": safe_div(len(linked_rows), len(case_rows)),
+        "top1_recall_given_link": safe_div(
+            sum(topk_hit(row, 1) for row in linked_rows), len(linked_rows)
+        ),
+        "top3_recall_given_link": safe_div(
+            sum(topk_hit(row, 3) for row in linked_rows), len(linked_rows)
+        ),
+        "top5_recall_given_link": safe_div(
+            sum(topk_hit(row, 5) for row in linked_rows), len(linked_rows)
+        ),
+        "case_policy_accuracy_given_top5_hit": safe_div(
+            len(knowledge_policy_rows), len(top5_hit_rows)
+        ),
+        "case_selection_accuracy_given_policy": safe_div(
+            sum(case_hit(row) for row in concrete_selection_rows),
+            len(concrete_selection_rows),
+        ),
+        "final_recommendation_success_rate": safe_div(
+            sum(case_hit(row) for row in case_rows), len(case_rows)
+        ),
+        "linked_case_turn_count": len(linked_rows),
+        "top5_hit_count": len(top5_hit_rows),
+        "knowledge_policy_count": len(knowledge_policy_rows),
+        "concrete_selection_count": len(concrete_selection_rows),
+    }
+
+
+def evaluate_recommendation_timing(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    metrics = binary_metrics(
+        rows=rows,
+        pred_fn=recommendation_made,
+        gold_fn=lambda row: bool(get_gold_case_ids(row)),
+    )
+    metrics["recommendation_rate"] = safe_div(
+        sum(recommendation_made(row) for row in rows), len(rows)
+    )
+    metrics["gold_case_turn_rate"] = safe_div(
+        sum(bool(get_gold_case_ids(row)) for row in rows), len(rows)
+    )
+    metrics["early_recommendation_rate"] = safe_div(
+        metrics["fp"], metrics["fp"] + metrics["tn"]
+    )
+    metrics["missed_recommendation_rate"] = safe_div(
+        metrics["fn"], metrics["tp"] + metrics["fn"]
+    )
+    return metrics
+
+
+def evaluate_dialogues(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by_dialog: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_dialog[str(row.get("dialog_id") or "")].append(row)
+
+    dialogue_count_with_gold = 0
+    successful_dialogue_count = 0
+    offsets: List[int] = []
+
+    for dialogue_rows in by_dialog.values():
+        dialogue_rows = sorted(
+            dialogue_rows,
+            key=lambda row: int(row.get("turn_id") or 0),
+        )
+
+        gold_first_turn: Dict[str, int] = {}
+        for row in dialogue_rows:
+            turn_id = int(row.get("turn_id") or 0)
+            for case_id in get_gold_case_ids(row):
+                gold_first_turn.setdefault(case_id, turn_id)
+
+        if not gold_first_turn:
+            continue
+
+        dialogue_count_with_gold += 1
+        successful_events = []
+
+        for row in dialogue_rows:
+            if not recommendation_made(row):
+                continue
+
+            predicted_case_id = get_predicted_case_id(row)
+            if predicted_case_id in gold_first_turn:
+                successful_events.append(
+                    (int(row.get("turn_id") or 0), predicted_case_id)
+                )
+
+        if not successful_events:
+            continue
+
+        successful_dialogue_count += 1
+        predicted_turn, predicted_case_id = min(
+            successful_events,
+            key=lambda item: item[0],
+        )
+        offsets.append(predicted_turn - gold_first_turn[predicted_case_id])
+
+    early_count = sum(offset < 0 for offset in offsets)
+    on_time_count = sum(offset == 0 for offset in offsets)
+    late_count = sum(offset > 0 for offset in offsets)
+
+    return {
+        "dialog_count": len(by_dialog),
+        "dialog_with_gold_count": dialogue_count_with_gold,
+        "successful_dialog_count": successful_dialogue_count,
+        "dialog_hit_rate": safe_div(
+            successful_dialogue_count, dialogue_count_with_gold
+        ),
+        "avg_signed_hit_offset": safe_div(sum(offsets), len(offsets)),
+        "avg_absolute_hit_offset": safe_div(
+            sum(abs(offset) for offset in offsets), len(offsets)
+        ),
+        "early_hit_rate_among_success": safe_div(early_count, len(offsets)),
+        "on_time_hit_rate_among_success": safe_div(on_time_count, len(offsets)),
+        "late_hit_rate_among_success": safe_div(late_count, len(offsets)),
+        "hit_offset_distribution": {
+            "early": early_count,
+            "on_time": on_time_count,
+            "late": late_count,
+        },
+    }
+
+
+def evaluate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "basic_counts": {
+            "turn_count": len(rows),
+            "dialog_count": len(
+                {str(row.get("dialog_id") or "") for row in rows}
+            ),
+            "case_turn_count": sum(
+                bool(get_gold_case_ids(row)) for row in rows
+            ),
+        },
+        "case_turn_performance": evaluate_case_turns(rows),
+        "recommendation_timing": evaluate_recommendation_timing(rows),
+        "dialogue_level_performance": evaluate_dialogues(rows),
+    }
+
+
+def load_json(path: str) -> Any:
+    with open(path, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pred_path", required=True)
+    parser.add_argument("--output_path", default="")
+    args = parser.parse_args()
+
+    data = load_json(args.pred_path)
+    rows = flatten_predictions(data)
+    result = evaluate(rows)
+
+    # if args.output_path:
+    #     write_json(args.output_path, result)
+
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
