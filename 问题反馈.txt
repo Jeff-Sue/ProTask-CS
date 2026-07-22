@@ -8,15 +8,20 @@ from pathlib import Path
 # Utils
 # =========================
 
+KNOWLEDGE_POLICY = {
+    "ExplainedResponse",
+    "CaseRecommendation"
+}
+
+
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
+
 def extract_case_ids(text):
-    """
-    从golden response提取案例
-    """
+
     if not text:
         return []
 
@@ -26,36 +31,54 @@ def extract_case_ids(text):
     )
 
 
-def first_case(case_list):
-    if isinstance(case_list, list):
-        return case_list[0] if case_list else ""
-    return case_list
+def get_pred_cases(policy):
+
+    cases = policy.get(
+        "case_id",
+        []
+    )
+
+    if isinstance(cases, str):
+        return [cases] if cases else []
+
+    return cases
+
+
+
+def rate(x):
+
+    return (
+        sum(x)/len(x)
+        if x else 0
+    )
+
 
 
 # =========================
-# Turn Level Evaluation
+# Case Turn Evaluation
 # =========================
 
-def evaluate_turns(data):
+def evaluate_case_turn(data):
 
-    case_turns = []
+    total_case_turn = 0
 
-    all_pred_recommend = []
-    all_gold_recommend = []
+    # stage counters
 
-    trigger_correct = []
+    trigger_hit = 0
 
-    top5_hit = []
-    top3_hit = []
-    top1_hit = []
+    top5_hit = 0
+    top3_hit = 0
+    top1_hit = 0
 
-    policy_correct = []
-    case_correct = []
+    policy_hit = 0
+
+    selection_hit = 0
 
 
-    for dialog_id, dialog in data.items():
+    for dialog in data.values():
 
         for turn in dialog["turns"]:
+
 
             golden_cases = extract_case_ids(
                 turn.get(
@@ -65,18 +88,39 @@ def evaluate_turns(data):
             )
 
 
-            pred_case = first_case(
-                turn.get(
-                    "policy",
-                    {}
-                ).get(
-                    "case_id",
-                    []
-                )
+            # 只统计案例轮
+
+            if not golden_cases:
+                continue
+
+
+            total_case_turn += 1
+
+            golden_case = golden_cases[0]
+
+
+            trigger = turn["trigger"].get(
+                "trigger",
+                False
             )
 
 
-            evidence_cases = [
+            # =====================
+            # Trigger
+            # =====================
+
+            if not trigger:
+                continue
+
+
+            trigger_hit += 1
+
+
+            # =====================
+            # Retrieval
+            # =====================
+
+            retrieved = [
                 x.get("case_id","")
                 for x in turn.get(
                     "evidence",
@@ -85,125 +129,154 @@ def evaluate_turns(data):
             ]
 
 
-            # 是否案例轮
-
-            is_case_turn = len(
-                golden_cases
-            ) > 0
+            hit5 = golden_case in retrieved[:5]
+            hit3 = golden_case in retrieved[:3]
+            hit1 = golden_case in retrieved[:1]
 
 
-            # =====================
-            # Case Turn
-            # =====================
+            if hit5:
+                top5_hit += 1
 
-            if is_case_turn:
+            if hit3:
+                top3_hit += 1
 
-                case_turns.append(turn)
-
-
-                # trigger
-
-                trigger_correct.append(
-                    turn["trigger"].get(
-                        "trigger",
-                        False
-                    )
-                )
+            if hit1:
+                top1_hit += 1
 
 
-                # recall@k
 
-                gold = golden_cases[0]
+            # 后续只建立在top5正确基础上
 
-
-                top1_hit.append(
-                    gold in evidence_cases[:1]
-                )
-
-                top3_hit.append(
-                    gold in evidence_cases[:3]
-                )
-
-                top5_hit.append(
-                    gold in evidence_cases[:5]
-                )
-
-
-                # policy
-
-                policy_correct.append(
-                    turn["policy"].get(
-                        "label"
-                    )
-                    in [
-                        "ExplainedResponse",
-                        "CaseRecommendation"
-                    ]
-                )
-
-
-                # case selection
-
-                case_correct.append(
-                    pred_case == gold
-                )
+            if not hit5:
+                continue
 
 
             # =====================
-            # Recommendation Timing
+            # Policy
             # =====================
 
-            pred_recommend = (
-                pred_case != ""
+            label = turn["policy"].get(
+                "label",
+                ""
             )
 
 
-            gold_recommend = (
-                len(golden_cases)>0
+            if label not in KNOWLEDGE_POLICY:
+                continue
+
+
+            policy_hit += 1
+
+
+
+            # =====================
+            # Case Selection
+            # =====================
+
+            pred_cases = get_pred_cases(
+                turn["policy"]
             )
 
 
-            all_pred_recommend.append(
-                pred_recommend
-            )
-
-            all_gold_recommend.append(
-                gold_recommend
-            )
+            if golden_case in pred_cases:
+                selection_hit += 1
 
 
-    return {
-        "case_turn_num":len(case_turns),
 
-        "trigger_correct":trigger_correct,
+    result = {
 
-        "top5_hit":top5_hit,
-        "top3_hit":top3_hit,
-        "top1_hit":top1_hit,
+        "案例轮数量":
+            total_case_turn,
 
-        "policy_correct":policy_correct,
-        "case_correct":case_correct,
 
-        "pred_recommend":
-            all_pred_recommend,
+        "知识链路触发率":
+            trigger_hit / total_case_turn
+            if total_case_turn else 0,
 
-        "gold_recommend":
-            all_gold_recommend
+
+        "Top-5有效案例召回率":
+            top5_hit / trigger_hit
+            if trigger_hit else 0,
+
+
+        "Top-3有效案例召回率":
+            top3_hit / trigger_hit
+            if trigger_hit else 0,
+
+
+        "Top-1有效案例召回率":
+            top1_hit / trigger_hit
+            if trigger_hit else 0,
+
+
+        "知识型策略命中率":
+            policy_hit / top5_hit
+            if top5_hit else 0,
+
+
+        "案例选择准确率":
+            selection_hit / policy_hit
+            if policy_hit else 0,
+
+
+        "最终案例推荐准确率":
+            selection_hit / total_case_turn
+            if total_case_turn else 0
     }
 
 
+    return result
+
+
 
 # =========================
-# Metrics
+# All Turn Timing
 # =========================
 
-def mean(x):
-    return sum(x)/len(x) if x else 0
+def evaluate_timing(data):
+
+    pred=[]
+    gold=[]
 
 
-def precision_recall_f1(
-        pred,
-        gold):
+    for dialog in data.values():
+
+        for turn in dialog["turns"]:
+
+
+            golden_case = (
+                len(
+                    extract_case_ids(
+                        turn.get(
+                            "golden_response",
+                            ""
+                        )
+                    )
+                ) > 0
+            )
+
+
+            policy_label = turn["policy"].get(
+                "label",
+                ""
+            )
+
+
+            predicted = (
+                policy_label
+                in KNOWLEDGE_POLICY
+            )
+
+
+            gold.append(
+                golden_case
+            )
+
+            pred.append(
+                predicted
+            )
+
+
 
     tp=sum(
         p and g
@@ -221,6 +294,7 @@ def precision_recall_f1(
     )
 
 
+
     precision = (
         tp/(tp+fp)
         if tp+fp else 0
@@ -236,7 +310,29 @@ def precision_recall_f1(
         if precision+recall else 0
     )
 
-    return precision, recall, f1
+
+    return {
+
+        "推荐时机Precision":
+            precision,
+
+        "推荐时机Recall":
+            recall,
+
+        "推荐时机F1":
+            f1,
+
+
+        "过早推荐率":
+            fp/(tp+fp)
+            if tp+fp else 0,
+
+
+        "漏推荐率":
+            fn/(tp+fn)
+            if tp+fn else 0
+
+    }
 
 
 
@@ -248,16 +344,14 @@ def evaluate_dialogue(data):
 
     success=[]
 
-    golden_turns=[]
-    pred_turns=[]
+    golden_first=[]
+    pred_first=[]
 
 
-    for dialog_id,dialog in data.items():
+    for dialog in data.values():
 
-        gold_case=set()
-
-        pred_case=set()
-
+        golden_cases=set()
+        predicted_cases=set()
 
         g_turn=None
         p_turn=None
@@ -265,7 +359,8 @@ def evaluate_dialogue(data):
 
         for turn in dialog["turns"]:
 
-            golden = extract_case_ids(
+
+            g_cases=extract_case_ids(
                 turn.get(
                     "golden_response",
                     ""
@@ -273,57 +368,60 @@ def evaluate_dialogue(data):
             )
 
 
-            pred = turn.get(
-                "policy",
-                {}
-            ).get(
-                "case_id",
-                []
-            )
+            for c in g_cases:
 
-            pred=pred if isinstance(pred,list) else [pred]
-
-
-            for c in golden:
-                gold_case.add(c)
+                golden_cases.add(c)
 
                 if g_turn is None:
                     g_turn=turn["turn_id"]
 
 
-            for c in pred:
 
-                if c:
+            p_cases=get_pred_cases(
+                turn["policy"]
+            )
 
-                    pred_case.add(c)
 
-                    if p_turn is None:
-                        p_turn=turn["turn_id"]
+            for c in p_cases:
+
+                predicted_cases.add(c)
+
+                if p_turn is None:
+                    p_turn=turn["turn_id"]
 
 
 
         success.append(
             len(
-                gold_case & pred_case
-            )>0
+                golden_cases &
+                predicted_cases
+            ) > 0
         )
 
 
         if g_turn is not None:
-            golden_turns.append(
+            golden_first.append(
                 g_turn
             )
 
         if p_turn is not None:
-            pred_turns.append(
+            pred_first.append(
                 p_turn
             )
 
 
+
     return {
-        "success":mean(success),
-        "golden_turn":mean(golden_turns),
-        "pred_turn":mean(pred_turns)
+
+        "对话成功率":
+            rate(success),
+
+        "Golden案例首次推荐平均轮数":
+            rate(golden_first),
+
+        "Predicted案例首次推荐平均轮数":
+            rate(pred_first)
+
     }
 
 
@@ -349,122 +447,45 @@ def main():
     )
 
 
-    turn=evaluate_turns(data)
+    print("\n========== 案例轮指标 ==========")
+
+    case_result=evaluate_case_turn(data)
+
+    for k,v in case_result.items():
+
+        if isinstance(v,float):
+            print(
+                f"{k}: {v:.4f}"
+            )
+        else:
+            print(
+                f"{k}: {v}"
+            )
 
 
-    print("\n====== 案例轮评估 ======")
+    print("\n========== 所有轮推荐时机 ==========")
 
-    print(
-        f"案例轮数量: {turn['case_turn_num']}"
-    )
+    timing=evaluate_timing(data)
 
-    print(
-        f"知识链路触发率: "
-        f"{mean(turn['trigger_correct']):.4f}"
-    )
+    for k,v in timing.items():
 
-
-    print(
-        f"Top-5有效案例召回率: "
-        f"{mean(turn['top5_hit']):.4f}"
-    )
-
-    print(
-        f"Top-3有效案例召回率: "
-        f"{mean(turn['top3_hit']):.4f}"
-    )
-
-    print(
-        f"Top-1有效案例召回率: "
-        f"{mean(turn['top1_hit']):.4f}"
-    )
-
-
-    print(
-        f"知识型策略命中率: "
-        f"{mean(turn['policy_correct']):.4f}"
-    )
-
-
-    print(
-        f"案例选择准确率: "
-        f"{mean(turn['case_correct']):.4f}"
-    )
-
-
-    print("\n====== 所有轮推荐时机 ======")
-
-
-    p,r,f1=precision_recall_f1(
-        turn["pred_recommend"],
-        turn["gold_recommend"]
-    )
-
-
-    print(
-        f"推荐Precision: {p:.4f}"
-    )
-
-    print(
-        f"推荐Recall: {r:.4f}"
-    )
-
-    print(
-        f"推荐F1: {f1:.4f}"
-    )
-
-
-    early=sum(
-        p and not g
-        for p,g in zip(
-            turn["pred_recommend"],
-            turn["gold_recommend"]
+        print(
+            f"{k}: {v:.4f}"
         )
-    )
 
-    miss=sum(
-        (not p) and g
-        for p,g in zip(
-            turn["pred_recommend"],
-            turn["gold_recommend"]
+
+    print("\n========== 对话级指标 ==========")
+
+    dialogue=evaluate_dialogue(data)
+
+    for k,v in dialogue.items():
+
+        print(
+            f"{k}: {v:.4f}"
         )
-    )
-
-
-    print(
-        f"过早推荐率: "
-        f"{early/max(sum(turn['pred_recommend']),1):.4f}"
-    )
-
-
-    print(
-        f"漏推荐率: "
-        f"{miss/max(sum(turn['gold_recommend']),1):.4f}"
-    )
-
-
-    print("\n====== 对话级指标 ======")
-
-    dialog=evaluate_dialogue(data)
-
-
-    print(
-        f"对话成功率: "
-        f"{dialog['success']:.4f}"
-    )
-
-    print(
-        f"Golden案例首次推荐平均轮数: "
-        f"{dialog['golden_turn']:.4f}"
-    )
-
-
-    print(
-        f"Predicted案例首次推荐平均轮数: "
-        f"{dialog['pred_turn']:.4f}"
-    )
 
 
 
 if __name__=="__main__":
+
     main()
