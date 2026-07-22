@@ -1,346 +1,470 @@
-def run_memory_agent_batch(data, batch_size=16):
-
-    query_prompt = prompt_read(Path("prompts/query.prompt"))
-    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
-    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
-    response_prompt = prompt_read(Path("prompts/response.prompt"))
+import json
+import re
+import argparse
+from pathlib import Path
 
 
-    # 初始化所有dialog memory
+# =========================
+# Utils
+# =========================
 
-    memories = {
-        dialog_id:init_memory()
-        for dialog_id in data
-    }
-
-
-    # 保存结果
-
-    results = {
-        dialog_id:{
-            "turns":[]
-        }
-        for dialog_id in data
-    }
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-    # 当前所有dialog最长轮数
+def extract_case_ids(text):
+    """
+    从golden response提取案例
+    """
+    if not text:
+        return []
 
-    max_turn = max(
-        len(item["text"])
-        for item in data.values()
+    return re.findall(
+        r"KT\d+",
+        text
     )
 
 
-    for t_id in range(max_turn):
-
-        print(f"\n========== TURN {t_id} ==========")
-
-
-
-        # ==================================================
-        # 收集当前轮用户
-        # ==================================================
-
-        current_batch=[]
+def first_case(case_list):
+    if isinstance(case_list, list):
+        return case_list[0] if case_list else ""
+    return case_list
 
 
-        for dialog_id,item in data.items():
+# =========================
+# Turn Level Evaluation
+# =========================
 
-            if t_id >= len(item["text"]):
-                continue
+def evaluate_turns(data):
 
+    case_turns = []
 
-            msg=item["text"][t_id]
+    all_pred_recommend = []
+    all_gold_recommend = []
 
+    trigger_correct = []
 
-            if "用户" not in msg:
-                continue
+    top5_hit = []
+    top3_hit = []
+    top1_hit = []
 
-
-            current_batch.append(
-                {
-                    "dialog_id":dialog_id,
-                    "user":msg["用户"],
-                    "golden_response":
-                        item["text"][t_id+1]["客服"]
-                        if t_id+1<len(item["text"])
-                        else ""
-                }
-            )
+    policy_correct = []
+    case_correct = []
 
 
-        if not current_batch:
-            continue
+    for dialog_id, dialog in data.items():
 
+        for turn in dialog["turns"]:
 
-
-        # ==================================================
-        # 1. Query Batch
-        # ==================================================
-
-        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
-
-
-        query_messages=[]
-
-
-        for x in current_batch:
-
-            memory=memories[
-                x["dialog_id"]
-            ]
-
-            query_input=build_query_input(
-                memory,
-                x["user"]
-            )
-
-            query_messages.append(
-                build_messages(
-                    query_prompt,
-                    query_input
+            golden_cases = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
                 )
             )
 
 
-        query_outputs=parallel_inference(
-            query_messages
-        )
-
-
-        for x,out in zip(
-            current_batch,
-            query_outputs
-        ):
-
-            query_state=parse_json(
-                parse_json(out)["response"]
-            )
-
-            x["query"]=query_state
-
-
-            memories[
-                x["dialog_id"]
-            ]=update_issue_memory(
-                memories[x["dialog_id"]],
-                query_state
+            pred_case = first_case(
+                turn.get(
+                    "policy",
+                    {}
+                ).get(
+                    "case_id",
+                    []
+                )
             )
 
 
-
-        # ==================================================
-        # 2. Trigger Batch
-        # ==================================================
-
-        print(f"[Turn {t_id}] Trigger Batch")
-
-
-        trigger_messages=[]
-
-
-        for x in current_batch:
-
-            memory=memories[
-                x["dialog_id"]
+            evidence_cases = [
+                x.get("case_id","")
+                for x in turn.get(
+                    "evidence",
+                    []
+                )
             ]
 
 
-            trigger_messages.append(
-                build_messages(
-                    trigger_prompt,
-                    build_trigger_input(memory)
-                )
-            )
+            # 是否案例轮
+
+            is_case_turn = len(
+                golden_cases
+            ) > 0
 
 
-        trigger_outputs=parallel_inference(
-            trigger_messages
-        )
+            # =====================
+            # Case Turn
+            # =====================
+
+            if is_case_turn:
+
+                case_turns.append(turn)
 
 
-        for x,out in zip(
-            current_batch,
-            trigger_outputs
-        ):
+                # trigger
 
-            trigger_state=parse_json(
-                parse_json(out)["response"]
-            )
-
-            x["trigger"]=trigger_state
-
-
-
-        # ==================================================
-        # 3. RAG Batch
-        # ==================================================
-
-        print(f"[Turn {t_id}] RAG Batch")
-
-
-        rag_dialogs=[]
-        rag_queries=[]
-
-        rag_indices=[]
-
-
-        for idx,x in enumerate(current_batch):
-
-            if x["trigger"].get(
-                "evidence_mode"
-            )=="retrieve_new_evidence":
-
-                memory=memories[
-                    x["dialog_id"]
-                ]
-
-                rag_dialogs.append(
-                    x["user"]
-                )
-
-                rag_queries.append(
-                    memory["issue_state"]
-                    ["current_issue"]
-                )
-
-                rag_indices.append(idx)
-
-
-            else:
-
-                x["evidence"]=memories[
-                    x["dialog_id"]
-                ]["evidence_state"][
-                    "active_cases"
-                ]
-
-
-
-        if rag_dialogs:
-
-            rag_outputs=batch_zefeng_rag(
-                rag_dialogs,
-                rag_queries
-            )
-
-            for idx,e in zip(
-                rag_indices,
-                rag_outputs
-            ):
-                current_batch[idx]["evidence"]=e
-
-
-
-        for x in current_batch:
-
-            memories[
-                x["dialog_id"]
-            ]=update_evidence_memory(
-                memories[x["dialog_id"]],
-                x["trigger"],
-                x["evidence"]
-            )
-
-
-
-        # ==================================================
-        # 4. Policy Batch
-        # ==================================================
-
-        print(f"[Turn {t_id}] Policy Batch")
-
-
-        policy_messages=[]
-
-
-        for x in current_batch:
-
-            policy_messages.append(
-                build_messages(
-                    policy_prompt,
-                    build_policy_input(
-                        memories[
-                            x["dialog_id"]
-                        ]
+                trigger_correct.append(
+                    turn["trigger"].get(
+                        "trigger",
+                        False
                     )
                 )
-            )
 
 
-        policy_outputs=parallel_inference(
-            policy_messages
-        )
+                # recall@k
+
+                gold = golden_cases[0]
 
 
-        for x,out in zip(
-            current_batch,
-            policy_outputs
-        ):
+                top1_hit.append(
+                    gold in evidence_cases[:1]
+                )
 
-            policy_state=parse_json(
-                parse_json(out)["response"]
-            )
+                top3_hit.append(
+                    gold in evidence_cases[:3]
+                )
 
-            x["policy"]=policy_state
-
-
-            memories[
-                x["dialog_id"]
-            ]=update_interaction_memory(
-                memories[x["dialog_id"]],
-                policy_state
-            )
+                top5_hit.append(
+                    gold in evidence_cases[:5]
+                )
 
 
+                # policy
 
-        # ==================================================
-        # 5. Response Batch
-        # ==================================================
-
-        print(f"[Turn {t_id}] Response Batch")
-
-
-        response_messages=[]
-
-
-        for x in current_batch:
-
-            response_messages.append(
-                build_messages(
-                    response_prompt,
-                    build_response_input(
-                        memories[x["dialog_id"]],
-                        x["user"]
+                policy_correct.append(
+                    turn["policy"].get(
+                        "label"
                     )
+                    in [
+                        "ExplainedResponse",
+                        "CaseRecommendation"
+                    ]
+                )
+
+
+                # case selection
+
+                case_correct.append(
+                    pred_case == gold
+                )
+
+
+            # =====================
+            # Recommendation Timing
+            # =====================
+
+            pred_recommend = (
+                pred_case != ""
+            )
+
+
+            gold_recommend = (
+                len(golden_cases)>0
+            )
+
+
+            all_pred_recommend.append(
+                pred_recommend
+            )
+
+            all_gold_recommend.append(
+                gold_recommend
+            )
+
+
+    return {
+        "case_turn_num":len(case_turns),
+
+        "trigger_correct":trigger_correct,
+
+        "top5_hit":top5_hit,
+        "top3_hit":top3_hit,
+        "top1_hit":top1_hit,
+
+        "policy_correct":policy_correct,
+        "case_correct":case_correct,
+
+        "pred_recommend":
+            all_pred_recommend,
+
+        "gold_recommend":
+            all_gold_recommend
+    }
+
+
+
+# =========================
+# Metrics
+# =========================
+
+def mean(x):
+    return sum(x)/len(x) if x else 0
+
+
+def precision_recall_f1(
+        pred,
+        gold):
+
+    tp=sum(
+        p and g
+        for p,g in zip(pred,gold)
+    )
+
+    fp=sum(
+        p and not g
+        for p,g in zip(pred,gold)
+    )
+
+    fn=sum(
+        (not p) and g
+        for p,g in zip(pred,gold)
+    )
+
+
+    precision = (
+        tp/(tp+fp)
+        if tp+fp else 0
+    )
+
+    recall = (
+        tp/(tp+fn)
+        if tp+fn else 0
+    )
+
+    f1 = (
+        2*precision*recall/(precision+recall)
+        if precision+recall else 0
+    )
+
+    return precision, recall, f1
+
+
+
+# =========================
+# Dialogue Level
+# =========================
+
+def evaluate_dialogue(data):
+
+    success=[]
+
+    golden_turns=[]
+    pred_turns=[]
+
+
+    for dialog_id,dialog in data.items():
+
+        gold_case=set()
+
+        pred_case=set()
+
+
+        g_turn=None
+        p_turn=None
+
+
+        for turn in dialog["turns"]:
+
+            golden = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
                 )
             )
 
 
-        response_outputs=parallel_inference(
-            response_messages
+            pred = turn.get(
+                "policy",
+                {}
+            ).get(
+                "case_id",
+                []
+            )
+
+            pred=pred if isinstance(pred,list) else [pred]
+
+
+            for c in golden:
+                gold_case.add(c)
+
+                if g_turn is None:
+                    g_turn=turn["turn_id"]
+
+
+            for c in pred:
+
+                if c:
+
+                    pred_case.add(c)
+
+                    if p_turn is None:
+                        p_turn=turn["turn_id"]
+
+
+
+        success.append(
+            len(
+                gold_case & pred_case
+            )>0
         )
 
 
-        for x,out in zip(
-            current_batch,
-            response_outputs
-        ):
+        if g_turn is not None:
+            golden_turns.append(
+                g_turn
+            )
 
-            x["response"]=parse_json(
-                parse_json(out)["response"]
+        if p_turn is not None:
+            pred_turns.append(
+                p_turn
             )
 
 
-            results[
-                x["dialog_id"]
-            ]["turns"].append(
-                {
-                    "turn_id":t_id,
-                    **x,
-                }
-            )
+    return {
+        "success":mean(success),
+        "golden_turn":mean(golden_turns),
+        "pred_turn":mean(pred_turns)
+    }
 
 
-    return results
+
+# =========================
+# Main
+# =========================
+
+def main():
+
+    parser=argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input",
+        required=True
+    )
+
+    args=parser.parse_args()
+
+
+    data=load_json(
+        args.input
+    )
+
+
+    turn=evaluate_turns(data)
+
+
+    print("\n====== 案例轮评估 ======")
+
+    print(
+        f"案例轮数量: {turn['case_turn_num']}"
+    )
+
+    print(
+        f"知识链路触发率: "
+        f"{mean(turn['trigger_correct']):.4f}"
+    )
+
+
+    print(
+        f"Top-5有效案例召回率: "
+        f"{mean(turn['top5_hit']):.4f}"
+    )
+
+    print(
+        f"Top-3有效案例召回率: "
+        f"{mean(turn['top3_hit']):.4f}"
+    )
+
+    print(
+        f"Top-1有效案例召回率: "
+        f"{mean(turn['top1_hit']):.4f}"
+    )
+
+
+    print(
+        f"知识型策略命中率: "
+        f"{mean(turn['policy_correct']):.4f}"
+    )
+
+
+    print(
+        f"案例选择准确率: "
+        f"{mean(turn['case_correct']):.4f}"
+    )
+
+
+    print("\n====== 所有轮推荐时机 ======")
+
+
+    p,r,f1=precision_recall_f1(
+        turn["pred_recommend"],
+        turn["gold_recommend"]
+    )
+
+
+    print(
+        f"推荐Precision: {p:.4f}"
+    )
+
+    print(
+        f"推荐Recall: {r:.4f}"
+    )
+
+    print(
+        f"推荐F1: {f1:.4f}"
+    )
+
+
+    early=sum(
+        p and not g
+        for p,g in zip(
+            turn["pred_recommend"],
+            turn["gold_recommend"]
+        )
+    )
+
+    miss=sum(
+        (not p) and g
+        for p,g in zip(
+            turn["pred_recommend"],
+            turn["gold_recommend"]
+        )
+    )
+
+
+    print(
+        f"过早推荐率: "
+        f"{early/max(sum(turn['pred_recommend']),1):.4f}"
+    )
+
+
+    print(
+        f"漏推荐率: "
+        f"{miss/max(sum(turn['gold_recommend']),1):.4f}"
+    )
+
+
+    print("\n====== 对话级指标 ======")
+
+    dialog=evaluate_dialogue(data)
+
+
+    print(
+        f"对话成功率: "
+        f"{dialog['success']:.4f}"
+    )
+
+    print(
+        f"Golden案例首次推荐平均轮数: "
+        f"{dialog['golden_turn']:.4f}"
+    )
+
+
+    print(
+        f"Predicted案例首次推荐平均轮数: "
+        f"{dialog['pred_turn']:.4f}"
+    )
+
+
+
+if __name__=="__main__":
+    main()
