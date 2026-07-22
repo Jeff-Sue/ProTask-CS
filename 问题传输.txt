@@ -1,1 +1,10 @@
-AttributeError: Qwen2Tokenizer has no attribute all_special_tokens_extended
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.nccl.version())"
+2.7.1+cu126
+12.6
+(2, 26, 2)
+
+python -c "import transformers; print(transformers.__version__)"
+4.57.3
+
+vllm --version
+0.10.0
