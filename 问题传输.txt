@@ -1,359 +1,160 @@
-import json
-import copy
-from utils.scu_rag import batch_zefeng_rag
-from utils.qwen_api_multi import parallel_inference
-import argparse
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-# =========================
-# Utils
-# =========================
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    try:
-        return json.loads(text)
-    except:
-        return {}
-
-def prompt_read(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
-def write_json(path: str | Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-# =========================
-# Memory
-# =========================
-
-def init_memory():
-
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
+"220598545": {
+    "turns": [
+      {
+        "turn_id": 0,
+        "dialog_id": "220598545",
+        "user": "内网登陆即时通讯软件如，如微信。\n需要怎么设置。\n权限已申请。",
+        "golden_response": "现在需要登录微信嘛？",
+        "dialogue_history": "用户: 内网登陆即时通讯软件如，如微信。\n需要怎么设置。\n权限已申请。\n",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "内网登录即时通讯软件如微信需要怎么设置，权限已申请",
+          "reason": "用户提出了一个新的 IT 问题，关于在内网环境下登录即时通讯软件的设置方法。"
         },
-
-        "evidence_state": {
-            "active_cases": [],
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "not_needed",
+          "case_id": "",
+          "reason": "当前问题需要案例支持，但没有可用的 active_cases"
         },
-
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": []
+        "evidence": [
+          {
+            "case_id": "KT00001167",
+            "title": "微信无法登陆",
+            "keywords": [
+              "微信",
+              "内网登录",
+              "代理配置"
+            ],
+            "content": "温馨提示\n1. 本案例适用于在【内网使用微信客户端】时提示“网络连接失败”或“没有显示登录二维码”的问题\n2. 如果是【微信网页版无法登录】的问题，是因为微信账号安全问题，请去官网下载微信客户端\n3. 微软商店下载的微信客户端不可用，需要去微信客户端官网下载\n步骤一：确认账号权限\n确认账号权限：\n1.在内网登录微信，必须拥有“外网基础权限”及 “外部IM 权限PM-extra-IM”，请点击查看权限，查看自己账号是否有相应权限\n2.如没有对应附加权限，点击进入一键安全上网电子流页面选择“用户上网”申请下图框选的附加权限。详细操作请参考“如何申请Proxy权限”\n温馨提示：附加权限申请电子流提交后，需部门权签人/主管审批，审批后系统同步约 1-2 小时自动生效。\n步骤二：微信客户端配置代理\n1.权限生效之后，就需要配置客户端代理了，打开微信客户端，选择右上角的“设置”按钮。打开网络代理设置，点击“更多设置”，参考下图：\n2.输入地址：proxynj.huawei.com，如失败可换成：proxycn2.huawei.com\n3.输入端口：8080\n4.输入自己的域账号（带首字母）和域密码（电脑开机密码），“确定”后重新打开客户端，有二维码显示即扫描登录。\n5.若配置客户端代理，还是无法登陆或者不能显示二维码，请检查申请IM权限审批时间，审批后不是实时生效，约 1-2 小时自动生效\n【其他关联问题】\n1.微信无法上传照片，请参考：申请Proxy上传文件权限\n2.微信无法收发信息，请参考：无法访问外网\n3.需要安装微信客户端，请到官网下载；若没有权限，请参考：如何申请Proxy权限"
+          },
+          {
+            "case_id": "KT00143475",
+            "title": "如何申请Proxy-即时通讯（如微信）权限",
+            "keywords": [
+              "即时通讯权限",
+              "申请流程"
+            ],
+            "content": "即时通讯类如：微信（微信网页版除外）/QQ/飞书/阿里旺旺/腾讯TIM/蓝信/钉钉/51彩虹/58帮帮（客户端）/第一企信/嘟嘟语音/和飞信/京东咚咚/网易CC/网易泡泡/WhatsApp/Video Chat/Google Talk/iSpeak/Line/263EM/IMO/KaKaoTalk/TeamSpeak等。\n一、问题现象：\n浏览网页时出现如下提示页面\n二、解决方案：\n根据公司安全策略，访问即时通讯类，需要IM权限。\n方法一：\n若出现上图的拦截提示页面，点击拦截提示页面的“立即申请”，自动跳转到申请页面，会自动勾选上需要申请的附加权限，填写其他相关信息，点击右侧的“立即申请”。\n方法二：\n点击进入安全上网电子流页面选择“用户上网”勾选对应附加权限，填写其他相关信息，点击右侧的“立即申请”。\n【温馨提示】\n1、流程审批完，权限生效后，微信客户端需配置代理才能使用，请参考微信无法登陆\n2、查看权限有效期：应用权限管理--我的权限--安全--有效期至"
+          },
+          {
+            "case_id": "KT00269420",
+            "title": "便携机使用非标软件被icpm拦截如何处理？",
+            "keywords": [
+              "非标软件",
+              "ICPM拦截",
+              "权限申请"
+            ],
+            "content": "用户通过公司便携机（出差便携机和个人便携机）使用非标的存储类、邮箱类、即时通讯类非标软件，如微信、QQ、飞书、百度网盘等。被ICPM给拦截，出现windows弹窗和html弹窗，并且软件无法正常使用，如无法上传文件，无法发送文件、图片等。\n点击弹出的静态html页面的权限申请链接，根据使用的非标软件类型进行权限申请。\n联系主管对权限申请电子流进行审批，主管审批通过后第二天，即可正常使用非标软件。\n如果因为影响业务进展，需要立即使用非标软件，请联系ICPM的运维韦飞鹏 wx5319384、胡齐鹏 wx1119747。"
+          },
+          {
+            "case_id": "KT00297303",
+            "title": "工作需要是否可以安装即时通讯类软件？",
+            "keywords": [
+              "即时通讯软件",
+              "安装使用规范"
+            ],
+            "content": "此案例适用场景：蓝版welink、微信、钉钉、飞书、云视讯、QQ、飞鸽、阿里旺旺、skype、ICQ、ipmsg、UM、MSN、Gtalk、雅虎通等。\n工作需要与客户/供应商交流，可以安装/接入使用，信息安全方面需注意：\n1、未经授权，请勿利用即时通讯类软件共享/外传/外发公司保密信息；如因业务需要展示/传输需业务主管同意。\n2、下载使用软件必须是正版软件，不能使用盗版和破解版本。使用非标软件需用公司杀毒软件“奇安信”进行扫描（奇安信可以在IDESK---软件中搜索下载），避免软件携带病毒、木马等风险。\n3、各产品线要求使用前需填写安全软件备案link（服务类型选择“安全软件类备案申请”，软件类别选择“即时通讯”）申请流程并跟踪审批。\n温馨提示：\n1、建议在官网下载使用；\n1）如果是部门自己开发的软件，请找部门开发支持或者在3MS首页网站搜索解决方案。\n2）如果是华为研发工具云网站下载的软件，可以在网站上搜索该软件，查看软件的负责人/运维支持联系处理。\n3）如果非标软件是在外网上下载的，请在外网搜索解决方案。\n2、 可能涉及license或Proxy权限申请（“Proxy例外申请”LINK：权限申请——应用角色权限：选择“安全”——“安全上网服务”——“外部IM权限”），此问题非信息安全类问题，可咨询IT热线：075585012345，他们将给予专业全面的解答。"
+          },
+          {
+            "case_id": "KT00407310",
+            "title": "安全上网问题咨询合集",
+            "keywords": [
+              "安全上网",
+              "权限申请",
+              "Proxy配置"
+            ],
+            "content": "当前安全上网问题可以分为如下几类，请根据您的需要自行查看相关问题\n（当前用户求助问题较多，为了节约您的时间，请优先自助处理）\n权限说明及基础权限申请\n1、什么是透明代理（Proxy）\n2、Proxy不同权限的区别说明\n3、如何申请Proxy基础权限\n4、如何查询自己的Proxy权限\n5、如何配置Proxy\n6、linux如何配置proxy访问外网\n7、外协员工上外网相关事项说明\n申请例外权限\n1、如何开通和配置OpenProxy\n2、申请上传文件权限\n3、申请即时通讯权限-如微信\n4、申请Proxy白名单【白名单分类说明】\n5、服务器申请上网\n6、申请超大文件上传权限\n7、申请Proxy 全局白名单\n8、申请多协议上网\n9、申请SSL白名单\n无法访问外网\n1、无法访问外网\n2、微信无法登录【微信无法发送或接收图片】\n3、浏览外网时提示“该网站上传文件受限”\n4、spes“一键上外网”无法开启，提示环境检测不通过\n5、浏览外网时提示“您没有访问网络邮件（mail）权限”\n6、下载软件时提示没有权限\n7、Outlook下载发票提示无网络邮件权限\n常见问题\n1、如何延期/删除（销户）Proxy账号权限\n2、Proxy访问Internet速度慢\n3、常见工具访问外网汇总\n4、谷歌浏览器无法登录\n5、百度网盘设置代理\n6、公司全球各站点代理服务器\n7、Proxy地址申请书写规范"
+          }
+        ],
+        "policy": {
+          "label": "ExplainedResponse",
+          "case_id": [
+            "KT00001167"
+          ],
+          "reason": "用户问题明确，且已有匹配案例提供详细设置步骤"
+        },
+        "response": {
+          "response": "根据您的描述，您已申请了相关权限，接下来需要进行微信客户端的代理配置。具体步骤如下：\n\n1. 打开微信客户端，选择右上角的“设置”按钮。\n2. 打开网络代理设置，点击“更多设置”。\n3. 输入地址：proxynj.huawei.com，如失败可换成：proxycn2.huawei.com。\n4. 输入端口：8080。\n5. 输入自己的域账号（带首字母）和域密码（电脑开机密码），点击“确定”后重新打开客户端。\n6. 若仍然无法登录或没有显示二维码，请确认权限审批是否已经生效，通常审批后约需1-2小时自动生效。\n\n如果还有问题，可以参考案例【KT00001167】《微信无法登陆》中的其他关联问题部分。"
         }
-    }
-
-
-# =========================
-# Memory Update
-# =========================
-
-def update_issue_memory(memory, query_state):
-
-    mode = query_state.get(
-        "query_mode",
-        "none"
-    )
-    query = query_state.get(
-        "query_text",
-        ""
-    )
-
-    # 新问题
-    if mode == "rewrite":
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-
-    # 同一问题补充信息
-    elif mode == "refine":
-
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-
-    # 沿用，不修改
-    elif mode == "reuse":
-        pass
-
-
-    # 无问题，不修改
-    elif mode == "none":
-        pass
-
-    return memory
-
-
-def update_evidence_memory(
-        memory,
-        trigger_state,
-        evidence):
-
-    mode = trigger_state.get(
-        "evidence_mode",
-        "no_evidence_needed"
-    )
-
-    # 新检索结果覆盖旧 evidence
-    if mode == "retrieve_new_evidence":
-
-        memory["evidence_state"][
-            "active_cases"
-        ] = evidence
-
-    # reuse / none 都保持
-    return memory
-
-
-def update_interaction_memory(
-        memory,
-        policy_state):
-
-    label = policy_state.get(
-        "label",
-        ""
-    )
-
-    memory["interaction_state"][
-        "last_action"
-    ] = label
-
-    memory["interaction_state"][
-        "action_history"
-    ].append(label)
-
-    # stage transition
-    if label in [
-        "AskMissingSlot",
-        "AskClarification"
-    ]:
-
-        memory["interaction_state"][
-            "stage"
-        ] = "Clarification"
-
-    elif label in [
-        "ExplainedResponse",
-        "CaseRecommendation"
-    ]:
-        memory["interaction_state"][
-            "stage"
-        ] = "Resolution"
-
-    elif label == "Handoff":
-        memory["interaction_state"][
-            "stage"
-        ] = "End"
-
-    # ProcessAcknowledgement:
-    # 不改变stage
-
-    return memory
-
-
-# =========================
-# Prompt Input Builder
-# =========================
-
-def build_messages(system_prompt, data):
-    return [
-        {
-            "role": "system",
-            "content": system_prompt
+      },
+      {
+        "turn_id": 1,
+        "dialog_id": "220598545",
+        "user": "是的。",
+        "golden_response": "[案例链接: KT00001167]。\n这个是登录微信的流程。\n您这边可以打开链接嘛？",
+        "dialogue_history": "用户: 内网登陆即时通讯软件如，如微信。\n需要怎么设置。\n权限已申请。\n客服: 现在需要登录微信嘛？\n用户: 是的。\n",
+        "query": {
+          "query_mode": "reuse",
+          "query_text": "内网登录即时通讯软件如微信需要怎么设置，权限已申请",
+          "reason": "用户确认当前问题，未提供新信息"
         },
-        {
-            "role": "user",
-            "content": json.dumps(
-                data,
-                ensure_ascii=False
-            )
+        "trigger": {
+          "trigger": false,
+          "evidence_mode": "reuse_existing_evidence",
+          "evidence_status": "sufficient",
+          "case_id": "KT00001167",
+          "reason": "当前问题与案例 KT00001167 匹配，内容包含内网登录微信的权限确认和代理配置步骤，能够支持后续处理。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00001167",
+            "title": "微信无法登陆",
+            "keywords": [
+              "微信",
+              "内网登录",
+              "代理配置"
+            ],
+            "content": "温馨提示\n1. 本案例适用于在【内网使用微信客户端】时提示“网络连接失败”或“没有显示登录二维码”的问题\n2. 如果是【微信网页版无法登录】的问题，是因为微信账号安全问题，请去官网下载微信客户端\n3. 微软商店下载的微信客户端不可用，需要去微信客户端官网下载\n步骤一：确认账号权限\n确认账号权限：\n1.在内网登录微信，必须拥有“外网基础权限”及 “外部IM 权限PM-extra-IM”，请点击查看权限，查看自己账号是否有相应权限\n2.如没有对应附加权限，点击进入一键安全上网电子流页面选择“用户上网”申请下图框选的附加权限。详细操作请参考“如何申请Proxy权限”\n温馨提示：附加权限申请电子流提交后，需部门权签人/主管审批，审批后系统同步约 1-2 小时自动生效。\n步骤二：微信客户端配置代理\n1.权限生效之后，就需要配置客户端代理了，打开微信客户端，选择右上角的“设置”按钮。打开网络代理设置，点击“更多设置”，参考下图：\n2.输入地址：proxynj.huawei.com，如失败可换成：proxycn2.huawei.com\n3.输入端口：8080\n4.输入自己的域账号（带首字母）和域密码（电脑开机密码），“确定”后重新打开客户端，有二维码显示即扫描登录。\n5.若配置客户端代理，还是无法登陆或者不能显示二维码，请检查申请IM权限审批时间，审批后不是实时生效，约 1-2 小时自动生效\n【其他关联问题】\n1.微信无法上传照片，请参考：申请Proxy上传文件权限\n2.微信无法收发信息，请参考：无法访问外网\n3.需要安装微信客户端，请到官网下载；若没有权限，请参考：如何申请Proxy权限"
+          },
+          {
+            "case_id": "KT00143475",
+            "title": "如何申请Proxy-即时通讯（如微信）权限",
+            "keywords": [
+              "即时通讯权限",
+              "申请流程"
+            ],
+            "content": "即时通讯类如：微信（微信网页版除外）/QQ/飞书/阿里旺旺/腾讯TIM/蓝信/钉钉/51彩虹/58帮帮（客户端）/第一企信/嘟嘟语音/和飞信/京东咚咚/网易CC/网易泡泡/WhatsApp/Video Chat/Google Talk/iSpeak/Line/263EM/IMO/KaKaoTalk/TeamSpeak等。\n一、问题现象：\n浏览网页时出现如下提示页面\n二、解决方案：\n根据公司安全策略，访问即时通讯类，需要IM权限。\n方法一：\n若出现上图的拦截提示页面，点击拦截提示页面的“立即申请”，自动跳转到申请页面，会自动勾选上需要申请的附加权限，填写其他相关信息，点击右侧的“立即申请”。\n方法二：\n点击进入安全上网电子流页面选择“用户上网”勾选对应附加权限，填写其他相关信息，点击右侧的“立即申请”。\n【温馨提示】\n1、流程审批完，权限生效后，微信客户端需配置代理才能使用，请参考微信无法登陆\n2、查看权限有效期：应用权限管理--我的权限--安全--有效期至"
+          },
+          {
+            "case_id": "KT00269420",
+            "title": "便携机使用非标软件被icpm拦截如何处理？",
+            "keywords": [
+              "非标软件",
+              "ICPM拦截",
+              "权限申请"
+            ],
+            "content": "用户通过公司便携机（出差便携机和个人便携机）使用非标的存储类、邮箱类、即时通讯类非标软件，如微信、QQ、飞书、百度网盘等。被ICPM给拦截，出现windows弹窗和html弹窗，并且软件无法正常使用，如无法上传文件，无法发送文件、图片等。\n点击弹出的静态html页面的权限申请链接，根据使用的非标软件类型进行权限申请。\n联系主管对权限申请电子流进行审批，主管审批通过后第二天，即可正常使用非标软件。\n如果因为影响业务进展，需要立即使用非标软件，请联系ICPM的运维韦飞鹏 wx5319384、胡齐鹏 wx1119747。"
+          },
+          {
+            "case_id": "KT00297303",
+            "title": "工作需要是否可以安装即时通讯类软件？",
+            "keywords": [
+              "即时通讯软件",
+              "安装使用规范"
+            ],
+            "content": "此案例适用场景：蓝版welink、微信、钉钉、飞书、云视讯、QQ、飞鸽、阿里旺旺、skype、ICQ、ipmsg、UM、MSN、Gtalk、雅虎通等。\n工作需要与客户/供应商交流，可以安装/接入使用，信息安全方面需注意：\n1、未经授权，请勿利用即时通讯类软件共享/外传/外发公司保密信息；如因业务需要展示/传输需业务主管同意。\n2、下载使用软件必须是正版软件，不能使用盗版和破解版本。使用非标软件需用公司杀毒软件“奇安信”进行扫描（奇安信可以在IDESK---软件中搜索下载），避免软件携带病毒、木马等风险。\n3、各产品线要求使用前需填写安全软件备案link（服务类型选择“安全软件类备案申请”，软件类别选择“即时通讯”）申请流程并跟踪审批。\n温馨提示：\n1、建议在官网下载使用；\n1）如果是部门自己开发的软件，请找部门开发支持或者在3MS首页网站搜索解决方案。\n2）如果是华为研发工具云网站下载的软件，可以在网站上搜索该软件，查看软件的负责人/运维支持联系处理。\n3）如果非标软件是在外网上下载的，请在外网搜索解决方案。\n2、 可能涉及license或Proxy权限申请（“Proxy例外申请”LINK：权限申请——应用角色权限：选择“安全”——“安全上网服务”——“外部IM权限”），此问题非信息安全类问题，可咨询IT热线：075585012345，他们将给予专业全面的解答。"
+          },
+          {
+            "case_id": "KT00407310",
+            "title": "安全上网问题咨询合集",
+            "keywords": [
+              "安全上网",
+              "权限申请",
+              "Proxy配置"
+            ],
+            "content": "当前安全上网问题可以分为如下几类，请根据您的需要自行查看相关问题\n（当前用户求助问题较多，为了节约您的时间，请优先自助处理）\n权限说明及基础权限申请\n1、什么是透明代理（Proxy）\n2、Proxy不同权限的区别说明\n3、如何申请Proxy基础权限\n4、如何查询自己的Proxy权限\n5、如何配置Proxy\n6、linux如何配置proxy访问外网\n7、外协员工上外网相关事项说明\n申请例外权限\n1、如何开通和配置OpenProxy\n2、申请上传文件权限\n3、申请即时通讯权限-如微信\n4、申请Proxy白名单【白名单分类说明】\n5、服务器申请上网\n6、申请超大文件上传权限\n7、申请Proxy 全局白名单\n8、申请多协议上网\n9、申请SSL白名单\n无法访问外网\n1、无法访问外网\n2、微信无法登录【微信无法发送或接收图片】\n3、浏览外网时提示“该网站上传文件受限”\n4、spes“一键上外网”无法开启，提示环境检测不通过\n5、浏览外网时提示“您没有访问网络邮件（mail）权限”\n6、下载软件时提示没有权限\n7、Outlook下载发票提示无网络邮件权限\n常见问题\n1、如何延期/删除（销户）Proxy账号权限\n2、Proxy访问Internet速度慢\n3、常见工具访问外网汇总\n4、谷歌浏览器无法登录\n5、百度网盘设置代理\n6、公司全球各站点代理服务器\n7、Proxy地址申请书写规范"
+          }
+        ],
+        "policy": {
+          "label": "ProcessAcknowledgement",
+          "case_id": [],
+          "reason": "用户确认了当前问题状态，无需进一步操作或提问"
+        },
+        "response": {
+          "response": "明白了，您确认权限已经申请。接下来您可以参考相关案例中的步骤进行微信客户端的代理配置，如有其他问题或需要进一步帮助，请随时告知！"
         }
+      }
     ]
-
-
-def build_query_input(memory, user):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "current":{
-            "u": user
-        }
-    }
-
-
-def build_trigger_input(memory):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"]
-    }
-
-
-
-def build_policy_input(memory):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"],
-        "interaction_state":
-            memory["interaction_state"]
-    }
-
-
-def build_response_input(
-        memory,
-        user
-        ):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"],
-        "interaction_state":
-            memory["interaction_state"],
-        "current":{
-            "u":user
-        },
-    }
-
-
-# =========================
-# Main
-# =========================
-def run_memory_agent(data):
-    query_prompt = prompt_read(Path("prompts/query.prompt"))
-    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
-    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
-    response_prompt = prompt_read(Path("prompts/response.prompt"))
-    results = {}
-    for dialog_id, item in data.items():
-        memory = init_memory()
-        turns = []
-        dialogue_history = ""
-        for t_id, msg in enumerate(item["text"]):
-            if "用户" not in msg:
-                dialogue_history += f"客服: {msg['客服']}\n"
-                continue
-            user = msg["用户"]
-            dialogue_history += f"用户: {msg['用户']}\n"
-            # =====================
-            # 1 Query
-            # =====================
-            query_input = build_query_input(memory, user)
-            query_messages = build_messages(query_prompt, query_input)
-            query_output = parallel_inference([query_messages])[0]
-            query_state = parse_json(parse_json(query_output)['response'])
-
-            memory = update_issue_memory(
-                memory,
-                query_state
-            )
-
-            # =====================
-            # 2 Trigger
-            # =====================
-            trigger_input = build_trigger_input(memory)
-            trigger_messages = build_messages(trigger_prompt, trigger_input)
-            trigger_output = parallel_inference([trigger_messages])[0]
-            trigger_state = parse_json(parse_json(trigger_output)['response'])
-
-            # =====================
-            # 3 Evidence
-            # =====================
-
-            if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-                query = memory["issue_state"]["current_issue"]
-                evidence = batch_zefeng_rag([dialogue_history],[query])[0]
-            else:
-                evidence = memory["evidence_state"]["active_cases"]
-            memory = update_evidence_memory(memory, trigger_state, evidence)
-
-            # =====================
-            # 4 Policy
-            # =====================
-            policy_input = build_policy_input(memory)
-            policy_messages = build_messages(policy_prompt, policy_input)
-            policy_output = parallel_inference([policy_messages])[0]
-            policy_state = parse_json(parse_json(policy_output)['response'])
-
-            memory = update_interaction_memory(
-                memory,
-                policy_state
-            )
-
-            # =====================
-            # 5 Response
-            # =====================
-            response_input = build_response_input(memory, user)
-            response_messages = build_messages(response_prompt, response_input)
-            response_output = parallel_inference([response_messages])[0]
-            response = parse_json(parse_json(response_output)['response'])
-
-            turns.append(
-                {
-                    "turn_id": t_id,
-                    "user": user,
-                    "query":
-                        query_state,
-                    "trigger":
-                        trigger_state,
-                    "evidence":
-                        evidence,
-                    "policy":
-                        policy_state,
-                    "response":
-                        response,
-                    "golden_response":
-                        item["text"][t_id+1]["客服"],
-                    # "memory":
-                    #     copy.deepcopy(memory)
-                }
-            )
-
-        results[dialog_id] = {
-            "turns": turns,
-            "final_memory": memory
-        }
-    return results
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_path", required=True)
-
-    args = parser.parse_args()
-
-    with open(args.data_path, 'r', encoding="utf-8") as f:
-        data = json.load(f)
-
-    data = dict(list(data.items())[:10])
-
-    outputs = run_memory_agent(data)
-    write_json(args.output_path, outputs)
-
-    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
-
-
-if __name__ == "__main__":
-    main()
+  },
