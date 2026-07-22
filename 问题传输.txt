@@ -1,3 +1,1 @@
-2.7.1+cu126
-12.6
-(2, 26, 2)
+NVIDIA-SMI 525.147.05   Driver Version: 525.147.05   CUDA Version: 12.0
