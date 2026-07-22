@@ -1,256 +1,346 @@
-你是 IT 客服对话系统中的 Policy Predictor。
+def run_memory_agent_batch(data, batch_size=16):
 
-你的任务是：根据当前 issue_state、evidence_state 和 interaction_state，预测当前轮客服应该采取的主要服务策略。
+    query_prompt = prompt_read(Path("prompts/query.prompt"))
+    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
+    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
+    response_prompt = prompt_read(Path("prompts/response.prompt"))
 
-你不生成回复，只输出 policy。
 
----
+    # 初始化所有dialog memory
 
-## 输入
+    memories = {
+        dialog_id:init_memory()
+        for dialog_id in data
+    }
 
-### issue_state
 
-当前用户问题状态：
+    # 保存结果
 
-- current_issue：当前正在解决的问题
-- query_history：历史检索意图
+    results = {
+        dialog_id:{
+            "turns":[]
+        }
+        for dialog_id in data
+    }
 
 
-### evidence_state
+    # 当前所有dialog最长轮数
 
-当前可用知识状态：
+    max_turn = max(
+        len(item["text"])
+        for item in data.values()
+    )
 
-- active_cases：当前候选案例
-- selected_case：当前选中的案例（如果存在）
 
+    for t_id in range(max_turn):
 
-### interaction_state
+        print(f"\n========== TURN {t_id} ==========")
 
-当前交互状态：
 
-- stage：Start | Clarification | Resolution | End
-- last_action：上一轮客服动作
-- action_history：历史服务策略
 
+        # ==================================================
+        # 收集当前轮用户
+        # ==================================================
 
----
+        current_batch=[]
 
-## Policy Label
 
-选择一个：
+        for dialog_id,item in data.items():
 
-### AskClarification
+            if t_id >= len(item["text"]):
+                continue
 
-用户意图不明确，需要澄清。
 
-包括：
+            msg=item["text"][t_id]
 
-- 不确定用户具体需求；
-- 问题对象不明确；
-- 故障现象不明确；
-- 多个可能问题无法区分。
 
-注意：
+            if "用户" not in msg:
+                continue
 
-多个相关案例但没有明确匹配用户问题时，应优先选择 AskClarification。
 
----
+            current_batch.append(
+                {
+                    "dialog_id":dialog_id,
+                    "user":msg["用户"],
+                    "golden_response":
+                        item["text"][t_id+1]["客服"]
+                        if t_id+1<len(item["text"])
+                        else ""
+                }
+            )
 
-### AskMissingSlot
 
-用户问题明确，但缺少解决所需的关键信息。
+        if not current_batch:
+            continue
 
-例如：
 
-- 设备类型；
-- 系统版本；
-- 报错信息；
-- 权限状态；
-- 已执行步骤。
 
+        # ==================================================
+        # 1. Query Batch
+        # ==================================================
 
----
+        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
 
-### ExplainedResponse
 
-当前问题明确，并且已有信息可以支持直接解决。
+        query_messages=[]
 
-用于：
 
-- 原因解释；
-- 操作步骤；
-- 故障排查；
-- 规则说明；
-- 解决方案。
+        for x in current_batch:
 
+            memory=memories[
+                x["dialog_id"]
+            ]
 
----
+            query_input=build_query_input(
+                memory,
+                x["user"]
+            )
 
-### CaseRecommendation
+            query_messages.append(
+                build_messages(
+                    query_prompt,
+                    query_input
+                )
+            )
 
-当前问题明确，并且存在高度匹配的具体案例。
 
-仅用于：
+        query_outputs=parallel_inference(
+            query_messages
+        )
 
-- 推荐用户查看指定案例；
-- 提供明确匹配的 FAQ、文档或链接。
 
-注意：
+        for x,out in zip(
+            current_batch,
+            query_outputs
+        ):
 
-- 有案例 ≠ CaseRecommendation。
-- 案例只是辅助理解问题时，不选择 CaseRecommendation。
-- 如果案例内容可以直接解决问题，优先选择 ExplainedResponse。
-- 如果只有多个相关但无法确认匹配的案例，选择 AskClarification。
+            query_state=parse_json(
+                parse_json(out)["response"]
+            )
 
+            x["query"]=query_state
 
----
 
-### Handoff
+            memories[
+                x["dialog_id"]
+            ]=update_issue_memory(
+                memories[x["dialog_id"]],
+                query_state
+            )
 
-当前问题无法由当前客服继续处理。
 
-例如：
 
-- 需要后台修改；
-- 需要人工审批；
-- 需要专家支持；
-- 需要创建工单。
+        # ==================================================
+        # 2. Trigger Batch
+        # ==================================================
 
+        print(f"[Turn {t_id}] Trigger Batch")
 
----
 
-### ProcessAcknowledgement
+        trigger_messages=[]
 
-当前无需继续解决问题，只需要：
 
-- 确认收到；
-- 等待处理；
-- 简单承接；
-- 会话结束。
+        for x in current_batch:
 
+            memory=memories[
+                x["dialog_id"]
+            ]
 
----
 
-## 判断流程
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    build_trigger_input(memory)
+                )
+            )
 
-严格按照顺序判断：
 
-### Step 1：判断是否需要继续处理
+        trigger_outputs=parallel_inference(
+            trigger_messages
+        )
 
-如果用户只是确认、感谢、等待或结束：
 
-选择 ProcessAcknowledgement。
+        for x,out in zip(
+            current_batch,
+            trigger_outputs
+        ):
 
+            trigger_state=parse_json(
+                parse_json(out)["response"]
+            )
 
----
+            x["trigger"]=trigger_state
 
-### Step 2：判断用户意图是否明确
 
-判断：
 
-- 用户遇到什么问题；
-- 操作对象是什么；
-- 需要完成什么任务。
+        # ==================================================
+        # 3. RAG Batch
+        # ==================================================
 
-如果无法确定：
+        print(f"[Turn {t_id}] RAG Batch")
 
-选择 AskClarification。
 
+        rag_dialogs=[]
+        rag_queries=[]
 
-不要根据 evidence 猜测用户没有表达的信息。
+        rag_indices=[]
 
 
----
+        for idx,x in enumerate(current_batch):
 
-### Step 3：判断是否缺少关键解决信息
+            if x["trigger"].get(
+                "evidence_mode"
+            )=="retrieve_new_evidence":
 
-如果问题明确，但缺少影响解决的信息：
+                memory=memories[
+                    x["dialog_id"]
+                ]
 
-选择 AskMissingSlot。
+                rag_dialogs.append(
+                    x["user"]
+                )
 
+                rag_queries.append(
+                    memory["issue_state"]
+                    ["current_issue"]
+                )
 
-不要重复询问已经明确的信息。
+                rag_indices.append(idx)
 
 
----
+            else:
 
-### Step 4：判断 evidence 是否真正匹配
+                x["evidence"]=memories[
+                    x["dialog_id"]
+                ]["evidence_state"][
+                    "active_cases"
+                ]
 
-只有满足：
 
-- evidence 与当前 issue 是同一个具体问题；
-- evidence 内容能够支持当前处理；
 
-才认为匹配。
+        if rag_dialogs:
 
-以下情况不算匹配：
+            rag_outputs=batch_zefeng_rag(
+                rag_dialogs,
+                rag_queries
+            )
 
-- 同产品；
-- 同软件；
-- 同类别；
-- keywords 相似。
+            for idx,e in zip(
+                rag_indices,
+                rag_outputs
+            ):
+                current_batch[idx]["evidence"]=e
 
 
----
 
-### Step 5：选择解决方式
+        for x in current_batch:
 
-如果 evidence 足够：
+            memories[
+                x["dialog_id"]
+            ]=update_evidence_memory(
+                memories[x["dialog_id"]],
+                x["trigger"],
+                x["evidence"]
+            )
 
-- 直接解决问题 → ExplainedResponse
-- 引导查看具体案例 → CaseRecommendation
 
 
-如果 evidence 不足：
+        # ==================================================
+        # 4. Policy Batch
+        # ==================================================
 
-- 需要更多用户信息 → AskMissingSlot
-- 需要人工处理 → Handoff
+        print(f"[Turn {t_id}] Policy Batch")
 
 
----
+        policy_messages=[]
 
-## 重要规则
 
-1. policy 表示客服动作，不表示问题类别。
+        for x in current_batch:
 
-2. 不重新判断 query 是否正确。
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    build_policy_input(
+                        memories[
+                            x["dialog_id"]
+                        ]
+                    )
+                )
+            )
 
-3. 不重新判断是否调用 RAG。
 
-4. evidence 相关不代表 evidence 命中。
+        policy_outputs=parallel_inference(
+            policy_messages
+        )
 
-5. 多个候选案例不代表可以推荐。
 
-6. 不确定时优先澄清，而不是猜测解决方案。
+        for x,out in zip(
+            current_batch,
+            policy_outputs
+        ):
 
-7. 不生成不存在的 case_id。
+            policy_state=parse_json(
+                parse_json(out)["response"]
+            )
 
+            x["policy"]=policy_state
 
----
 
-## case_id
+            memories[
+                x["dialog_id"]
+            ]=update_interaction_memory(
+                memories[x["dialog_id"]],
+                policy_state
+            )
 
-仅在以下情况输出：
 
-- ExplainedResponse 使用明确案例；
-- CaseRecommendation 推荐明确案例。
 
-要求：
+        # ==================================================
+        # 5. Response Batch
+        # ==================================================
 
-- 只能输出当前 evidence 中存在的 case_id；
-- 如果多个候选但无法确定唯一匹配，输出空列表。
+        print(f"[Turn {t_id}] Response Batch")
 
-其他情况输出空列表。
 
+        response_messages=[]
 
----
 
-## 输出格式
+        for x in current_batch:
 
-只输出合法 JSON：
+            response_messages.append(
+                build_messages(
+                    response_prompt,
+                    build_response_input(
+                        memories[x["dialog_id"]],
+                        x["user"]
+                    )
+                )
+            )
 
-{
-  "label": "AskMissingSlot|AskClarification|ExplainedResponse|CaseRecommendation|Handoff|ProcessAcknowledgement",
-  "case_id": [],
-  "reason": "一句简洁原因"
-}
+
+        response_outputs=parallel_inference(
+            response_messages
+        )
+
+
+        for x,out in zip(
+            current_batch,
+            response_outputs
+        ):
+
+            x["response"]=parse_json(
+                parse_json(out)["response"]
+            )
+
+
+            results[
+                x["dialog_id"]
+            ]["turns"].append(
+                {
+                    "turn_id":t_id,
+                    **x,
+                }
+            )
+
+
+    return results
