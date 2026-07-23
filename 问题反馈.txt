@@ -1,71 +1,892 @@
-你是 IT 客服多轮对话系统中的 History Recollection Module。
+from __future__ import annotations
 
-你的任务是：根据完整对话历史和当前用户表达，从历史中找出所有与当前问题相关、且可能影响后续检索、策略判断或回复生成的信息。
+import argparse
+import copy
+import json
+from pathlib import Path
+from typing import Any, Dict, List
 
-你不回答用户问题，不生成客服回复，也不生成最终 Dialogue State。
+from utils.qwen_api_multi import parallel_inference
+from utils.scu_rag import batch_zefeng_rag
 
-⸻
 
-输入
+# ============================================================
+# Utils
+# ============================================================
 
-dialogue_history
+def parse_json(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
 
-截至当前用户表达为止的完整对话历史。
+    if not isinstance(value, str):
+        return {}
 
-current_user
+    try:
+        result = json.loads(value)
+        return result if isinstance(result, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
-当前用户表达。
 
-previous_state
+def unwrap_model_response(output: Any) -> Any:
+    if isinstance(output, dict):
+        for key in (
+            "response",
+            "text",
+            "content",
+            "output",
+        ):
+            if key in output:
+                return output[key]
 
-上一轮生成的 Dialogue-induced State。
+    return output
 
-previous_state 可能包含错误、遗漏或已经失效的信息，只能作为辅助参考，不能直接复制。
 
-⸻
+def parse_model_json(output: Any) -> Dict[str, Any]:
+    return parse_json(
+        unwrap_model_response(output)
+    )
 
-需要回忆的信息
 
-仅保留与当前问题相关的内容，包括：
+def parse_model_text(output: Any) -> str:
+    value = unwrap_model_response(output)
 
-1. 用户之前描述的问题、目标和诉求；
-2. 用户已经提供的设备、系统、软件、账号、网络和使用环境；
-3. 用户已经观察到的报错、异常和具体症状；
-4. 客服此前提出的问题；
-5. 用户对这些问题的回答；
-6. 已经尝试过的操作、方法或解决方案；
-7. 每项操作对应的结果和用户反馈；
-8. 已经使用、解释或推荐过的案例与知识；
-9. 尚未确认但会影响问题解决的信息；
-10. 当前问题是否发生过切换、补充、回退或重新开启。
+    if isinstance(value, str):
+        parsed = parse_json(value)
 
-⸻
+        if parsed:
+            for key in (
+                "response",
+                "text",
+                "content",
+                "answer",
+            ):
+                if key in parsed:
+                    return str(
+                        parsed[key]
+                    ).strip()
 
-判断原则
+        return value.strip()
 
-* 只选择与当前用户表达相关的信息；
-* 不要完整复制对话；
-* 不要保留寒暄、礼貌用语和无关内容；
-* 不要根据常识补充用户没有说过的信息；
-* 对话中的明确事实优先于 previous_state；
-* 新信息与旧信息冲突时，保留最新信息并指出旧信息已失效；
-* 如果当前用户切换到了新问题，不要继续保留旧问题的大量细节；
-* 如果旧问题仍会影响当前问题，可以保留必要联系；
-* 每条信息都应能在对话历史中找到依据。
+    return str(value) if value is not None else ""
 
-⸻
 
-输出格式
+def prompt_read(path: str | Path) -> str:
+    path = Path(path)
 
-只输出合法 JSON：
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}"
+        )
 
-{
-“relevant_history”: [
-{
-“information”: “相关历史信息”,
-“source”: “user | assistant”,
-“status”: “active | confirmed | rejected | unresolved”
-}
-],
-“topic_relation”: “continue | refine | revisit | switch | unclear”
-}
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
+
+
+def write_json(
+    path: str | Path,
+    data: Any,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def build_messages(
+    system_prompt: str,
+    payload: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+
+# ============================================================
+# Schema Memory
+# ============================================================
+
+def init_schema_state(
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
+    state = {}
+
+    for field in schema.get("fields", []):
+        state[field["name"]] = copy.deepcopy(
+            field.get("default_value")
+        )
+
+    return state
+
+
+def init_memory(
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "issue_state": {
+            "current_issue": "",
+            "query_history": [],
+        },
+        "dialog_state": {
+            "schema_state": (
+                init_schema_state(schema)
+            ),
+        },
+        "evidence_state": {
+            "active_cases": [],
+        },
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": [],
+        },
+    }
+
+
+def validate_schema_state(
+    predicted_state: Dict[str, Any],
+    schema: Dict[str, Any],
+    previous_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    validated_state = {}
+
+    for field in schema.get("fields", []):
+        field_name = field["name"]
+
+        if field_name in predicted_state:
+            value = predicted_state[field_name]
+
+        elif field_name in previous_state:
+            value = copy.deepcopy(
+                previous_state[field_name]
+            )
+
+        else:
+            value = copy.deepcopy(
+                field.get("default_value")
+            )
+
+        validated_state[field_name] = value
+
+    return validated_state
+
+
+def update_schema_memory(
+    memory: Dict[str, Any],
+    tracking_output: Dict[str, Any],
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
+    predicted_state = tracking_output.get(
+        "schema_state",
+        {},
+    )
+
+    if not isinstance(predicted_state, dict):
+        predicted_state = {}
+
+    previous_state = memory[
+        "dialog_state"
+    ]["schema_state"]
+
+    memory["dialog_state"][
+        "schema_state"
+    ] = validate_schema_state(
+        predicted_state=predicted_state,
+        schema=schema,
+        previous_state=previous_state,
+    )
+
+    return memory
+
+
+# ============================================================
+# Existing State Updates
+# ============================================================
+
+def update_issue_memory(
+    memory: Dict[str, Any],
+    query_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+    query = str(
+        query_state.get("query_text", "")
+    ).strip()
+
+    if mode in {"rewrite", "refine"} and query:
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        history = memory[
+            "issue_state"
+        ]["query_history"]
+
+        if not history or history[-1] != query:
+            history.append(query)
+
+    return memory
+
+
+def update_evidence_memory(
+    memory: Dict[str, Any],
+    trigger_state: Dict[str, Any],
+    evidence: Any,
+) -> Dict[str, Any]:
+    if (
+        trigger_state.get("evidence_mode")
+        == "retrieve_new_evidence"
+    ):
+        memory["evidence_state"][
+            "active_cases"
+        ] = evidence or []
+
+    return memory
+
+
+def update_interaction_memory(
+    memory: Dict[str, Any],
+    policy_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    label = str(
+        policy_state.get("label", "")
+    ).strip()
+
+    if not label:
+        return memory
+
+    interaction_state = memory[
+        "interaction_state"
+    ]
+
+    interaction_state["last_action"] = label
+    interaction_state[
+        "action_history"
+    ].append(label)
+
+    if label in {
+        "AskMissingSlot",
+        "AskClarification",
+    }:
+        interaction_state["stage"] = (
+            "Clarification"
+        )
+
+    elif label in {
+        "ExplainedResponse",
+        "CaseRecommendation",
+    }:
+        interaction_state["stage"] = (
+            "Resolution"
+        )
+
+    elif label == "Handoff":
+        interaction_state["stage"] = "End"
+
+    return memory
+
+
+# ============================================================
+# Input Builders
+# ============================================================
+
+def build_query_input(
+    memory: Dict[str, Any],
+    user: str,
+) -> Dict[str, Any]:
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {
+            "u": user,
+        },
+    }
+
+
+def build_schema_tracking_input(
+    memory: Dict[str, Any],
+    schema: Dict[str, Any],
+    dialogue_history: str,
+    user: str,
+) -> Dict[str, Any]:
+    return {
+        "schema": schema,
+        "previous_state": memory[
+            "dialog_state"
+        ]["schema_state"],
+        "dialogue_history": (
+            dialogue_history
+        ),
+        "current_user": user,
+        "current_issue": memory[
+            "issue_state"
+        ]["current_issue"],
+    }
+
+
+def build_trigger_input(
+    memory: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "evidence_state": (
+            memory["evidence_state"]
+        ),
+    }
+
+
+def build_policy_input(
+    memory: Dict[str, Any],
+    user: str,
+) -> Dict[str, Any]:
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "evidence_state": (
+            memory["evidence_state"]
+        ),
+        "interaction_state": (
+            memory["interaction_state"]
+        ),
+        "current": {
+            "u": user,
+        },
+    }
+
+
+def build_response_input(
+    memory: Dict[str, Any],
+    user: str,
+    policy_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "evidence_state": (
+            memory["evidence_state"]
+        ),
+        "interaction_state": (
+            memory["interaction_state"]
+        ),
+        "current": {
+            "u": user,
+            "policy": policy_state,
+        },
+    }
+
+
+# ============================================================
+# Main Batch Pipeline
+# ============================================================
+
+def run_schema_induced_agent_batch(
+    data: Dict[str, Any],
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
+    query_prompt = prompt_read(
+        "prompts/query.prompt"
+    )
+    tracking_prompt = prompt_read(
+        "prompts/schema_tracking.prompt"
+    )
+    trigger_prompt = prompt_read(
+        "prompts/trigger.prompt"
+    )
+    policy_prompt = prompt_read(
+        "prompts/policy.prompt"
+    )
+    response_prompt = prompt_read(
+        "prompts/response.prompt"
+    )
+
+    memories = {
+        dialog_id: init_memory(schema)
+        for dialog_id in data
+    }
+
+    dialogue_histories = {
+        dialog_id: ""
+        for dialog_id in data
+    }
+
+    results = {
+        dialog_id: {
+            "turns": [],
+        }
+        for dialog_id in data
+    }
+
+    max_message_count = max(
+        (
+            len(item.get("text", []))
+            for item in data.values()
+        ),
+        default=0,
+    )
+
+    for message_index in range(
+        max_message_count
+    ):
+        current_batch = []
+
+        for dialog_id, item in data.items():
+            messages = item.get("text", [])
+
+            if message_index >= len(messages):
+                continue
+
+            message = messages[message_index]
+
+            if "用户" in message:
+                user = str(message["用户"])
+
+                dialogue_histories[dialog_id] += (
+                    f"用户: {user}\n"
+                )
+
+            elif "客服" in message:
+                assistant = str(
+                    message["客服"]
+                )
+
+                dialogue_histories[dialog_id] += (
+                    f"客服: {assistant}\n"
+                )
+                continue
+
+            else:
+                continue
+
+            golden_response = ""
+
+            if (
+                message_index + 1 < len(messages)
+                and "客服" in messages[
+                    message_index + 1
+                ]
+            ):
+                golden_response = str(
+                    messages[
+                        message_index + 1
+                    ]["客服"]
+                )
+
+            current_batch.append(
+                {
+                    "dialog_id": dialog_id,
+                    "turn_id": (
+                        message_index // 2
+                    ),
+                    "message_index": (
+                        message_index
+                    ),
+                    "user": user,
+                    "golden_response": (
+                        golden_response
+                    ),
+                    "dialogue_history": (
+                        dialogue_histories[
+                            dialog_id
+                        ]
+                    ),
+                }
+            )
+
+        if not current_batch:
+            continue
+
+        print(
+            f"\n========== TURN "
+            f"{message_index // 2} =========="
+        )
+
+        # ==================================================
+        # 1. Query
+        # ==================================================
+
+        query_messages = [
+            build_messages(
+                query_prompt,
+                build_query_input(
+                    memories[x["dialog_id"]],
+                    x["user"],
+                ),
+            )
+            for x in current_batch
+        ]
+
+        query_outputs = parallel_inference(
+            query_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            query_outputs,
+        ):
+            x["query"] = parse_model_json(
+                output
+            )
+
+            dialog_id = x["dialog_id"]
+
+            memories[dialog_id] = (
+                update_issue_memory(
+                    memories[dialog_id],
+                    x["query"],
+                )
+            )
+
+        # ==================================================
+        # 2. Schema-guided State Tracking
+        # ==================================================
+
+        tracking_messages = [
+            build_messages(
+                tracking_prompt,
+                build_schema_tracking_input(
+                    memory=memories[
+                        x["dialog_id"]
+                    ],
+                    schema=schema,
+                    dialogue_history=(
+                        x["dialogue_history"]
+                    ),
+                    user=x["user"],
+                ),
+            )
+            for x in current_batch
+        ]
+
+        tracking_outputs = parallel_inference(
+            tracking_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            tracking_outputs,
+        ):
+            dialog_id = x["dialog_id"]
+
+            previous_state = copy.deepcopy(
+                memories[dialog_id][
+                    "dialog_state"
+                ]["schema_state"]
+            )
+
+            tracking_output = (
+                parse_model_json(output)
+            )
+
+            memories[dialog_id] = (
+                update_schema_memory(
+                    memories[dialog_id],
+                    tracking_output,
+                    schema,
+                )
+            )
+
+            x["previous_schema_state"] = (
+                previous_state
+            )
+            x["tracking_output"] = (
+                tracking_output
+            )
+            x["schema_state"] = copy.deepcopy(
+                memories[dialog_id][
+                    "dialog_state"
+                ]["schema_state"]
+            )
+
+        # ==================================================
+        # 3. Trigger
+        # ==================================================
+
+        trigger_messages = [
+            build_messages(
+                trigger_prompt,
+                build_trigger_input(
+                    memories[x["dialog_id"]]
+                ),
+            )
+            for x in current_batch
+        ]
+
+        trigger_outputs = parallel_inference(
+            trigger_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            trigger_outputs,
+        ):
+            x["trigger"] = parse_model_json(
+                output
+            )
+
+        # ==================================================
+        # 4. RAG
+        # ==================================================
+
+        rag_dialogues = []
+        rag_queries = []
+        rag_indices = []
+
+        for index, x in enumerate(
+            current_batch
+        ):
+            dialog_id = x["dialog_id"]
+
+            if (
+                x["trigger"].get(
+                    "evidence_mode"
+                )
+                == "retrieve_new_evidence"
+            ):
+                query = memories[dialog_id][
+                    "issue_state"
+                ]["current_issue"]
+
+                if query:
+                    rag_dialogues.append(
+                        x["dialogue_history"]
+                    )
+                    rag_queries.append(query)
+                    rag_indices.append(index)
+                else:
+                    x["evidence"] = []
+
+            else:
+                x["evidence"] = memories[
+                    dialog_id
+                ]["evidence_state"][
+                    "active_cases"
+                ]
+
+        if rag_dialogues:
+            rag_outputs = batch_zefeng_rag(
+                rag_dialogues,
+                rag_queries,
+            )
+
+            for index, evidence in zip(
+                rag_indices,
+                rag_outputs,
+            ):
+                current_batch[index][
+                    "evidence"
+                ] = evidence
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+            x.setdefault("evidence", [])
+
+            memories[dialog_id] = (
+                update_evidence_memory(
+                    memories[dialog_id],
+                    x["trigger"],
+                    x["evidence"],
+                )
+            )
+
+        # ==================================================
+        # 5. Policy
+        # ==================================================
+
+        policy_messages = [
+            build_messages(
+                policy_prompt,
+                build_policy_input(
+                    memories[x["dialog_id"]],
+                    x["user"],
+                ),
+            )
+            for x in current_batch
+        ]
+
+        policy_outputs = parallel_inference(
+            policy_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            policy_outputs,
+        ):
+            dialog_id = x["dialog_id"]
+
+            x["policy"] = parse_model_json(
+                output
+            )
+
+            memories[dialog_id] = (
+                update_interaction_memory(
+                    memories[dialog_id],
+                    x["policy"],
+                )
+            )
+
+        # ==================================================
+        # 6. Response
+        # ==================================================
+
+        response_messages = [
+            build_messages(
+                response_prompt,
+                build_response_input(
+                    memory=memories[
+                        x["dialog_id"]
+                    ],
+                    user=x["user"],
+                    policy_state=x["policy"],
+                ),
+            )
+            for x in current_batch
+        ]
+
+        response_outputs = parallel_inference(
+            response_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            response_outputs,
+        ):
+            dialog_id = x["dialog_id"]
+
+            x["response"] = parse_model_text(
+                output
+            )
+
+            results[dialog_id][
+                "turns"
+            ].append(
+                {
+                    "turn_id": x["turn_id"],
+                    "message_index": (
+                        x["message_index"]
+                    ),
+                    "user": x["user"],
+                    "query": x["query"],
+                    "previous_schema_state": (
+                        x[
+                            "previous_schema_state"
+                        ]
+                    ),
+                    "schema_state": (
+                        x["schema_state"]
+                    ),
+                    "state_update": (
+                        x["tracking_output"].get(
+                            "state_update",
+                            {},
+                        )
+                    ),
+                    "trigger": x["trigger"],
+                    "evidence": x["evidence"],
+                    "policy": x["policy"],
+                    "response": x["response"],
+                    "golden_response": (
+                        x["golden_response"]
+                    ),
+                }
+            )
+
+    for dialog_id in data:
+        results[dialog_id][
+            "final_memory"
+        ] = memories[dialog_id]
+
+    return results
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data_path",
+        required=True,
+    )
+    parser.add_argument(
+        "--schema_path",
+        required=True,
+    )
+    parser.add_argument(
+        "--output_path",
+        required=True,
+    )
+    parser.add_argument(
+        "--max_dialogues",
+        type=int,
+        default=300,
+    )
+
+    args = parser.parse_args()
+
+    with open(
+        args.data_path,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        data = json.load(file)
+
+    with open(
+        args.schema_path,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        schema = json.load(file)
+
+    if args.max_dialogues > 0:
+        data = dict(
+            list(data.items())[
+                :args.max_dialogues
+            ]
+        )
+
+    outputs = (
+        run_schema_induced_agent_batch(
+            data=data,
+            schema=schema,
+        )
+    )
+
+    write_json(
+        args.output_path,
+        outputs,
+    )
+
+    print(
+        f"Saved {len(outputs)} dialogues "
+        f"to {args.output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
