@@ -1,344 +1,90 @@
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-from typing import Any, Dict, List
-
-from utils.qwen_api_multi import parallel_inference
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def prompt_read(path: str | Path) -> str:
-    path = Path(path)
-
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Prompt file not found: {path}"
-        )
-
-    return path.read_text(
-        encoding="utf-8"
-    ).strip()
-
-
-def write_json(
-    path: str | Path,
-    data: Any,
-) -> None:
-    path = Path(path)
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    path.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-def parse_json(value: Any) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-
-    if not isinstance(value, str):
-        return {}
-
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        return {}
-
-
-def unwrap_response(output: Any) -> Any:
-    if isinstance(output, dict):
-        for key in (
-            "response",
-            "text",
-            "content",
-            "output",
-        ):
-            if key in output:
-                return output[key]
-
-    return output
-
-
-def parse_model_json(output: Any) -> Dict[str, Any]:
-    return parse_json(
-        unwrap_response(output)
-    )
-
-
-def build_messages(
-    system_prompt: str,
-    payload: Dict[str, Any],
-) -> List[Dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                payload,
-                ensure_ascii=False,
-            ),
-        },
-    ]
-
-
-# ============================================================
-# Dialogue Formatting
-# ============================================================
-
-def normalize_dialogue(
-    dialog_id: str,
-    item: Dict[str, Any],
-) -> Dict[str, Any]:
-    turns = []
-
-    for message in item.get("text", []):
-        if "用户" in message:
-            turns.append(
-                {
-                    "role": "user",
-                    "content": str(
-                        message["用户"]
-                    ),
-                }
-            )
-
-        elif "客服" in message:
-            turns.append(
-                {
-                    "role": "assistant",
-                    "content": str(
-                        message["客服"]
-                    ),
-                }
-            )
-
-    return {
-        "dialog_id": dialog_id,
-        "turns": turns,
-    }
-
-
-def split_batches(
-    values: List[Any],
-    batch_size: int,
-) -> List[List[Any]]:
-    return [
-        values[index:index + batch_size]
-        for index in range(
-            0,
-            len(values),
-            batch_size,
-        )
-    ]
-
-
-# ============================================================
-# Candidate Schema Induction
-# ============================================================
-
-def induce_candidate_schemas(
-    dialogues: List[Dict[str, Any]],
-    prompt: str,
-    dialogues_per_batch: int = 10,
-) -> List[Dict[str, Any]]:
-    dialogue_batches = split_batches(
-        dialogues,
-        dialogues_per_batch,
-    )
-
-    messages = []
-
-    for batch_id, batch in enumerate(
-        dialogue_batches
-    ):
-        payload = {
-            "batch_id": batch_id,
-            "dialogues": batch,
-        }
-
-        messages.append(
-            build_messages(
-                prompt,
-                payload,
-            )
-        )
-
-    outputs = parallel_inference(messages)
-
-    if len(outputs) != len(messages):
-        raise RuntimeError(
-            "Candidate schema output count "
-            "does not match input count."
-        )
-
-    candidates = []
-
-    for batch_id, output in enumerate(outputs):
-        parsed = parse_model_json(output)
-
-        candidates.append(
-            {
-                "batch_id": batch_id,
-                "candidate_schema": parsed.get(
-                    "candidate_schema",
-                    [],
-                ),
-            }
-        )
-
-    return candidates
-
-
-# ============================================================
-# Schema Consolidation
-# ============================================================
-
-def merge_candidate_schemas(
-    candidates: List[Dict[str, Any]],
-    merge_prompt: str,
-) -> Dict[str, Any]:
-    payload = {
-        "candidate_schemas": candidates,
-    }
-
-    messages = [
-        build_messages(
-            merge_prompt,
-            payload,
-        )
-    ]
-
-    output = parallel_inference(messages)[0]
-    merged_schema = parse_model_json(output)
-
-    if not merged_schema.get("fields"):
-        raise ValueError(
-            "Merged schema contains no fields."
-        )
-
-    return merged_schema
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--data_path",
-        required=True,
-    )
-    parser.add_argument(
-        "--candidate_output_path",
-        default=(
-            "schemas/candidate_schemas.json"
-        ),
-    )
-    parser.add_argument(
-        "--merged_output_path",
-        default="schemas/merged_schema.json",
-    )
-    parser.add_argument(
-        "--max_dialogues",
-        type=int,
-        default=300,
-    )
-    parser.add_argument(
-        "--dialogues_per_batch",
-        type=int,
-        default=10,
-    )
-
-    args = parser.parse_args()
-
-    with open(
-        args.data_path,
-        "r",
-        encoding="utf-8",
-    ) as file:
-        data = json.load(file)
-
-    if not isinstance(data, dict):
-        raise ValueError(
-            "Input data must be a dict mapping "
-            "dialog_id to dialogue."
-        )
-
-    selected_items = list(data.items())
-
-    if args.max_dialogues > 0:
-        selected_items = selected_items[
-            :args.max_dialogues
-        ]
-
-    dialogues = [
-        normalize_dialogue(
-            dialog_id,
-            item,
-        )
-        for dialog_id, item in selected_items
-    ]
-
-    candidate_prompt = prompt_read(
-        "prompts/schema_candidate.prompt"
-    )
-    merge_prompt = prompt_read(
-        "prompts/schema_merge.prompt"
-    )
-
-    candidate_schemas = (
-        induce_candidate_schemas(
-            dialogues=dialogues,
-            prompt=candidate_prompt,
-            dialogues_per_batch=(
-                args.dialogues_per_batch
-            ),
-        )
-    )
-
-    write_json(
-        args.candidate_output_path,
-        candidate_schemas,
-    )
-
-    merged_schema = merge_candidate_schemas(
-        candidates=candidate_schemas,
-        merge_prompt=merge_prompt,
-    )
-
-    write_json(
-        args.merged_output_path,
-        merged_schema,
-    )
-
-    print(
-        f"Saved candidate schemas to "
-        f"{args.candidate_output_path}"
-    )
-    print(
-        f"Saved merged schema to "
-        f"{args.merged_output_path}"
-    )
-
-
-if __name__ == "__main__":
-    main()
+python run_schema_agent.py \
+  --data_path data/dialogues.json \
+  --schema_path schemas/reviewed_schema.json \
+  --output_path outputs/schema_induced.json \
+  --max_dialogues 300
+
+
+你是企业 IT 客服多轮对话系统中的 Schema-guided Dialogue State Tracker。
+
+你的任务是根据固定 Task Schema、上一轮状态、相关对话历史和当前用户表达，生成当前轮的完整 Dialogue State。
+
+你不能创建 Schema 中不存在的新字段，也不能修改字段定义。
+
+---
+
+## 输入
+
+### schema
+
+固定的 Task Schema，包括：
+
+- 字段名称；
+- 字段定义；
+- 值类型；
+- 默认值；
+- 更新规则；
+- 可选取值。
+
+### previous_state
+
+上一轮结束时的完整 Dialogue State。
+
+### dialogue_history
+
+截至当前用户表达的完整对话历史。
+
+### current_user
+
+当前用户表达。
+
+### current_issue
+
+Query Generator 当前识别的问题。
+
+---
+
+## 更新原则
+
+1. 输出必须包含 Schema 中的全部字段；
+2. 字段名称必须与 Schema 完全一致；
+3. 字段值必须满足对应 value_type；
+4. 没有信息时使用该字段的 default_value；
+5. previous_state 只是上一轮状态，不保证完全正确；
+6. 对话中的明确新信息优先于 previous_state；
+7. 新信息与旧状态冲突时，使用最新明确信息；
+8. 用户否定的信息应删除或更新；
+9. 已尝试操作必须尽量记录操作和结果；
+10. 用户回答某项缺失信息后，应从 missing_information 中移除；
+11. 不要根据常识推测用户没有表达的信息；
+12. 不要加入客服策略标签、模型推理或无关内容；
+13. 当前输出必须是截至当前轮的完整状态，而不是增量修改指令。
+
+---
+
+## 输出格式
+
+只输出合法 JSON：
+
+{
+  "schema_state": {
+    "schema 中的字段名称": "更新后的字段值"
+  },
+  "state_update": {
+    "changed_fields": [
+      "本轮发生变化的字段"
+    ],
+    "topic_relation": "continue | refine | revisit | switch | unclear",
+    "confidence": "high | medium | low"
+  }
+}
+
+
+人工检验merged_schema.json后复制为reviewed_schema.json
+
+python induce_schema.py \
+  --data_path data/dialogues.json \
+  --candidate_output_path schemas/candidate_schemas.json \
+  --merged_output_path schemas/merged_schema.json \
+  --max_dialogues 300 \
+  --dialogues_per_batch 10
