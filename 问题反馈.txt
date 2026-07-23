@@ -1,60 +1,344 @@
-你是企业 IT 客服系统中的 Task Schema Consolidation Module。
+from __future__ import annotations
 
-输入包含多批对话分别产生的候选状态字段。你的任务是将它们合并为一个统一、简洁、无重复、可执行的 Task Schema。
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List
 
----
+from utils.qwen_api_multi import parallel_inference
 
-## 合并目标
 
-最终 Schema 应能够支持：
+# ============================================================
+# Utils
+# ============================================================
 
-- 当前问题识别；
-- 知识检索；
-- 用户信息补充；
-- 已尝试方案跟踪；
-- 用户反馈跟踪；
-- 服务阶段判断；
-- 回复生成。
+def prompt_read(path: str | Path) -> str:
+    path = Path(path)
 
----
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}"
+        )
 
-## 合并原则
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
 
-1. 合并同义字段；
-2. 统一字段命名；
-3. 删除只适用于个别案例的字段；
-4. 删除不能影响后续决策的字段；
-5. 避免一个字段同时表达多个不同概念；
-6. 避免多个字段重复记录同一信息；
-7. 字段应具有清晰的更新规则；
-8. 优先保留跨领域、跨软件可复用的字段；
-9. 对需要记录多个事件的信息使用 list 或 object；
-10. 对具有明确有限取值的信息可以使用 enum；
-11. 不要加入候选 Schema 中没有依据的新字段，除非是合并所必需的上位字段。
 
----
+def write_json(
+    path: str | Path,
+    data: Any,
+) -> None:
+    path = Path(path)
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-## 输出格式
+    path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
-只输出合法 JSON：
 
-{
-  "schema_name": "enterprise_it_support_schema",
-  "schema_version": "v1",
-  "fields": [
-    {
-      "name": "字段名称",
-      "description": "字段定义",
-      "value_type": "string | boolean | list | object | enum",
-      "default_value": null,
-      "possible_values": [],
-      "update_rule": "更新规则",
-      "downstream_usage": [
-        "query",
-        "retrieval",
-        "policy",
-        "response"
-      ]
+def parse_json(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+
+    if not isinstance(value, str):
+        return {}
+
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def unwrap_response(output: Any) -> Any:
+    if isinstance(output, dict):
+        for key in (
+            "response",
+            "text",
+            "content",
+            "output",
+        ):
+            if key in output:
+                return output[key]
+
+    return output
+
+
+def parse_model_json(output: Any) -> Dict[str, Any]:
+    return parse_json(
+        unwrap_response(output)
+    )
+
+
+def build_messages(
+    system_prompt: str,
+    payload: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": system_prompt,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+
+# ============================================================
+# Dialogue Formatting
+# ============================================================
+
+def normalize_dialogue(
+    dialog_id: str,
+    item: Dict[str, Any],
+) -> Dict[str, Any]:
+    turns = []
+
+    for message in item.get("text", []):
+        if "用户" in message:
+            turns.append(
+                {
+                    "role": "user",
+                    "content": str(
+                        message["用户"]
+                    ),
+                }
+            )
+
+        elif "客服" in message:
+            turns.append(
+                {
+                    "role": "assistant",
+                    "content": str(
+                        message["客服"]
+                    ),
+                }
+            )
+
+    return {
+        "dialog_id": dialog_id,
+        "turns": turns,
     }
-  ]
-}
+
+
+def split_batches(
+    values: List[Any],
+    batch_size: int,
+) -> List[List[Any]]:
+    return [
+        values[index:index + batch_size]
+        for index in range(
+            0,
+            len(values),
+            batch_size,
+        )
+    ]
+
+
+# ============================================================
+# Candidate Schema Induction
+# ============================================================
+
+def induce_candidate_schemas(
+    dialogues: List[Dict[str, Any]],
+    prompt: str,
+    dialogues_per_batch: int = 10,
+) -> List[Dict[str, Any]]:
+    dialogue_batches = split_batches(
+        dialogues,
+        dialogues_per_batch,
+    )
+
+    messages = []
+
+    for batch_id, batch in enumerate(
+        dialogue_batches
+    ):
+        payload = {
+            "batch_id": batch_id,
+            "dialogues": batch,
+        }
+
+        messages.append(
+            build_messages(
+                prompt,
+                payload,
+            )
+        )
+
+    outputs = parallel_inference(messages)
+
+    if len(outputs) != len(messages):
+        raise RuntimeError(
+            "Candidate schema output count "
+            "does not match input count."
+        )
+
+    candidates = []
+
+    for batch_id, output in enumerate(outputs):
+        parsed = parse_model_json(output)
+
+        candidates.append(
+            {
+                "batch_id": batch_id,
+                "candidate_schema": parsed.get(
+                    "candidate_schema",
+                    [],
+                ),
+            }
+        )
+
+    return candidates
+
+
+# ============================================================
+# Schema Consolidation
+# ============================================================
+
+def merge_candidate_schemas(
+    candidates: List[Dict[str, Any]],
+    merge_prompt: str,
+) -> Dict[str, Any]:
+    payload = {
+        "candidate_schemas": candidates,
+    }
+
+    messages = [
+        build_messages(
+            merge_prompt,
+            payload,
+        )
+    ]
+
+    output = parallel_inference(messages)[0]
+    merged_schema = parse_model_json(output)
+
+    if not merged_schema.get("fields"):
+        raise ValueError(
+            "Merged schema contains no fields."
+        )
+
+    return merged_schema
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data_path",
+        required=True,
+    )
+    parser.add_argument(
+        "--candidate_output_path",
+        default=(
+            "schemas/candidate_schemas.json"
+        ),
+    )
+    parser.add_argument(
+        "--merged_output_path",
+        default="schemas/merged_schema.json",
+    )
+    parser.add_argument(
+        "--max_dialogues",
+        type=int,
+        default=300,
+    )
+    parser.add_argument(
+        "--dialogues_per_batch",
+        type=int,
+        default=10,
+    )
+
+    args = parser.parse_args()
+
+    with open(
+        args.data_path,
+        "r",
+        encoding="utf-8",
+    ) as file:
+        data = json.load(file)
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            "Input data must be a dict mapping "
+            "dialog_id to dialogue."
+        )
+
+    selected_items = list(data.items())
+
+    if args.max_dialogues > 0:
+        selected_items = selected_items[
+            :args.max_dialogues
+        ]
+
+    dialogues = [
+        normalize_dialogue(
+            dialog_id,
+            item,
+        )
+        for dialog_id, item in selected_items
+    ]
+
+    candidate_prompt = prompt_read(
+        "prompts/schema_candidate.prompt"
+    )
+    merge_prompt = prompt_read(
+        "prompts/schema_merge.prompt"
+    )
+
+    candidate_schemas = (
+        induce_candidate_schemas(
+            dialogues=dialogues,
+            prompt=candidate_prompt,
+            dialogues_per_batch=(
+                args.dialogues_per_batch
+            ),
+        )
+    )
+
+    write_json(
+        args.candidate_output_path,
+        candidate_schemas,
+    )
+
+    merged_schema = merge_candidate_schemas(
+        candidates=candidate_schemas,
+        merge_prompt=merge_prompt,
+    )
+
+    write_json(
+        args.merged_output_path,
+        merged_schema,
+    )
+
+    print(
+        f"Saved candidate schemas to "
+        f"{args.candidate_output_path}"
+    )
+    print(
+        f"Saved merged schema to "
+        f"{args.merged_output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
