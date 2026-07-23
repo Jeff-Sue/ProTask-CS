@@ -1,61 +1,428 @@
-你是 IT 客服多轮对话系统中的 Dialogue Summarizer。
+def run_dialogue_induced_agent_batch(
+    data: Dict[str, Any],
+) -> Dict[str, Any]:
 
-你的任务是根据上一轮对话摘要和当前完整对话轮次，生成一份更新后的对话摘要，供后续轮次的 Query Generator、RAG Trigger、Policy Predictor 和 Response Generator 使用。
+    query_prompt = prompt_read(
+        Path("prompts/query.prompt")
+    )
+    recollection_prompt = prompt_read(
+        Path("prompts/recollection.prompt")
+    )
+    state_prompt = prompt_read(
+        Path("prompts/state_induction.prompt")
+    )
+    trigger_prompt = prompt_read(
+        Path("prompts/trigger.prompt")
+    )
+    policy_prompt = prompt_read(
+        Path("prompts/policy.prompt")
+    )
+    response_prompt = prompt_read(
+        Path("prompts/response.prompt")
+    )
 
-你不回答用户问题，也不生成客服回复。你只维护对后续问题解决有用的对话信息。
+    memories = {
+        dialog_id: init_memory()
+        for dialog_id in data
+    }
 
----
+    dialogue_histories = {
+        dialog_id: ""
+        for dialog_id in data
+    }
 
-## 输入
+    results = {
+        dialog_id: {
+            "turns": []
+        }
+        for dialog_id in data
+    }
 
-### previous_summary
+    max_message_count = max(
+        len(item.get("text", []))
+        for item in data.values()
+    )
 
-进入当前轮之前已有的对话摘要。
+    for t_id in range(max_message_count):
 
-如果为空，表示这是对话的第一轮。
+        current_batch = []
 
-### current_turn
+        # ==================================================
+        # Collect Current User Turns
+        # ==================================================
 
-当前完整对话轮次，包括：
+        for dialog_id, item in data.items():
+            messages = item.get("text", [])
 
-- user：当前用户表达
-- assistant：当前客服回复
+            if t_id >= len(messages):
+                continue
 
----
+            message = messages[t_id]
 
-## 摘要内容
+            if "用户" in message:
+                user = str(message["用户"])
+                dialogue_histories[dialog_id] += (
+                    f"用户: {user}\n"
+                )
+            elif "客服" in message:
+                assistant = str(message["客服"])
+                dialogue_histories[dialog_id] += (
+                    f"客服: {assistant}\n"
+                )
+                continue
+            else:
+                continue
 
-摘要应尽可能保留以下信息：
+            golden_response = ""
 
-1. 当前正在处理的问题，以及用户此前提到的其他未解决问题；
-2. 用户已经明确提供的事实、环境、设备、系统、账号和错误现象；
-3. 客服已经询问过的信息，以及用户是否已经回答；
-4. 已经尝试过的操作、排查方法和解决方案；
-5. 每项操作对应的用户反馈，例如成功、失败、无效或尚未验证；
-6. 已经推荐、解释或使用过的案例和知识；
-7. 当前问题的解决进度；
-8. 后续仍需要确认的信息或执行的步骤。
+            if (
+                t_id + 1 < len(messages)
+                and "客服" in messages[t_id + 1]
+            ):
+                golden_response = str(
+                    messages[t_id + 1]["客服"]
+                )
 
----
+            current_batch.append(
+                {
+                    "dialog_id": dialog_id,
+                    "turn_id": t_id // 2,
+                    "message_index": t_id,
+                    "user": user,
+                    "golden_response": golden_response,
+                    "dialogue_history": (
+                        dialogue_histories[dialog_id]
+                    ),
+                }
+            )
 
-## 更新原则
+        if not current_batch:
+            continue
 
-- 合并 previous_summary 和 current_turn 中的信息；
-- 新信息与旧信息冲突时，以当前轮明确表达的信息为准；
-- 不要重复记录同一事实；
-- 不要保留寒暄、礼貌表达和无关内容；
-- 不要推测用户没有明确表达的信息；
-- 已经失效或被否定的信息应删除或明确标记为失效；
-- 已解决的问题可以简要保留结果，但不要继续占用大量篇幅；
-- 未解决问题、失败操作和待确认信息应优先保留；
-- 摘要应简洁，但不能遗漏会影响后续检索、策略判断和回复生成的信息。
+        # ==================================================
+        # 1. Query Generator
+        # ==================================================
 
----
+        query_messages = []
 
-## 输出格式
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
 
-只输出合法 JSON，不要输出解释、Markdown 或其他内容。
+            query_messages.append(
+                build_messages(
+                    query_prompt,
+                    build_query_input(
+                        memory,
+                        x["user"],
+                    ),
+                )
+            )
 
-{
-  "dialogue_summary": "更新后的对话摘要"
-}
+        query_outputs = parallel_inference(
+            query_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            query_outputs,
+        ):
+            query_state = parse_model_json(output)
+            x["query"] = query_state
+
+            dialog_id = x["dialog_id"]
+
+            memories[dialog_id] = update_issue_memory(
+                memories[dialog_id],
+                query_state,
+            )
+
+        # ==================================================
+        # 2. Pre-Analytical Recollection
+        # ==================================================
+
+        recollection_messages = []
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+
+            recollection_input = (
+                build_recollection_input(
+                    memory=memories[dialog_id],
+                    dialogue_history=(
+                        x["dialogue_history"]
+                    ),
+                    user=x["user"],
+                )
+            )
+
+            recollection_messages.append(
+                build_messages(
+                    recollection_prompt,
+                    recollection_input,
+                )
+            )
+
+        recollection_outputs = parallel_inference(
+            recollection_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            recollection_outputs,
+        ):
+            x["recollection"] = (
+                parse_model_json(output)
+            )
+
+        # ==================================================
+        # 3. Dialogue State Induction
+        # ==================================================
+
+        state_messages = []
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+
+            state_input = build_state_induction_input(
+                memory=memories[dialog_id],
+                user=x["user"],
+                recollection_state=(
+                    x["recollection"]
+                ),
+            )
+
+            state_messages.append(
+                build_messages(
+                    state_prompt,
+                    state_input,
+                )
+            )
+
+        state_outputs = parallel_inference(
+            state_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            state_outputs,
+        ):
+            dialog_id = x["dialog_id"]
+
+            previous_state = copy.deepcopy(
+                memories[dialog_id][
+                    "dialog_state"
+                ]["induced_state"]
+            )
+
+            state_output = parse_model_json(output)
+
+            x["previous_induced_state"] = (
+                previous_state
+            )
+            x["state_output"] = state_output
+
+            memories[dialog_id] = (
+                update_dialogue_induced_memory(
+                    memories[dialog_id],
+                    state_output,
+                )
+            )
+
+            x["induced_state"] = copy.deepcopy(
+                memories[dialog_id][
+                    "dialog_state"
+                ]["induced_state"]
+            )
+
+        # ==================================================
+        # 4. Trigger
+        # ==================================================
+
+        trigger_messages = []
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    build_trigger_input(
+                        memories[dialog_id]
+                    ),
+                )
+            )
+
+        trigger_outputs = parallel_inference(
+            trigger_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            trigger_outputs,
+        ):
+            x["trigger"] = (
+                parse_model_json(output)
+            )
+
+        # ==================================================
+        # 5. RAG
+        # ==================================================
+
+        rag_dialogues = []
+        rag_queries = []
+        rag_indices = []
+
+        for index, x in enumerate(current_batch):
+            dialog_id = x["dialog_id"]
+
+            if (
+                x["trigger"].get("evidence_mode")
+                == "retrieve_new_evidence"
+            ):
+                query = memories[dialog_id][
+                    "issue_state"
+                ]["current_issue"]
+
+                if query:
+                    rag_dialogues.append(
+                        x["dialogue_history"]
+                    )
+                    rag_queries.append(query)
+                    rag_indices.append(index)
+                else:
+                    x["evidence"] = []
+            else:
+                x["evidence"] = memories[dialog_id][
+                    "evidence_state"
+                ]["active_cases"]
+
+        if rag_dialogues:
+            rag_outputs = batch_zefeng_rag(
+                rag_dialogues,
+                rag_queries,
+            )
+
+            for index, evidence in zip(
+                rag_indices,
+                rag_outputs,
+            ):
+                current_batch[index]["evidence"] = (
+                    evidence
+                )
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+            x.setdefault("evidence", [])
+
+            memories[dialog_id] = (
+                update_evidence_memory(
+                    memories[dialog_id],
+                    x["trigger"],
+                    x["evidence"],
+                )
+            )
+
+        # ==================================================
+        # 6. Policy
+        # ==================================================
+
+        policy_messages = []
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    build_policy_input(
+                        memories[dialog_id],
+                        x["user"],
+                    ),
+                )
+            )
+
+        policy_outputs = parallel_inference(
+            policy_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            policy_outputs,
+        ):
+            dialog_id = x["dialog_id"]
+
+            policy_state = parse_model_json(output)
+            x["policy"] = policy_state
+
+            memories[dialog_id] = (
+                update_interaction_memory(
+                    memories[dialog_id],
+                    policy_state,
+                )
+            )
+
+        # ==================================================
+        # 7. Response
+        # ==================================================
+
+        response_messages = []
+
+        for x in current_batch:
+            dialog_id = x["dialog_id"]
+
+            response_messages.append(
+                build_messages(
+                    response_prompt,
+                    build_response_input(
+                        memories[dialog_id],
+                        x["user"],
+                        x["policy"],
+                    ),
+                )
+            )
+
+        response_outputs = parallel_inference(
+            response_messages
+        )
+
+        for x, output in zip(
+            current_batch,
+            response_outputs,
+        ):
+            x["response"] = parse_model_text(output)
+
+            dialog_id = x["dialog_id"]
+
+            results[dialog_id]["turns"].append(
+                {
+                    "turn_id": x["turn_id"],
+                    "message_index": (
+                        x["message_index"]
+                    ),
+                    "user": x["user"],
+                    "query": x["query"],
+                    "recollection": (
+                        x["recollection"]
+                    ),
+                    "previous_induced_state": (
+                        x["previous_induced_state"]
+                    ),
+                    "induced_state": (
+                        x["induced_state"]
+                    ),
+                    "trigger": x["trigger"],
+                    "evidence": x["evidence"],
+                    "policy": x["policy"],
+                    "response": x["response"],
+                    "golden_response": (
+                        x["golden_response"]
+                    ),
+                }
+            )
+
+    for dialog_id in data:
+        results[dialog_id]["final_memory"] = (
+            memories[dialog_id]
+        )
+
+    return results
