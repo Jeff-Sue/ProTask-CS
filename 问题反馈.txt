@@ -1,46 +1,31 @@
-def init_memory():
+### dialogue_state
 
-    return {
+表示进入当前轮前最近 5 个完整对话轮次，每轮包含：
 
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
-        },
+- user：该轮用户输入
 
-        "user_state": {
-            "compressed_history": []
-        },
+- assistant：该轮客服回复
 
-        "evidence_state": {
-            "active_cases": [],
-        },
+dialogue_state 用于补充结构化 Memory 中未显式保存的对话信息，例如：
 
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": []
-        }
-    }
+- 用户对客服问题的回答或确认；
 
+- 用户已经补充的条件和限制；
 
-def update_user_memory(
-        memory,
-        user,
-        response
-):
+- 客服已经询问过的信息；
 
-    history = memory["user_state"]["compressed_history"]
+- 已经提供的方案及用户反馈；
 
-    history.append(
-        {
-            "user": user,
-            "assistant": response
-        }
-    )
+- 当前输入中的指代对象和承接关系。
 
-    # 保留最近5轮
-    memory["user_state"][
-        "compressed_history"
-    ] = history[-5:]
+使用规则：
 
-    return memory
+1. dialogue_state 是对话事实来源，用于理解当前用户输入。
+
+2. 不要重复询问历史中已经明确的信息。
+
+3. 用户的确认、否定或简短回答可能补充新的问题信息，不能仅因为没有改变 query 就忽略。
+
+4. 不要根据历史客服回复推断用户已经确认的事实；只有用户明确表达或确认的信息才视为已知事实。
+
+5. 当 dialogue_state 与结构化状态冲突时，以用户最新明确表达的信息为准。
