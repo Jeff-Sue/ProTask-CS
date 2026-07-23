@@ -1,613 +1,93 @@
-import json
-import copy
-from utils.scu_rag import batch_zefeng_rag
-from utils.qwen_api_multi import parallel_inference
-import argparse
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-# =========================
-# Utils
-# =========================
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    try:
-        return json.loads(text)
-    except:
-        return {}
-
-def prompt_read(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
+## 判断流程
 
-def write_json(path: str | Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+严格按照顺序判断：
 
-# =========================
-# Memory
-# =========================
-
-def init_memory():
+### Step 1：判断是否需要继续处理
 
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
-        },
-
-        "evidence_state": {
-            "active_cases": [],
-        },
-
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": []
-        }
-    }
+如果用户只是确认、感谢、等待或结束：
 
-
-# =========================
-# Memory Update
-# =========================
-
-def update_issue_memory(memory, query_state):
-
-    mode = query_state.get(
-        "query_mode",
-        "none"
-    )
-    query = query_state.get(
-        "query_text",
-        ""
-    )
-
-    # 新问题
-    if mode == "rewrite":
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-
-    # 同一问题补充信息
-    elif mode == "refine":
-
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-
-    # 沿用，不修改
-    elif mode == "reuse":
-        pass
-
-
-    # 无问题，不修改
-    elif mode == "none":
-        pass
-
-    return memory
-
-
-def update_evidence_memory(
-        memory,
-        trigger_state,
-        evidence):
-
-    mode = trigger_state.get(
-        "evidence_mode",
-        "no_evidence_needed"
-    )
-
-    # 新检索结果覆盖旧 evidence
-    if mode == "retrieve_new_evidence":
-
-        memory["evidence_state"][
-            "active_cases"
-        ] = evidence
-
-    # reuse / none 都保持
-    return memory
-
-
-def update_interaction_memory(
-        memory,
-        policy_state):
-
-    label = policy_state.get(
-        "label",
-        ""
-    )
-
-    memory["interaction_state"][
-        "last_action"
-    ] = label
-
-    memory["interaction_state"][
-        "action_history"
-    ].append(label)
-
-    # stage transition
-    if label in [
-        "AskMissingSlot",
-        "AskClarification"
-    ]:
-
-        memory["interaction_state"][
-            "stage"
-        ] = "Clarification"
-
-    elif label in [
-        "ExplainedResponse",
-        "CaseRecommendation"
-    ]:
-        memory["interaction_state"][
-            "stage"
-        ] = "Resolution"
-
-    elif label == "Handoff":
-        memory["interaction_state"][
-            "stage"
-        ] = "End"
-
-    # ProcessAcknowledgement:
-    # 不改变stage
-
-    return memory
-
-
-# =========================
-# Prompt Input Builder
-# =========================
-
-def build_messages(system_prompt, data):
-    return [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                data,
-                ensure_ascii=False
-            )
-        }
-    ]
-
-
-def build_query_input(memory, user):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "current":{
-            "u": user
-        }
-    }
-
-
-def build_trigger_input(memory):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"]
-    }
-
-
-
-def build_policy_input(memory, user):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"],
-        "interaction_state":
-            memory["interaction_state"],
-        "current":{
-            "u": user
-        },
-    }
-
-
-def build_response_input(
-        memory,
-        user
-        ):
-    return {
-        "issue_state":
-            memory["issue_state"],
-        "evidence_state":
-            memory["evidence_state"],
-        "interaction_state":
-            memory["interaction_state"],
-        "current":{
-            "u":user,
-            "policy": memory["interaction_state"]['last_action'],
-        },
-    }
-
-
-# =========================
-# Main
-# =========================
-def run_memory_agent(data):
-    query_prompt = prompt_read(Path("prompts/query.prompt"))
-    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
-    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
-    response_prompt = prompt_read(Path("prompts/response.prompt"))
-    results = {}
-    for dialog_id, item in data.items():
-        memory = init_memory()
-        turns = []
-        dialogue_history = ""
-        for t_id, msg in enumerate(item["text"]):
-            if "用户" not in msg:
-                dialogue_history += f"客服: {msg['客服']}\n"
-                continue
-            user = msg["用户"]
-            dialogue_history += f"用户: {msg['用户']}\n"
-            # =====================
-            # 1 Query
-            # =====================
-            query_input = build_query_input(memory, user)
-            query_messages = build_messages(query_prompt, query_input)
-            query_output = parallel_inference([query_messages])[0]
-            query_state = parse_json(parse_json(query_output)['response'])
-
-            memory = update_issue_memory(
-                memory,
-                query_state
-            )
-
-            # =====================
-            # 2 Trigger
-            # =====================
-            trigger_input = build_trigger_input(memory)
-            trigger_messages = build_messages(trigger_prompt, trigger_input)
-            trigger_output = parallel_inference([trigger_messages])[0]
-            trigger_state = parse_json(parse_json(trigger_output)['response'])
-
-            # =====================
-            # 3 Evidence
-            # =====================
-
-            if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-                query = memory["issue_state"]["current_issue"]
-                evidence = batch_zefeng_rag([dialogue_history],[query])[0]
-            else:
-                evidence = memory["evidence_state"]["active_cases"]
-            memory = update_evidence_memory(memory, trigger_state, evidence)
-
-            # =====================
-            # 4 Policy
-            # =====================
-            policy_input = build_policy_input(memory, user)
-            policy_messages = build_messages(policy_prompt, policy_input)
-            policy_output = parallel_inference([policy_messages])[0]
-            policy_state = parse_json(parse_json(policy_output)['response'])
-
-            memory = update_interaction_memory(
-                memory,
-                policy_state
-            )
-
-            # =====================
-            # 5 Response
-            # =====================
-            response_input = build_response_input(memory, user)
-            response_messages = build_messages(response_prompt, response_input)
-            response_output = parallel_inference([response_messages])[0]
-            response = parse_json(parse_json(response_output)['response'])
-
-            turns.append(
-                {
-                    "turn_id": t_id,
-                    "user": user,
-                    "query":
-                        query_state,
-                    "trigger":
-                        trigger_state,
-                    "evidence":
-                        evidence,
-                    "policy":
-                        policy_state,
-                    "response":
-                        response,
-                    "golden_response":
-                        item["text"][t_id+1]["客服"],
-                    # "memory":
-                    #     copy.deepcopy(memory)
-                }
-            )
-
-        results[dialog_id] = {
-            "turns": turns,
-            "final_memory": memory
-        }
-    return results
-
-
-def run_memory_agent_batch(data, batch_size=8):
-    # 加载prompts
-    query_prompt = prompt_read(Path("prompts/query.prompt"))
-    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
-    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
-    response_prompt = prompt_read(Path("prompts/response.prompt"))
-
-    # 初始化所有dialog memory
-    memories = {
-        dialog_id:init_memory()
-        for dialog_id in data
-    }
-
-    dialogue_history = {
-        dialog_id:""
-        for dialog_id in data
-    }
-
-    # 保存结果
-    results = {
-        dialog_id:{
-            "turns":[]
-        }
-        for dialog_id in data
-    }
-
-    # 当前所有dialog最长轮数
-    max_turn = max(
-        len(item["text"])
-        for item in data.values()
-    )
-
-    for t_id in range(max_turn):
-        print(f"\n========== TURN {t_id} ==========")
-        # ==================================================
-        # 收集当前轮用户
-        # ==================================================
-        current_batch=[]
-
-        for dialog_id,item in data.items():
-            if t_id >= len(item["text"]):
-                continue
-
-            msg=item["text"][t_id]
-            if "用户" in msg:
-                dialogue_history[dialog_id] += f"用户: {msg['用户']}\n"
-            elif "客服" in msg:
-                dialogue_history[dialog_id] += f"客服: {msg['客服']}\n"
-
-            if "用户" not in msg:
-                continue
-            current_batch.append(
-                {
-                    # "dialog_id":dialog_id,
-                    "user":msg["用户"],
-                    "golden_response":
-                        item["text"][t_id+1]["客服"]
-                        if t_id+1<len(item["text"])
-                        else "",
-                    "dialogue_history": dialogue_history[dialog_id],
-                }
-            )
-
-        if not current_batch:
-            continue
-
-        # ==================================================
-        # 1. Query Batch
-        # ==================================================
-        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
-        query_messages=[]
-        for x in current_batch:
-            memory=memories[
-                x["dialog_id"]
-            ]
-            query_input=build_query_input(
-                memory,
-                x["user"]
-            )
-            query_messages.append(
-                build_messages(
-                    query_prompt,
-                    query_input
-                )
-            )
-
-        query_outputs=parallel_inference(
-            query_messages
-        )
-
-        for x,out in zip(
-            current_batch,
-            query_outputs
-        ):
-            query_state=parse_json(
-                parse_json(out)["response"]
-            )
-            x["query"]=query_state
-            memories[
-                x["dialog_id"]
-            ]=update_issue_memory(
-                memories[x["dialog_id"]],
-                query_state
-            )
-
-        # ==================================================
-        # 2. Trigger Batch
-        # ==================================================
-        print(f"[Turn {t_id}] Trigger Batch")
-
-        trigger_messages=[]
-        for x in current_batch:
-            memory=memories[
-                x["dialog_id"]
-            ]
-            trigger_messages.append(
-                build_messages(
-                    trigger_prompt,
-                    build_trigger_input(memory)
-                )
-            )
-
-        trigger_outputs=parallel_inference(
-            trigger_messages
-        )
-
-        for x,out in zip(
-            current_batch,
-            trigger_outputs
-        ):
-            trigger_state=parse_json(
-                parse_json(out)["response"]
-            )
-            x["trigger"]=trigger_state
-
-
-
-        # ==================================================
-        # 3. RAG Batch
-        # ==================================================
-        print(f"[Turn {t_id}] RAG Batch")
-
-        rag_dialogs=[]
-        rag_queries=[]
-        rag_indices=[]
-
-        for idx,x in enumerate(current_batch):
-            if x["trigger"].get(
-                "evidence_mode"
-            )=="retrieve_new_evidence":
-                memory=memories[x["dialog_id"]]
-                rag_dialogs.append(x["dialogue_history"])
-                rag_queries.append(memory["issue_state"]["current_issue"])
-                rag_indices.append(idx)
-            else:
-                x["evidence"]=memories[x["dialog_id"]]["evidence_state"]["active_cases"]
-
-        if rag_dialogs:
-            rag_outputs=batch_zefeng_rag(rag_dialogs, rag_queries)
-
-            for idx,e in zip(rag_indices, rag_outputs):
-                current_batch[idx]["evidence"]=e
-
-        for x in current_batch:
-            memories[x["dialog_id"]]=update_evidence_memory(
-                memories[x["dialog_id"]],
-                x["trigger"],
-                x["evidence"]
-            )
-
-        # ==================================================
-        # 4. Policy Batch
-        # ==================================================
-        print(f"[Turn {t_id}] Policy Batch")
-        policy_messages=[]
-        for x in current_batch:
-            policy_messages.append(
-                build_messages(
-                    policy_prompt,
-                    build_policy_input(
-                        memories[x["dialog_id"]],
-                        x["user"]
-                    )
-                )
-            )
-
-        policy_outputs=parallel_inference(
-            policy_messages
-        )
-
-        for x,out in zip(
-            current_batch,
-            policy_outputs
-        ):
-            policy_state=parse_json(
-                parse_json(out)["response"]
-            )
-            x["policy"]=policy_state
-
-            memories[x["dialog_id"]]=update_interaction_memory(
-                memories[x["dialog_id"]],
-                policy_state
-            )
-
-        # ==================================================
-        # 5. Response Batch
-        # ==================================================
-        print(f"[Turn {t_id}] Response Batch")
-        response_messages=[]
-        for x in current_batch:
-            response_messages.append(
-                build_messages(
-                    response_prompt,
-                    build_response_input(
-                        memories[x["dialog_id"]],
-                        x["user"]
-                    )
-                )
-            )
-
-        response_outputs=parallel_inference(
-            response_messages
-        )
-
-        for x,out in zip(
-            current_batch,
-            response_outputs
-        ):
-            x["response"]=parse_json(
-                parse_json(out)["response"]
-            )
-
-            results[x["dialog_id"]]["turns"].append(
-                {
-                    "turn_id":int(t_id/2),
-                    **x,
-                }
-            )
-    
-    for dialog_id,item in data.items():
-        results[dialog_id]["final_memory"] = memories[dialog_id]
-
-    return results
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_path", required=True)
-    parser.add_argument("--batch", default=True)
-
-    args = parser.parse_args()
-
-    with open(args.data_path, 'r', encoding="utf-8") as f:
-        data = json.load(f)
-
-    # data = dict(list(data.items())[:3000000])
-
-    if args.batch:
-        outputs = run_memory_agent_batch(data)
-    else:
-        outputs = run_memory_agent(data)
-    write_json(args.output_path, outputs)
-
-    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
-
-
-if __name__ == "__main__":
-    main()
+选择 ProcessAcknowledgement。
+
+
+---
+
+### Step 2：判断用户意图是否明确
+
+判断：
+
+- 用户遇到什么问题；
+- 操作对象是什么；
+- 需要完成什么任务。
+
+如果无法确定：
+
+选择 AskClarification。
+
+
+不要根据 evidence 猜测用户没有表达的信息。
+
+
+---
+
+### Step 3：判断是否缺少关键解决信息
+
+如果问题明确，但缺少影响解决的信息：
+
+选择 AskMissingSlot。
+
+
+不要重复询问已经明确的信息。
+
+
+---
+
+### Step 4：判断 evidence 是否真正匹配
+
+只有满足：
+
+- evidence 与当前 issue 是同一个具体问题；
+- evidence 内容能够支持当前处理；
+
+才认为匹配。
+
+以下情况不算匹配：
+
+- 同产品；
+- 同软件；
+- 同类别；
+- keywords 相似。
+
+
+---
+
+### Step 5：选择解决方式
+
+如果 evidence 足够：
+
+- 直接解决问题 → ExplainedResponse
+- 引导查看具体案例 → CaseRecommendation
+
+
+如果 evidence 不足：
+
+- 需要更多用户信息 → AskMissingSlot
+- 需要人工处理 → Handoff
+
+
+---
+
+## 重要规则
+
+1. policy 表示客服动作，不表示问题类别。
+
+2. 不重新判断 query 是否正确。
+
+3. 不重新判断是否调用 RAG。
+
+4. evidence 相关不代表 evidence 命中。
+
+5. 多个候选案例不代表可以推荐。
+
+6. 不确定时优先澄清，而不是猜测解决方案。
+
+7. 不生成不存在的 case_id。
