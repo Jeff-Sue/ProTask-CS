@@ -1,93 +1,55 @@
-## 判断流程
-
-严格按照顺序判断：
-
-### Step 1：判断是否需要继续处理
-
-如果用户只是确认、感谢、等待或结束：
-
-选择 ProcessAcknowledgement。
-
-
----
-
-### Step 2：判断用户意图是否明确
-
-判断：
-
-- 用户遇到什么问题；
-- 操作对象是什么；
-- 需要完成什么任务。
-
-如果无法确定：
-
-选择 AskClarification。
-
-
-不要根据 evidence 猜测用户没有表达的信息。
-
-
----
-
-### Step 3：判断是否缺少关键解决信息
-
-如果问题明确，但缺少影响解决的信息：
-
-选择 AskMissingSlot。
-
-
-不要重复询问已经明确的信息。
-
-
----
-
-### Step 4：判断 evidence 是否真正匹配
-
-只有满足：
-
-- evidence 与当前 issue 是同一个具体问题；
-- evidence 内容能够支持当前处理；
-
-才认为匹配。
-
-以下情况不算匹配：
-
-- 同产品；
-- 同软件；
-- 同类别；
-- keywords 相似。
-
-
----
-
-### Step 5：选择解决方式
-
-如果 evidence 足够：
-
-- 直接解决问题 → ExplainedResponse
-- 引导查看具体案例 → CaseRecommendation
-
-
-如果 evidence 不足：
-
-- 需要更多用户信息 → AskMissingSlot
-- 需要人工处理 → Handoff
-
-
----
-
-## 重要规则
-
-1. policy 表示客服动作，不表示问题类别。
-
-2. 不重新判断 query 是否正确。
-
-3. 不重新判断是否调用 RAG。
-
-4. evidence 相关不代表 evidence 命中。
-
-5. 多个候选案例不代表可以推荐。
-
-6. 不确定时优先澄清，而不是猜测解决方案。
-
-7. 不生成不存在的 case_id。
+INFO 08-11 18:10:15 [__init__.py:235] Automatically detected platform cuda.
+INFO 08-11 18:10:20 [api_server.py:1755] vLLM API server version 0.10.0
+INFO 08-11 18:10:20 [cli_args.py:261] non-default args: {'model_tag': '/cache/tmp_mopdel/Qwen3-32B', 'host': '0.0.0.0', 'port': 8850, 'model': '/cache/tmp_mopdel/Qwen3-32B', 'trust_remote_code': True, 'dtype': 'float16', 'max_model_len': 25600, 'served_model_name': ['qwen3-32b'], 'tensor_parallel_size': 4, 'max_num_seqs': 16}
+Traceback (most recent call last):
+  File "/home/ma-user/miniconda3/envs/vllm/bin/vllm", line 7, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/main.py", line 54, in main
+    args.dispatch_function(args)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/cli/serve.py", line 52, in cmd
+    uvloop.run(run_server(args))
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 92, in run
+    return runner.run(wrapper())
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/uvloop/__init__.py", line 48, in wrapper
+    return await main
+           ^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1791, in run_server
+    await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 1811, in run_server_worker
+    async with build_async_engine_client(args, client_config) as engine_client:
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 158, in build_async_engine_client
+    async with build_async_engine_client_from_engine_args(
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/entrypoints/openai/api_server.py", line 180, in build_async_engine_client_from_engine_args
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/arg_utils.py", line 1004, in create_engine_config
+    model_config = self.create_model_config()
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/vllm/engine/arg_utils.py", line 872, in create_model_config
+    return ModelConfig(
+           ^^^^^^^^^^^^
+  File "/home/ma-user/miniconda3/envs/vllm/lib/python3.11/site-packages/pydantic/_internal/_dataclasses.py", line 121, in __init__
+    s.__pydantic_validator__.validate_python(ArgsKwargs(args, kwargs), self_instance=s)
+pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig
+  Value error, Invalid repository ID or local directory specified: '/cache/tmp_mopdel/Qwen3-32B'.
+Please verify the following requirements:
+1. Provide a valid Hugging Face repository ID.
+2. Specify a local directory that contains a recognized configuration file.
+   - For Hugging Face models: ensure the presence of a 'config.json'.
+   - For Mistral models: ensure the presence of a 'params.json'.
+3. For GGUF: pass the local path of the GGUF checkpoint.
+   Loading GGUF from a remote repo directly is not yet supported.
+ [type=value_error, input_value=ArgsKwargs((), {'model': ...attention_dtype': None}), input_type=ArgsKwargs]
+    For further information visit https://errors.pydantic.dev/2.12/v/value_error
