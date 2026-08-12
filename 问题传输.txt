@@ -1,22 +1,97 @@
-def init_memory(
-    schema: Dict[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": [],
-        },
-        "dialog_state": {
-            "schema_state": (
-                init_schema_state(schema)
-            ),
-        },
-        "evidence_state": {
-            "active_cases": [],
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": [],
-        },
+Expecting property name enclosed in double quotes: line 28 column 64 (char 994)
+JSON parse failed:
+{
+  "candidate_schema": [
+    {
+      "name": "user_current_issue",
+      "description": "用户当前提出的主要问题或请求",
+      "value_type": "string",
+      "possible_values": [],
+      "update_rule": "每当用户提出新问题时更新，若问题解决则标记为已解决",
+      "downstream_usage": ["query", "retrieval", "policy", "response"],
+      "examples": ["设置自动转发规则不执行", "无法连接外部网络信号", "welink打不开链接"]
+    },
+    {
+      "name": "issue_object",
+      "description": "问题所涉及的对象或系统组件",
+      "value_type": "string",
+      "possible_values": [],
+      "update_rule": "根据用户描述的问题对象进行提取和更新",
+      "downstream_usage": ["query", "retrieval", "policy"],
+      "examples": ["Outlook", "Welink", "iAccess账号", "Linux虚拟机"]
+    },
+    {
+      "name": "system_environment",
+      "description": "用户当前使用的设备或操作系统环境",
+      "value_type": "string",
+      "possible_values": [],
+      "update_rule": "当用户提及设备、系统版本等信息时更新",
+      "downstream_usage": ["query", "retrieval", "policy"],
+      "examples": ["Windows 11", "公司电脑", "网页版Outlook"]
+    },
+    {
+      "name": "error_symptoms",
+      "description": "用户报告的具体错误表现或异常行为",
+      "value_type": "list",
+      "possible_values": [],
+      "update_rule": "每次用户描述新的错误现象时添加到列表中",
+      "downstream_usage": ["query", "retrieval", "policy", "response"],
+      "examples": ["密码错误提示", "welink无法打开链接", "群空间无法跳转浏览器"]
+    },
+    {
+      "name": "user_goal",
+      "description": "用户希望通过对话达成的目标",
+      "value_type": "string",
+      "possible_values": [],
+      "update_rule": "从用户初始请求中推断并持续跟踪其目标",
+      "downstream_usage": ["query", "policy", "response"],
+      "examples": "申请外网权限", "下载微信", "查询会议室预定记录"
+    },
+    {
+      "name": "actions_taken",
+      "description": "用户已经尝试过的操作或解决方案",
+      "value_type": "list",
+      "possible_values": [],
+      "update_rule": "每当用户提到自己采取了某个操作时添加",
+      "downstream_usage": ["query", "retrieval", "policy"],
+      "examples": ["修改默认浏览器", "提交电子流", "重启Welink"]
+    },
+    {
+      "name": "action_results",
+      "description": "用户尝试操作后的结果反馈",
+      "value_type": "list",
+      "possible_values": [],
+      "update_rule": "每当用户反馈操作结果时添加",
+      "downstream_usage": ["query", "retrieval", "policy", "response"],
+      "examples": ["规则生效了", "仍然无法登录", "问题未解决"]
+    },
+    {
+      "name": "user_constraints",
+      "description": "用户在解决问题过程中提出的限制条件",
+      "value_type": "list",
+      "possible_values": [],
+      "update_rule": "当用户说明时间、资源或其他限制时添加",
+      "downstream_usage": ["policy", "response"],
+      "examples": ["现在不能断开网络", "需要备案后才能安装", "暂时无法处理，稍后再联系"]
+    },
+    {
+      "name": "pending_confirmation",
+      "description": "需要进一步确认的信息或步骤",
+      "value_type": "list",
+      "possible_values": [],
+      "update_rule": "当客服提出需要用户确认的内容时添加",
+      "downstream_usage": ["query", "response"],
+      "examples": ["是否是Outlook的问题", "是否需要外网接入内网权限", "是否已提交电子流"]
+    },
+    {
+      "name": "resolution_progress",
+      "description": "问题解决的当前进度状态",
+      "value_type": "enum",
+      "possible_values": ["待处理", "处理中", "已解决", "用户主动关闭"],
+      "update_rule": "根据用户反馈或客服判断更新状态",
+      "downstream_usage": ["query", "policy", "response"],
+      "examples": ["已解决", "用户主动关闭", "处理中"]
     }
+  ]
+}
+Expecting ':' delimiter: line 46 column 35 (char 1557)
