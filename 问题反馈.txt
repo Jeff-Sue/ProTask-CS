@@ -1,1 +1,95 @@
- 'response': None, 'parsed_response': None, 'success': False, 'error': 'Error code: 400 - {\'object\': \'error\', \'message\': "This model\'s maximum context length is 25600 tokens. However, you requested 29645 tokens (27597 in the messages, 2048 in the completion). Please reduce the length of the messages or completion. None", \'type\': \'BadRequestError\', \'param\': None, \'code\': 400}', 'retry_count': 3, 'format_valid': False}
+def merge_schema_group(
+    candidates: List[Dict[str, Any]],
+    merge_prompt: str,
+) -> Dict[str, Any]:
+
+    payload = {
+        "candidate_schemas": candidates,
+    }
+
+    messages = [
+        build_messages(
+            merge_prompt,
+            payload,
+        )
+    ]
+
+    output = parallel_inference(messages)[0]
+
+    if not output.get("success", False):
+        raise RuntimeError(
+            f"Schema merge failed: {output.get('error')}"
+        )
+
+    merged_schema = parse_model_json(output)
+
+    if not merged_schema.get("fields"):
+        raise ValueError(
+            "Merged schema contains no fields."
+        )
+
+    return merged_schema
+
+
+def hierarchical_merge_candidate_schemas(
+    candidates: List[Dict[str, Any]],
+    merge_prompt: str,
+    merge_batch_size: int = 5,
+) -> Dict[str, Any]:
+
+    current_level = candidates
+    level = 0
+
+    while len(current_level) > 1:
+
+        print(
+            f"\n===== Merge Level {level} ====="
+        )
+        print(
+            f"Number of schemas: {len(current_level)}"
+        )
+
+        next_level = []
+
+        batches = split_batches(
+            current_level,
+            merge_batch_size,
+        )
+
+        for batch_id, batch in enumerate(batches):
+
+            print(
+                f"Merging batch {batch_id + 1}/"
+                f"{len(batches)} "
+                f"({len(batch)} schemas)"
+            )
+
+            merged = merge_schema_group(
+                candidates=batch,
+                merge_prompt=merge_prompt,
+            )
+
+            next_level.append(
+                {
+                    "batch_id": batch_id,
+                    "candidate_schema": merged["fields"],
+                }
+            )
+
+        current_level = next_level
+        level += 1
+
+    final_item = current_level[0]
+
+    # 最后一层的 candidate_schema 就是最终 fields
+    return {
+        "schema_name": "enterprise_it_support_schema",
+        "schema_version": "v1",
+        "fields": final_item["candidate_schema"],
+    }
+
+merged_schema = hierarchical_merge_candidate_schemas(
+    candidates=candidate_schemas,
+    merge_prompt=merge_prompt,
+    merge_batch_size=5,
+)
