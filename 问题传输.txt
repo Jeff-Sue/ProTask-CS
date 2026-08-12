@@ -1,5 +1,9 @@
-python scripts/induce_schema.py \  --data_path /home/aarc/CuhkszTeam/nas1/RUNTIME/data_processing/案例推荐筛选/data/10/带caseID对话.json \  --candidate_output_path schemas/candidate_schemas.json \  --merged_output_path schemas/merged_schema.json \  --max_dialogues 30 \  --dialogues_per_batch 10
-usage: induce_schema.py [-h] --data_path DATA_PATH [--candidate_output_path CANDIDATE_OUTPUT_PATH]
-                        [--merged_output_path MERGED_OUTPUT_PATH] [--max_dialogues MAX_DIALOGUES]
-                        [--dialogues_per_batch DIALOGUES_PER_BATCH]
-induce_schema.py: error: unrecognized arguments:  
+{'messages': [{'role': 'system', 'content': '你是企业 IT 客服系统中的 Task Schema Consolidation Module。\n\n输入包含多批对话分别产生的候选状态字段。你的任务是将它们合并为一个统一、简洁、无重复、可执行的 Task Schema。\n\n---\n\n## 合并目标\n\n最终 Schema 应能够支持：\n\n- 当前问题识别；\n- 知识检索；\n- 用户信息补充；\n- 已尝试方案跟踪；\n- 用户反馈跟踪；\n- 服务阶段判断；\n- 回复生成。\n\n---\n\n## 合并原则\n\n1. 合并同义字段；\n2. 统一字段命名；\n3. 删除只适用于个别案例的字段；\n4. 删除不能影响后续决策的字段；\n5. 避免一个字段同时表达多个不同概念；\n6. 避免多个字段重复记录同一信息；\n7. 字段应具有清晰的更新规则；\n8. 优先保留跨领域、跨软件可复用的字段；\n9. 对需要记录多个事件的信息使用 list 或 object；\n10. 对具有明确有限取值的信息可以使用 enum；\n11. 不要加入候选 Schema 中没有依据的新字段，除非是合并所必需的上位字段。\n\n---\n\n## 输出格式\n\n只输出合法 JSON：\n\n{\n  "schema_name": "enterprise_it_support_schema",\n  "schema_version": "v1",\n  "fields": [\n    {\n      "name": "字段名称",\n      "description": "字段定义",\n      "value_type": "string | boolean | list | object | enum",\n      "default_value": null,\n      "possible_values": [],\n      "update_rule": "更新规则",\n      "downstream_usage": [\n        "query",\n        "retrieval",\n        "policy",\n        "response"\n      ]\n    }\n  ]\n}'}, {'role': 'user', 'content': '{"candidate_schemas": [{"batch_id": 0, "candidate_schema": []}, {"batch_id": 1, "candidate_schema": []}, {"batch_id": 2, "candidate_schema": []}]}'}], 'response': '```json\n{\n  "schema_name": "enterprise_it_support_schema",\n  "schema_version": "v1",\n  "fields": []\n}\n```', 'parsed_response': None, 'success': True, 'error': None, 'retry_count': 0, 'format_valid': True}
+Traceback (most recent call last):
+  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/Baselines/schema-induced/scripts/induce_schema.py", line 345, in <module>
+    main()
+  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/Baselines/schema-induced/scripts/induce_schema.py", line 324, in main
+    merged_schema = merge_candidate_schemas(
+  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/Baselines/schema-induced/scripts/induce_schema.py", line 233, in merge_candidate_schemas
+    raise ValueError(
+ValueError: Merged schema contains no fields.
