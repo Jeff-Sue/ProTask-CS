@@ -1,3 +1,14 @@
-curl -X POST http://http://10.67.43.9:9701/search      -H "Content-Type: application/json"      -d '{        "query": "远程办公 内网连接异常",        "max_doc_num": 50,        "index": "full_document",        "search_strategy": "lexical&semantic",        "use_chat": true,        "chat_content": "用户:你好，我的办公电脑，带回家里办公，连接家里的WIFI，网络速度非常慢，我的WIFI没问题的。\n用户:而且在出差的酒店里面，经常连接不上内网",        "chat_index": "full_document_ft_4_11",        "chat_search_strategy": "semantic_title"     }'
-curl: (56) Recv failure: Connection reset by peer
-<html><body><h1>502 Parent proxy unreachable</h1><p><a href='http://cntlm.sf.net/'>Cntlm</a> proxy failed to complete the request.</p></body></html>
+# 1. 先测试主机能否 ping 通
+ping -c 4 10.67.43.9
+
+# 2. 更重要：测试 9701 端口能否连接
+nc -vz 10.67.43.9 9701
+
+# 3. 直接测试 HTTP，并绕过代理
+curl --noproxy "*" -v http://10.67.43.9:9701/
+
+# 4. 如果要直接测试 search 接口
+curl --noproxy "*" -v \
+  -X POST http://10.67.43.9:9701/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Outlook打不开","max_doc_num":5}'
