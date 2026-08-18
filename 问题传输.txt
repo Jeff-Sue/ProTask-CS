@@ -1,10 +1,35 @@
-curl -X POST http://localhost:9701/search      -H "Content-Type: application/json"      -d '{
-        "query": "远程办公 内网连接异常",
-        "max_doc_num": 50,
-        "index": "full_document",
-        "search_strategy": "lexical&semantic",
-        "use_chat": true,
-        "chat_content": "用户:你好，我的办公电脑，带回家里办公，连接家里的WIFI，网络速度非常慢，我的WIFI没问题的。\n用户:而且在出差的酒店里面，经常连接不上内网",
-        "chat_index": "full_document_ft_4_11",
-        "chat_search_strategy": "semantic_title"
-     }'
+def rag(query, chat_content, use_chat):
+    payload = {
+                "query": query,
+                "max_doc_num": 20,  ##返回top-k案例个数
+                "index": "full_document",
+                "search_strategy": "lexical&semantic",
+                "use_chat": use_chat,
+                "chat_content": chat_content,
+                "chat_index": "full_document_ft_4_11",
+                "chat_search_strategy": "semantic_title"
+            }
+
+    url = "http://10.67.43.9:9701/search"
+    response = requests.post(url, json=payload, timeout=30)
+    response.raise_for_status()
+    result = response.json()
+    # print(result)
+    cases = []
+    occur_id = []
+
+
+    for item in result["es_response"]['hits']['hits']:
+        case = {}
+        if item["_source"]["caseId"] in result["case_ids"]:
+            if item["_source"]["caseId"] not in occur_id:
+                occur_id.append(item["_source"]["caseId"])
+                case['case_id'] = item["_source"]["caseId"]
+                case['title'] = item["_source"]["title"]
+                case['content'] = item["_source"]["content"]
+                cases.append(case)
+                # cases = cases + str(item["_source"]["caseId"]) + "\n"
+                # cases = cases + str(item["_source"]["title"]) + "\n"
+                # cases = cases + str(item["_source"]["content"]) + "\n"
+
+    return cases
