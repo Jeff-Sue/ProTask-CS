@@ -1,35 +1,44 @@
 def rag(query, chat_content, use_chat):
     payload = {
-                "query": query,
-                "max_doc_num": 20,  ##返回top-k案例个数
-                "index": "full_document",
-                "search_strategy": "lexical&semantic",
-                "use_chat": use_chat,
-                "chat_content": chat_content,
-                "chat_index": "full_document_ft_4_11",
-                "chat_search_strategy": "semantic_title"
-            }
+        "query": query,
+        "max_doc_num": 20,
+        "index": "full_document",
+        "search_strategy": "lexical&semantic",
+        "use_chat": use_chat,
+        "chat_content": chat_content,
+        "chat_index": "full_document_ft_4_11",
+        "chat_search_strategy": "semantic_title"
+    }
 
     url = "http://10.67.43.9:9701/search"
-    response = requests.post(url, json=payload, timeout=30)
+
+    # 禁止 requests 读取系统代理环境变量
+    session = requests.Session()
+    session.trust_env = False
+
+    response = session.post(
+        url,
+        json=payload,
+        timeout=30
+    )
+
     response.raise_for_status()
     result = response.json()
-    # print(result)
+
     cases = []
     occur_id = []
 
+    for item in result["es_response"]["hits"]["hits"]:
+        case_id = item["_source"]["caseId"]
 
-    for item in result["es_response"]['hits']['hits']:
-        case = {}
-        if item["_source"]["caseId"] in result["case_ids"]:
-            if item["_source"]["caseId"] not in occur_id:
-                occur_id.append(item["_source"]["caseId"])
-                case['case_id'] = item["_source"]["caseId"]
-                case['title'] = item["_source"]["title"]
-                case['content'] = item["_source"]["content"]
-                cases.append(case)
-                # cases = cases + str(item["_source"]["caseId"]) + "\n"
-                # cases = cases + str(item["_source"]["title"]) + "\n"
-                # cases = cases + str(item["_source"]["content"]) + "\n"
+        if case_id in result["case_ids"]:
+            if case_id not in occur_id:
+                occur_id.append(case_id)
+
+                cases.append({
+                    "case_id": case_id,
+                    "title": item["_source"]["title"],
+                    "content": item["_source"]["content"]
+                })
 
     return cases
