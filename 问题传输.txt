@@ -1,30 +1,20 @@
-if rag_dialogs:
+[Turn 0] RAG Batch
 
-    print("\n========== RAG DEBUG ==========")
-    print("rag_dialogs:", rag_dialogs)
-    print("rag_queries:", rag_queries)
-    print("rag_indices:", rag_indices)
-
-    rag_outputs = batch_zefeng_rag(
-        rag_dialogs,
-        rag_queries
-    )
-
-    print("RAW rag_outputs:", rag_outputs)
-    print("rag_outputs type:", type(rag_outputs))
-
-    if isinstance(rag_outputs, list):
-        print("rag_outputs len:", len(rag_outputs))
-
-        for i, x in enumerate(rag_outputs):
-            print(
-                f"RAG[{i}] type={type(x)}, value={x}"
-            )
-
-    print("===============================\n")
-
-    for idx, evidence in zip(
-        rag_indices,
-        rag_outputs
-    ):
-        current_batch[idx]["evidence"] = evidence
+========== RAG DEBUG ==========
+rag_dialogs: ['用户: MateBook Fold 可以装welink 吗？\n折叠电脑。&nbsp。\n', '用户: 请问有没有什么编辑会议纪要的IT小软件。\n', '用户: 内网登陆即时通讯软件如，如微信。\n需要怎么设置。\n权限已申请。\n', '用户: 请问，怎么导出会议参与人名单？\n', '用户: 我这边申请了便携机 但是现在打开电脑连接xgate 提示没办法从外网接入。\n需要怎么办。\n', '用户: 能帮我查一下便携的开机码不。\n', '用户: 桌面没有图标了。\n空白。\n怎么回事。\n你好。\n', '用户: 您好，我电脑outlook打不开怎么办啊。\n', '用户: 新换的便携电脑想把旧电脑的资料倒过来，有什么操作指引吗？\n']
+rag_queries: ['MateBook Fold 是否可以安装 Welink', '有没有编辑会议纪要的IT小软件', '内网登录即时通讯软件如微信需要怎么设置，权限已申请', '如何导出会议参与人名单', '便携机连接xgate提示无法从外网接入', '便携设备的开机码查询', '桌面图标消失，显示空白', '电脑上的 Outlook 无法打开', '如何将旧电脑资料转移到新便携电脑']
+rag_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+Processing: 100%|███████████████████████████████████████████████████████████████| 9/9 [00:00<00:00, 10.87it/s]
+RAW rag_outputs: [[], [], [], [], [], [], [], [], []]
+rag_outputs type: <class 'list'>
+rag_outputs len: 9
+RAG[0] type=<class 'list'>, value=[]
+RAG[1] type=<class 'list'>, value=[]
+RAG[2] type=<class 'list'>, value=[]
+RAG[3] type=<class 'list'>, value=[]
+RAG[4] type=<class 'list'>, value=[]
+RAG[5] type=<class 'list'>, value=[]
+RAG[6] type=<class 'list'>, value=[]
+RAG[7] type=<class 'list'>, value=[]
+RAG[8] type=<class 'list'>, value=[]
+===============================
