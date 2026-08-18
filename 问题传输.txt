@@ -1,44 +1,63 @@
-def rag(query, chat_content, use_chat):
+def _call_rag(dialogue: str, query: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """调用 9701 召回 case ID，并用本地案例库补全稳定正文。
+
+    这是 api_trained.py 的设计：检索索引可以更新，但 reranker 的输入正文固定
+    使用与训练期一致的案例库格式。9701 hit 正文只在显式开启 fallback 时使用。
+    """
     payload = {
         "query": query,
-        "max_doc_num": 20,
+        "max_doc_num": RAG_TOP_N,
         "index": "full_document",
         "search_strategy": "lexical&semantic",
-        "use_chat": use_chat,
-        "chat_content": chat_content,
+        "use_chat": True,
+        "chat_content": dialogue,
         "chat_index": "full_document_ft_4_11",
-        "chat_search_strategy": "semantic_title"
+        "chat_search_strategy": "semantic_title",
     }
+    result = _post_json(RAG_URL, payload, RAG_TIMEOUT)
+    case_ids = [str(x).strip() for x in result.get("case_ids", []) if str(x).strip()]
 
-    url = "http://10.67.43.9:9701/search"
+    # 9701 命中内容仅作可选兜底，不能覆盖 case_raw 的正式正文。
+    hits = result.get("es_response", {}).get("hits", {}).get("hits", [])
+    rag_cases: Dict[str, Dict[str, Any]] = {}
+    for hit in hits if isinstance(hits, list) else []:
+        source = (hit or {}).get("_source", {}) or {}
+        cid = str(source.get("caseId", "")).strip()
+        if cid and cid not in rag_cases:
+            rag_cases[cid] = {
+                "case_id": cid,
+                "title": str(source.get("title", "") or ""),
+                "content": str(source.get("content", "") or ""),
+                "content_source": "rag_fallback",
+            }
 
-    # 禁止 requests 读取系统代理环境变量
-    session = requests.Session()
-    session.trust_env = False
+    # 少数后端只返回 hits 而不返回 case_ids 时，保留 hits 顺序作为兼容。
+    if not case_ids:
+        case_ids = list(rag_cases)[:RAG_TOP_N]
 
-    response = session.post(
-        url,
-        json=payload,
-        timeout=30
-    )
+    cases: List[Dict[str, Any]] = []
+    missing_in_case_raw: List[str] = []
+    fallback_used: List[str] = []
+    for case_id in case_ids[:RAG_TOP_N]:
+        case = _get_case_from_raw(case_id)
+        if case is not None:
+            cases.append(case)
+            continue
+        missing_in_case_raw.append(case_id)
+        if ALLOW_RAG_CONTENT_FALLBACK:
+            fallback = rag_cases.get(case_id)
+            if fallback and fallback["content"].strip():
+                cases.append(fallback)
+                fallback_used.append(case_id)
 
-    response.raise_for_status()
-    result = response.json()
-
-    cases = []
-    occur_id = []
-
-    for item in result["es_response"]["hits"]["hits"]:
-        case_id = item["_source"]["caseId"]
-
-        if case_id in result["case_ids"]:
-            if case_id not in occur_id:
-                occur_id.append(case_id)
-
-                cases.append({
-                    "case_id": case_id,
-                    "title": item["_source"]["title"],
-                    "content": item["_source"]["content"]
-                })
-
-    return cases
+    if missing_in_case_raw:
+        logger.warning(
+            "RAG returned %d case(s) missing/empty in case_raw; matched=%d fallback=%s used=%d ids=%s; case_raw_samples=%s",
+            len(missing_in_case_raw),
+            len(cases),
+            ALLOW_RAG_CONTENT_FALLBACK,
+            len(fallback_used),
+            missing_in_case_raw[:10],
+            _case_raw_sample_ids(),
+        )
+    return cases, case_ids[:RAG_TOP_N]
