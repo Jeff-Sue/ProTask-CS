@@ -1,168 +1,30 @@
-  "220597650": {
-    "turns": [
-      {
-        "dialog_id": "220597650",
-        "user": "MateBook Fold 可以装welink 吗？\n折叠电脑。&nbsp。",
-        "golden_response": "是鸿蒙单框架系统的吗？",
-        "query": {
-          "query_mode": "rewrite",
-          "query_text": "MateBook Fold 是否可以安装 Welink",
-          "reason": "用户提出了一个新的 IT 问题，询问设备是否支持特定软件的安装。"
-        },
-        "trigger": {
-          "trigger": true,
-          "evidence_mode": "retrieve_new_evidence",
-          "evidence_status": "not_needed",
-          "case_id": "",
-          "reason": "当前没有可用案例，需要检索新证据"
-        },
-        "evidence": [],
-        "knowledge_state": {},
-        "topic_structure": {},
-        "policy": {
-          "label": "AskClarification",
-          "case_id": [],
-          "reason": "当前问题对象和诉求已明确，但未提供设备操作系统等关键信息，影响 Case Selection。"
-        },
-        "response": {
-          "response": "请问您提到的 Welink 是指华为的企业协作应用吗？另外，您是想在 MateBook Fold 的哪个系统版本或模式下安装该软件呢？"
-        },
-        "turn_id": 0
-      },
-      {
-        "dialog_id": "220597650",
-        "user": "对。\n鸿蒙PC&nbsp。",
-        "golden_response": "这边找鸿蒙支持帮您确认下。\n您好，此问题经过分析需要升级到专家支持，现在帮您开单升级，请您稍等！",
-        "query": {
-          "query_mode": "reuse",
-          "query_text": "MateBook Fold 是否可以安装 Welink",
-          "reason": "用户确认设备为鸿蒙PC，但未补充新检索信息，问题仍围绕原主题"
-        },
-        "trigger": {
-          "trigger": true,
-          "evidence_mode": "retrieve_new_evidence",
-          "evidence_status": "not_needed",
-          "case_id": "",
-          "reason": "当前没有 active_cases，且问题需要外部案例支持"
-        },
-        "evidence": [],
-        "knowledge_state": {},
-        "topic_structure": {},
-        "policy": {
-          "label": "CaseRecommendation",
-          "case_id": [
-            "case_001_harmonyos_welink_install"
-          ],
-          "reason": "用户确认设备为鸿蒙PC，已明确问题，结构中虽无细化Topic但可直接推荐安装方案。"
-        },
-        "response": {
-          "response": "目前没有明确的案例或文档说明 MateBook Fold（鸿蒙PC）是否支持安装 Welink。建议您前往华为官方应用市场或联系华为客服确认该设备的软件兼容性，以获取准确的信息。"
-        },
-        "turn_id": 1
-      },
-      {
-        "dialog_id": "220597650",
-        "user": "要等多久。",
-        "golden_response": "[案例链接: KT00370519]。\n您好目前还不支持的。",
-        "query": {
-          "query_mode": "none",
-          "query_text": "",
-          "reason": "用户询问等待时间，未涉及IT问题检索相关内容。"
-        },
-        "trigger": {
-          "trigger": true,
-          "evidence_mode": "retrieve_new_evidence",
-          "evidence_status": "insufficient",
-          "case_id": "",
-          "reason": "当前没有 active_cases 支持 'MateBook Fold 是否可以安装 Welink' 的具体问题判断"
-        },
-        "evidence": [],
-        "knowledge_state": {},
-        "topic_structure": {},
-        "policy": {
-          "label": "ProcessAcknowledgement",
-          "case_id": [],
-          "reason": "用户询问等待时间，当前服务已进入升级处理阶段，无需进一步决策"
-        },
-        "response": {
-          "response": "请您放心，升级专家支持的处理时间通常不会太长，一般在几分钟到十几分钟不等。我们会尽快为您处理并反馈结果，请您稍等片刻！"
-        },
-        "turn_id": 2
-      },
-      {
-        "dialog_id": "220597650",
-        "user": "这个PC 也装不了双系统吧。",
-        "golden_response": "装不了的。",
-        "query": {
-          "query_mode": "refine",
-          "query_text": "MateBook Fold 鸿蒙PC 是否可以安装双系统",
-          "reason": "用户补充了关于是否支持双系统的限制条件，属于当前问题的扩展信息"
-        },
-        "trigger": {
-          "trigger": true,
-          "evidence_mode": "retrieve_new_evidence",
-          "evidence_status": "insufficient",
-          "case_id": "",
-          "reason": "当前 active_cases 为空，无法支持回答关于鸿蒙PC是否可以安装双系统的问题。"
-        },
-        "evidence": [],
-        "knowledge_state": {},
-        "topic_structure": {},
-        "policy": {
-          "label": "ExplainedResponse",
-          "case_id": [
-            "KT00370519"
-          ],
-          "reason": "当前 Query 明确指向鸿蒙PC 系统限制，已有案例明确说明不支持双系统。"
-        },
-        "response": {
-          "response": "目前鸿蒙PC系统暂不支持安装双系统，这是由于系统架构和兼容性限制所致。建议您根据实际需求选择合适的操作系统版本进行使用。"
-        },
-        "turn_id": 3
-      }
-    ],
-    "final_memory": {
-      "issue_state": {
-        "current_issue": "MateBook Fold 鸿蒙PC 是否可以安装双系统",
-        "query_history": [
-          "MateBook Fold 是否可以安装 Welink",
-          "MateBook Fold 鸿蒙PC 是否可以安装双系统"
-        ]
-      },
-      "dialog_state": {
-        "compressed_history": [
-          {
-            "user": "MateBook Fold 可以装welink 吗？\n折叠电脑。&nbsp。",
-            "assistant": "是鸿蒙单框架系统的吗？"
-          },
-          {
-            "user": "对。\n鸿蒙PC&nbsp。",
-            "assistant": "这边找鸿蒙支持帮您确认下。\n您好，此问题经过分析需要升级到专家支持，现在帮您开单升级，请您稍等！"
-          },
-          {
-            "user": "要等多久。",
-            "assistant": "[案例链接: KT00370519]。\n您好目前还不支持的。"
-          },
-          {
-            "user": "这个PC 也装不了双系统吧。",
-            "assistant": "装不了的。"
-          }
-        ]
-      },
-      "evidence_state": {
-        "active_cases": [],
-        "knowledge_state": {},
-        "topic_structure": {}
-      },
-      "interaction_state": {
-        "stage": "Resolution",
-        "last_action": "ExplainedResponse",
-        "action_history": [
-          "AskClarification",
-          "CaseRecommendation",
-          "ProcessAcknowledgement",
-          "ExplainedResponse"
-        ]
-      }
-    }
-  },
+if rag_dialogs:
+
+    print("\n========== RAG DEBUG ==========")
+    print("rag_dialogs:", rag_dialogs)
+    print("rag_queries:", rag_queries)
+    print("rag_indices:", rag_indices)
+
+    rag_outputs = batch_zefeng_rag(
+        rag_dialogs,
+        rag_queries
+    )
+
+    print("RAW rag_outputs:", rag_outputs)
+    print("rag_outputs type:", type(rag_outputs))
+
+    if isinstance(rag_outputs, list):
+        print("rag_outputs len:", len(rag_outputs))
+
+        for i, x in enumerate(rag_outputs):
+            print(
+                f"RAG[{i}] type={type(x)}, value={x}"
+            )
+
+    print("===============================\n")
+
+    for idx, evidence in zip(
+        rag_indices,
+        rag_outputs
+    ):
+        current_batch[idx]["evidence"] = evidence
