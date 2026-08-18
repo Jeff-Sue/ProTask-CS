@@ -1,7 +1,26 @@
-def _post_json(url: str, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-    response = _http.post(url, json=payload, timeout=timeout)
+def _post_json(
+    url: str,
+    payload: Dict[str, Any],
+    timeout: float
+) -> Dict[str, Any]:
+
+    response = _http.post(
+        url,
+        json=payload,
+        timeout=timeout,
+        proxies={
+            "http": None,
+            "https": None,
+        },
+    )
+
     response.raise_for_status()
+
     data = response.json()
+
     if not isinstance(data, dict):
-        raise RuntimeError(f"Expected JSON object from {url}, got {type(data)}")
+        raise RuntimeError(
+            f"Expected JSON object from {url}, got {type(data)}"
+        )
+
     return data
