@@ -1,392 +1,141 @@
-def run_refinement_pe_batch(
-    items,
-    memories,
-    refinement_prompt,
-    max_depth=4,
-):
-    """
-    Dynamic Batched Difference-Guided Refinement
+你是知识密集型对话系统中的 Evidence Sufficiency Judge。
 
-    items:
-        当前需要重新构建 topic structure 的 current_batch 子集
+你的任务是判断当前 Query 和已有 Topic Structure 是否已经足够支持下一步 Case Selection。你不生成新的 Topic，不修改 Structure。
 
-    每个 depth：
-        1. 对所有 active samples 一起调用 refinement.prompt
-        2. 每个 sample 自己判断 decision_sufficient
-        3. insufficient 的更新一层 structure
-        4. 只保留仍需 refinement 的 samples 进入下一 depth
+## 输入
 
-    样本内 sequential，样本间 parallel。
-    """
+### query_text
+当前用户 Query。
 
-    # ========================================================
-    # 1. Initialize Structures
-    # ========================================================
+### knowledge_state
+知识端输出，包括 common_anchor 和每个 Case 的 Case-specific Information。
 
-    active_items = []
+### current_structure
+当前已经构建的 Topic Structure。
 
-    for x in items:
+### frontier
+当前最新展开到的 Topic Nodes。
 
-        dialog_id = x["dialog_id"]
-        memory = memories[dialog_id]
+## 判断目标
 
-        knowledge_state = memory[
-            "evidence_state"
-        ].get("knowledge_state", {})
+判断当前 Evidence 是否已经具有足够的决策信息。
 
-        if not knowledge_state:
-            x["topic_structure"] = {}
-            continue
+`decision_sufficient = true` 表示：根据当前 Query 和 Structure，已经存在一个或少数明显优先的 Case，可以支持 CaseRecommendation 或 ExplainedResponse；继续向下 Refinement 不会明显改善 Case Selection。
 
-        structure = init_topic_structure(
-            knowledge_state
-        )
+`decision_sufficient = false` 表示：当前仍存在多个合理 Case 或处理路径，并且它们之间尚未暴露出的差异会真实改变 Case Selection；需要继续 Refinement。
 
-        if not structure.get("topic"):
-            x["topic_structure"] = {}
-            continue
+## 判断原则
 
-        # 当前样本自己的运行状态
-        x["_refinement_structure"] = structure
+1. 不要求 Top-K Cases 被完全区分。
+2. 不要求必须唯一确定一个 Case 才能停止。
+3. 如果存在一个 Case 明显比其他 Cases 更符合 Query，即使不能 100% 确认，也可以认为当前 Evidence 已经足够。
+4. 如果剩余 Cases 的差异不会改变下一步动作，不要继续 Refinement。
+5. 只有当进一步区分能够明显改变 Case Selection 时，才继续 Refinement。
+6. 不要因为 Structure 仍然存在多个 Cases 就自动判断为不足。
+7. 必须严格依据 knowledge_state 和 current_structure，不得使用输入中不存在的 Case 信息。
+8. 如果当前 Query 与某个 Case 的 Case-specific Information 已经形成直接或明显对应，应优先判断为 sufficient。
+9. 如果当前 Structure 已经暴露出一个明显优先路径，不需要为了理解其他无关 Branch 而继续展开。
 
-        x["_refinement_frontier"] = [
-            {
-                "topic": structure["topic"],
-                "case_ids": structure["case_ids"],
-            }
-        ]
+## 需要继续 Refinement 时
 
-        x["_refinement_history"] = []
+如果 `decision_sufficient = false`，从当前 frontier 中选择真正需要继续展开的节点，输出到 `refine_node_ids`。
 
-        x["_refinement_done"] = False
+只有同时满足以下条件的节点才能进入 `refine_node_ids`：该节点与当前 Query 相关；节点下存在多个仍然合理的 Cases；这些 Cases 的进一步差异可能改变 Case Selection。
 
-        active_items.append(x)
+不要把已经充分区分的节点加入 `refine_node_ids`。
 
-    # ========================================================
-    # 2. Depth-wise Dynamic Batch
-    # ========================================================
+## 输出
 
-    for depth in range(max_depth):
+只输出 JSON。
 
-        if not active_items:
-            break
+如果当前 Evidence 已经足够：
+{
+  "decision_sufficient": true,
+  "matched_case_ids": ["case_id"],
+  "refine_node_ids": [],
+  "reason": "一句简洁原因"
+}
 
-        print(
-            f"[Refinement Depth {depth}] "
-            f"Active Samples: {len(active_items)}"
-        )
+如果仍需 Refinement：
+{
+  "decision_sufficient": false,
+  "matched_case_ids": [],
+  "refine_node_ids": ["node_id"],
+  "reason": "一句简洁原因"
+}
 
-        refinement_messages = []
-        valid_items = []
 
-        # ----------------------------------------------------
-        # Build current-depth batch
-        # ----------------------------------------------------
+你是知识密集型对话系统中的 One-Level Topic Refiner。
 
-        for x in active_items:
+你的任务是根据当前 Query、Case-specific Information 和指定的 Parent Nodes，对每个 Parent Node 只进行一次下一层 Topic Refinement。
 
-            dialog_id = x["dialog_id"]
-            memory = memories[dialog_id]
+你不负责判断当前 Evidence 是否已经足够，也不负责决定是否停止 Refinement。
 
-            structure = x[
-                "_refinement_structure"
-            ]
+## 输入
 
-            frontier = x[
-                "_refinement_frontier"
-            ]
+### query_text
+当前用户 Query。
 
-            if not frontier:
-                # 没有 unresolved branch
-                structure["decision_sufficient"] = True
-                structure["final_depth"] = depth
+### knowledge_state
+知识端输出，包括 common_anchor 和每个 Case 的 Case-specific Information。
 
-                x["_refinement_done"] = True
-                continue
-
-            refinement_input = \
-                build_refinement_input(
-                    memory,
-                    structure,
-                    frontier,
-                )
+### current_structure
+当前 Topic Structure。
 
-            refinement_messages.append(
-                build_messages(
-                    refinement_prompt,
-                    refinement_input,
-                )
-            )
+### refine_nodes
+Judgement 模块指定需要继续展开的 Parent Nodes，每个节点包含 node_id、topic 和 case_ids。
 
-            valid_items.append(x)
+## 任务
 
-        if not refinement_messages:
-            break
+对每个 refine_node 独立执行一次 One-Level Refinement。
 
-        # ----------------------------------------------------
-        # One batch inference at this depth
-        # ----------------------------------------------------
+### 1. 生成下一层 Child Topics
+从该 Parent Node 对应 Cases 的 Case-specific Information 中寻找下一层 Query-relevant + discriminative Topics。
 
-        refinement_outputs = parallel_inference(
-            refinement_messages
-        )
+### 2. 下一层约束
+Child Topic 必须是当前 Parent Topic 的直接语义细化；只允许展开一层，不允许一次生成多层 Topic Tree；优先使用当前层级下最浅、最自然、能够体现 Case 差异的语义维度。
 
-        next_active_items = []
+### 3. Query Relevance
+只保留与当前 Query 判断相关的 Child Topics，不要因为 Case 中存在某个差异就加入无关 Topic。
 
-        # ----------------------------------------------------
-        # Parse each sample
-        # ----------------------------------------------------
-
-        for x, out in zip(
-            valid_items,
-            refinement_outputs,
-        ):
-
-            result = parse_llm_output(out)
-
-            structure = x[
-                "_refinement_structure"
-            ]
-
-            frontier_before = copy.deepcopy(
-                x["_refinement_frontier"]
-            )
-
-            x["_refinement_history"].append(
-                {
-                    "depth": depth,
-                    "input_frontier":
-                        frontier_before,
-                    "output":
-                        copy.deepcopy(result),
-                }
-            )
-
-            # =================================================
-            # A. Invalid output
-            # =================================================
-
-            if not result:
-
-                structure["decision_sufficient"] = False
-                structure["stop_reason"] = \
-                    "invalid_refinement_output"
-
-                structure["final_depth"] = depth
-
-                x["_refinement_done"] = True
-                continue
-
-            # =================================================
-            # B. Difference already sufficient
-            # =================================================
-
-            if result.get(
-                "decision_sufficient",
-                False,
-            ):
-
-                structure["decision_sufficient"] = True
-                structure["stop_reason"] = \
-                    "decision_sufficient"
-
-                structure["final_depth"] = depth
-
-                x["_refinement_done"] = True
-                continue
-
-            # =================================================
-            # C. One-Level Refinement
-            # =================================================
-
-            refinements = result.get(
-                "refinements",
-                [],
-            )
-
-            if not refinements:
-
-                structure["decision_sufficient"] = False
-                structure["stop_reason"] = \
-                    "no_valid_refinement"
-
-                structure["final_depth"] = depth
-
-                x["_refinement_done"] = True
-                continue
-
-            structure = apply_refinements(
-                structure,
-                refinements,
-            )
-
-            x[
-                "_refinement_structure"
-            ] = structure
-
-            # =================================================
-            # D. Get unresolved branches for next depth
-            # =================================================
-
-            next_frontier = result.get(
-                "unresolved_branches",
-                [],
-            )
-
-            x[
-                "_refinement_frontier"
-            ] = next_frontier
-
-            # 如果模型已经没有 unresolved branch，
-            # 则当前 refinement 后自然到达 frontier
-            if not next_frontier:
-
-                structure["decision_sufficient"] = True
-                structure["stop_reason"] = \
-                    "no_unresolved_branch"
-
-                structure["final_depth"] = depth + 1
-
-                x["_refinement_done"] = True
-                continue
-
-            # 仍需下一层 refinement
-            next_active_items.append(x)
-
-        active_items = next_active_items
-
-    # ========================================================
-    # 3. Max Depth
-    # ========================================================
-
-    for x in active_items:
-
-        structure = x[
-            "_refinement_structure"
-        ]
-
-        structure["decision_sufficient"] = False
-        structure["stop_reason"] = "max_depth"
-        structure["final_depth"] = max_depth
-
-        x["_refinement_done"] = True
-
-    # ========================================================
-    # 4. Finalize
-    # ========================================================
-
-    for x in items:
-
-        if "_refinement_structure" not in x:
-            continue
-
-        structure = x[
-            "_refinement_structure"
-        ]
-
-        structure[
-            "refinement_history"
-        ] = x[
-            "_refinement_history"
-        ]
-
-        x["topic_structure"] = structure
-
-        dialog_id = x["dialog_id"]
-
-        memories[
-            dialog_id
-        ] = update_topic_structure_memory(
-            memories[dialog_id],
-            structure,
-        )
-
-        # 清理运行时字段，不写进最终结果
-        x.pop(
-            "_refinement_structure",
-            None,
-        )
-
-        x.pop(
-            "_refinement_frontier",
-            None,
-        )
-
-        x.pop(
-            "_refinement_history",
-            None,
-        )
-
-        x.pop(
-            "_refinement_done",
-            None,
-        )
-
-
-
-
-
-
-# ====================================================
-# 5. Difference-Guided Adaptive Refinement Batch
-# ====================================================
-
-print(
-    f"[Turn {t_id}] "
-    f"Topic Refinement Batch"
-)
-
-refinement_items = []
-
-for x in current_batch:
-
-    memory = memories[
-        x["dialog_id"]
-    ]
-
-    # -----------------------------------------------
-    # 当前 Query / Evidence 没变化，复用旧 Structure
-    # -----------------------------------------------
-
-    if not need_structure_update(x):
-
-        x["topic_structure"] = \
-            copy.deepcopy(
-                memory[
-                    "evidence_state"
-                ][
-                    "topic_structure"
-                ]
-            )
-
-        continue
-
-    # -----------------------------------------------
-    # 没有 Knowledge State
-    # -----------------------------------------------
-
-    if not memory[
-        "evidence_state"
-    ]["knowledge_state"]:
-
-        x["topic_structure"] = {}
-        continue
-
-    # -----------------------------------------------
-    # 加入本轮 Dynamic Refinement Batch
-    # -----------------------------------------------
-
-    refinement_items.append(x)
-
-
-# 一次处理所有需要重新 refinement 的 samples
-if refinement_items:
-
-    run_refinement_pe_batch(
-        items=refinement_items,
-        memories=memories,
-        refinement_prompt=
-            refinement_prompt,
-        max_depth=
-            max_refinement_depth,
-    )
+### 4. Case Difference
+Child Topics 应能够暴露当前 Parent 下不同 Cases 之间可能影响 Case Selection 的差异。
+
+### 5. Case–Topic Alignment
+不同 Cases 应尽可能映射到统一的 Topic Space；语义相同或高度相似的信息应归一到同一个 Child Topic；一个 Case 可以映射到多个 Child Topics。
+
+### 6. Evidence Grounding
+每个 Case 映射到某个 Child Topic 时，必须能够从该 Case 的 `information` 中找到明确依据；禁止根据常识补充信息；禁止因为另一个 Case 明确“不支持”就推断当前 Case“支持”；禁止生成 Case-specific Information 中不存在的事实。
+
+## 重要约束
+
+不要判断 decision_sufficient。
+不要输出 unresolved_branches。
+不要重新输出 Parent Node 作为 Child。
+不要生成和当前 Parent 语义层级相同的 Topic。
+不要一次跨越多个语义层级。
+不要为了把 Cases 强行分开而创造没有证据支持的 Topic。
+如果当前 Parent 无法产生合理的下一层差异，children 输出空列表。
+
+## 输出
+
+只输出 JSON。
+
+{
+  "refinements": [
+    {
+      "parent_node_id": "node_id",
+      "parent_topic": "当前 Parent Topic",
+      "children": [
+        {
+          "topic": "下一层 Topic",
+          "case_ids": ["case_id_1", "case_id_2"],
+          "evidence": {
+            "case_id_1": ["对应的 Case-specific Information"],
+            "case_id_2": ["对应的 Case-specific Information"]
+          }
+        }
+      ]
+    }
+  ]
+}
