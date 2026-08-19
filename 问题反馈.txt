@@ -321,3 +321,72 @@ def run_refinement_pe_batch(
             "_refinement_done",
             None,
         )
+
+
+
+
+
+
+# ====================================================
+# 5. Difference-Guided Adaptive Refinement Batch
+# ====================================================
+
+print(
+    f"[Turn {t_id}] "
+    f"Topic Refinement Batch"
+)
+
+refinement_items = []
+
+for x in current_batch:
+
+    memory = memories[
+        x["dialog_id"]
+    ]
+
+    # -----------------------------------------------
+    # 当前 Query / Evidence 没变化，复用旧 Structure
+    # -----------------------------------------------
+
+    if not need_structure_update(x):
+
+        x["topic_structure"] = \
+            copy.deepcopy(
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+            )
+
+        continue
+
+    # -----------------------------------------------
+    # 没有 Knowledge State
+    # -----------------------------------------------
+
+    if not memory[
+        "evidence_state"
+    ]["knowledge_state"]:
+
+        x["topic_structure"] = {}
+        continue
+
+    # -----------------------------------------------
+    # 加入本轮 Dynamic Refinement Batch
+    # -----------------------------------------------
+
+    refinement_items.append(x)
+
+
+# 一次处理所有需要重新 refinement 的 samples
+if refinement_items:
+
+    run_refinement_pe_batch(
+        items=refinement_items,
+        memories=memories,
+        refinement_prompt=
+            refinement_prompt,
+        max_depth=
+            max_refinement_depth,
+    )
