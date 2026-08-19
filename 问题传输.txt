@@ -1,72 +1,203 @@
-from __future__ import annotations
-
-import argparse
-import copy
 import json
-from pathlib import Path
-from typing import Any, Dict, Optional
-
+import copy
 from utils.scu_rag import batch_zefeng_rag
 from utils.qwen_api_multi import parallel_inference
+import argparse
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-
-# ============================================================
+# =========================
 # Utils
-# ============================================================
+# =========================
 
 def parse_json(text):
     if isinstance(text, dict):
         return text
-
     try:
         return json.loads(text)
-    except Exception:
+    except:
         return {}
-
-
-def parse_llm_output(output):
-    parsed = parse_json(output)
-
-    if not parsed:
-        return {}
-
-    if "response" in parsed:
-        response = parsed["response"]
-
-        if isinstance(response, dict):
-            return response
-
-        return parse_json(response)
-
-    return parsed
-
 
 def prompt_read(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Prompt file not found: {path}")
-
-    return path.read_text(
-        encoding="utf-8"
-    ).strip()
-
+    return path.read_text(encoding="utf-8").strip()
 
 def write_json(path: str | Path, data: Any) -> None:
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True
+# =========================
+# Memory
+# =========================
+
+def init_memory():
+
+    return {
+
+        "issue_state": {
+            "current_issue": "",
+            "query_history": []
+        },
+
+        "dialog_state": {
+            "compressed_history": []
+        },
+
+        "evidence_state": {
+            "active_cases": [],
+        },
+
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": []
+        }
+    }
+
+# =========================
+# Memory Update
+# =========================
+
+def update_issue_memory(memory, query_state):
+
+    mode = query_state.get(
+        "query_mode",
+        "none"
+    )
+    query = query_state.get(
+        "query_text",
+        ""
     )
 
-    path.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
+    # 新问题
+    if mode == "rewrite":
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+
+    # 同一问题补充信息
+    elif mode == "refine":
+
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+
+    # 沿用，不修改
+    elif mode == "reuse":
+        pass
+
+
+    # 无问题，不修改
+    elif mode == "none":
+        pass
+
+    return memory
+
+
+def update_evidence_memory(
+        memory,
+        trigger_state,
+        evidence):
+
+    mode = trigger_state.get(
+        "evidence_mode",
+        "no_evidence_needed"
     )
 
+    # 新检索结果覆盖旧 evidence
+    if mode == "retrieve_new_evidence":
+
+        memory["evidence_state"][
+            "active_cases"
+        ] = evidence
+
+    # reuse / none 都保持
+    return memory
+
+
+def update_interaction_memory(
+        memory,
+        policy_state):
+
+    label = policy_state.get(
+        "label",
+        ""
+    )
+
+    memory["interaction_state"][
+        "last_action"
+    ] = label
+
+    memory["interaction_state"][
+        "action_history"
+    ].append(label)
+
+    # stage transition
+    if label in [
+        "AskMissingSlot",
+        "AskClarification"
+    ]:
+
+        memory["interaction_state"][
+            "stage"
+        ] = "Clarification"
+
+    elif label in [
+        "ExplainedResponse",
+        "CaseRecommendation"
+    ]:
+        memory["interaction_state"][
+            "stage"
+        ] = "Resolution"
+
+    elif label == "Handoff":
+        memory["interaction_state"][
+            "stage"
+        ] = "End"
+
+    # ProcessAcknowledgement:
+    # 不改变stage
+
+    return memory
+
+
+def update_dialogue_memory(
+        memory,
+        user,
+        response
+):
+
+    history = memory["dialog_state"]["compressed_history"]
+
+    history.append(
+        {
+            "user": user,
+            "assistant": response
+        }
+    )
+
+    # 保留最近5轮
+    memory["dialog_state"][
+        "compressed_history"
+    ] = history[-5:]
+
+    return memory
+
+# =========================
+# Prompt Input Builder
+# =========================
 
 def build_messages(system_prompt, data):
     return [
@@ -84,2180 +215,448 @@ def build_messages(system_prompt, data):
     ]
 
 
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
-        },
-
-        "dialog_state": {
-            "compressed_history": []
-        },
-
-        "evidence_state": {
-            "active_cases": [],
-            "knowledge_state": {},
-            "topic_structure": {}
-        },
-
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": []
-        }
-    }
-
-
-# ============================================================
-# Memory Update
-# ============================================================
-
-def update_issue_memory(memory, query_state):
-    mode = query_state.get(
-        "query_mode",
-        "none"
-    )
-
-    query = query_state.get(
-        "query_text",
-        ""
-    )
-
-    if mode in [
-        "rewrite",
-        "refine"
-    ]:
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-    return memory
-
-
-def update_evidence_memory(
-    memory,
-    trigger_state,
-    evidence
-):
-    mode = trigger_state.get(
-        "evidence_mode",
-        "no_evidence_needed"
-    )
-
-    if mode == "retrieve_new_evidence":
-        memory["evidence_state"][
-            "active_cases"
-        ] = evidence
-
-        memory["evidence_state"][
-            "knowledge_state"
-        ] = {}
-
-        memory["evidence_state"][
-            "topic_structure"
-        ] = {}
-
-    return memory
-
-
-def update_knowledge_memory(
-    memory,
-    knowledge_state
-):
-    memory["evidence_state"][
-        "knowledge_state"
-    ] = knowledge_state
-
-    return memory
-
-
-def update_topic_structure_memory(
-    memory,
-    topic_structure
-):
-    memory["evidence_state"][
-        "topic_structure"
-    ] = topic_structure
-
-    return memory
-
-
-def update_interaction_memory(
-    memory,
-    policy_state
-):
-    label = policy_state.get(
-        "label",
-        ""
-    )
-
-    memory["interaction_state"][
-        "last_action"
-    ] = label
-
-    memory["interaction_state"][
-        "action_history"
-    ].append(label)
-
-    if label in [
-        "AskMissingSlot",
-        "AskClarification"
-    ]:
-        memory[
-            "interaction_state"
-        ]["stage"] = "Clarification"
-
-    elif label in [
-        "ExplainedResponse",
-        "CaseRecommendation"
-    ]:
-        memory[
-            "interaction_state"
-        ]["stage"] = "Resolution"
-
-    elif label == "Handoff":
-        memory[
-            "interaction_state"
-        ]["stage"] = "End"
-
-    return memory
-
-
-def update_dialogue_memory(
-    memory,
-    user,
-    response
-):
-    history = memory[
-        "dialog_state"
-    ]["compressed_history"]
-
-    history.append(
-        {
-            "user": user,
-            "assistant": response
-        }
-    )
-
-    memory[
-        "dialog_state"
-    ]["compressed_history"] = history[-5:]
-
-    return memory
-
-
-# ============================================================
-# Input Builder
-# ============================================================
-
-def build_query_input(
-    memory,
-    user
-):
+def build_query_input(memory, user):
     return {
         "issue_state":
             memory["issue_state"],
-
         "dialog_state":
             memory["dialog_state"],
-
-        "current": {
+        "current":{
             "u": user
         }
     }
 
 
-def build_trigger_input(
-    memory,
-    query_state
-):
+def build_trigger_input(memory):
     return {
-        "query_state":
-            query_state,
-
         "issue_state":
             memory["issue_state"],
-
-        "evidence_state": {
-            "active_cases":
-                memory[
-                    "evidence_state"
-                ]["active_cases"]
-        },
-
+        "evidence_state":
+            memory["evidence_state"],
         "dialog_state":
-            memory["dialog_state"]
+            memory["dialog_state"],
     }
 
 
-def build_knowledge_input(memory):
-    return {
-        "query_text":
-            memory[
-                "issue_state"
-            ]["current_issue"],
 
-        "evidence":
-            memory[
-                "evidence_state"
-            ]["active_cases"]
-    }
-
-
-def build_judgement_input(
-    memory,
-    structure,
-    frontier
-):
-    return {
-        "query_text":
-            memory[
-                "issue_state"
-            ]["current_issue"],
-
-        "knowledge_state":
-            memory[
-                "evidence_state"
-            ]["knowledge_state"],
-
-        "current_structure":
-            structure,
-
-        "frontier":
-            frontier
-    }
-
-
-def build_refinement_input(
-    memory,
-    structure,
-    refine_nodes
-):
-    return {
-        "query_text":
-            memory[
-                "issue_state"
-            ]["current_issue"],
-
-        "knowledge_state":
-            memory[
-                "evidence_state"
-            ]["knowledge_state"],
-
-        "current_structure":
-            structure,
-
-        "refine_nodes":
-            refine_nodes
-    }
-
-
-# ============================================================
-# IMPORTANT: Full Policy Input
-# ============================================================
-
-def build_policy_input(
-    memory,
-    user
-):
-    evidence_state = memory[
-        "evidence_state"
-    ]
-
-    topic_structure = evidence_state.get(
-        "topic_structure",
-        {}
-    )
-
+def build_policy_input(memory, user):
     return {
         "issue_state":
             memory["issue_state"],
-
-        "evidence_state": {
-            # --------------------------------------------
-            # Raw Evidence
-            # --------------------------------------------
-            "active_cases":
-                evidence_state.get(
-                    "active_cases",
-                    []
-                ),
-
-            # --------------------------------------------
-            # Knowledge-side compressed evidence
-            # --------------------------------------------
-            "knowledge_state":
-                evidence_state.get(
-                    "knowledge_state",
-                    {}
-                ),
-
-            # --------------------------------------------
-            # Dialogue-side hierarchical structure
-            # --------------------------------------------
-            "topic_structure":
-                topic_structure,
-
-            # --------------------------------------------
-            # Explicit Evidence Judgment
-            # --------------------------------------------
-            "evidence_status":
-                topic_structure.get(
-                    "evidence_status",
-                    ""
-                ),
-
-            "matched_case_ids":
-                topic_structure.get(
-                    "matched_case_ids",
-                    []
-                ),
-
-            "judgement_reason":
-                topic_structure.get(
-                    "judgement_reason",
-                    ""
-                ),
-
-            "stop_reason":
-                topic_structure.get(
-                    "stop_reason",
-                    ""
-                )
-        },
-
+        "evidence_state":
+            memory["evidence_state"],
         "interaction_state":
             memory["interaction_state"],
-
         "dialog_state":
             memory["dialog_state"],
-
-        "current": {
+        "current":{
             "u": user
-        }
+        },
     }
 
 
 def build_response_input(
-    memory,
-    user
-):
+        memory,
+        user
+        ):
     return {
         "issue_state":
             memory["issue_state"],
-
         "evidence_state":
             memory["evidence_state"],
-
         "interaction_state":
             memory["interaction_state"],
-
         "dialog_state":
             memory["dialog_state"],
-
-        "current": {
-            "u": user,
-
-            "policy":
-                memory[
-                    "interaction_state"
-                ]["last_action"]
-        }
+        "current":{
+            "u":user,
+            "policy": memory["interaction_state"]['last_action'],
+        },
     }
 
 
-# ============================================================
-# Topic Structure
-# ============================================================
-
-def init_topic_structure(
-    knowledge_state
-):
-    anchor = knowledge_state.get(
-        "common_anchor",
-        ""
-    )
-
-    cases = knowledge_state.get(
-        "cases",
-        []
-    )
-
-    case_ids = [
-        x.get("case_id")
-        for x in cases
-        if x.get("case_id")
-    ]
-
-    return {
-        "node_id":
-            "root",
-
-        "topic":
-            anchor,
-
-        "case_ids":
-            case_ids,
-
-        "children":
-            [],
-
-        "status":
-            "unresolved"
-    }
-
-
-def find_node_by_id(
-    node: Dict[str, Any],
-    node_id: str
-) -> Optional[Dict[str, Any]]:
-    if node.get(
-        "node_id"
-    ) == node_id:
-        return node
-
-    for child in node.get(
-        "children",
-        []
-    ):
-        result = find_node_by_id(
-            child,
-            node_id
-        )
-
-        if result is not None:
-            return result
-
-    return None
-
-
-def normalize_case_ids(
-    case_ids,
-    valid_case_ids
-):
-    if not isinstance(
-        case_ids,
-        list
-    ):
-        return []
-
-    valid_set = set(
-        valid_case_ids
-    )
-
-    return [
-        x
-        for x in case_ids
-        if x in valid_set
-    ]
-
-
-def apply_refinements(
-    structure,
-    refinements
-):
-    """
-    只允许 One-Level Refinement。
-    同时要求新的 children 至少产生新的 Case Partition。
-    """
-
-    new_frontier = []
-
-    for refinement in refinements:
-        parent_node_id = refinement.get(
-            "parent_node_id",
-            ""
-        )
-
-        parent = find_node_by_id(
-            structure,
-            parent_node_id
-        )
-
-        if parent is None:
-            continue
-
-        parent_topic = parent.get(
-            "topic",
-            ""
-        )
-
-        parent_case_ids = parent.get(
-            "case_ids",
-            []
-        )
-
-        raw_children = refinement.get(
-            "children",
-            []
-        )
-
-        normalized_children = []
-
-        for idx, child in enumerate(
-            raw_children
-        ):
-            topic = str(
-                child.get(
-                    "topic",
-                    ""
-                )
-            ).strip()
-
-            if not topic:
+# =========================
+# Main
+# =========================
+def run_memory_agent(data):
+    query_prompt = prompt_read(Path("prompts/query.prompt"))
+    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
+    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
+    response_prompt = prompt_read(Path("prompts/response.prompt"))
+    results = {}
+    for dialog_id, item in data.items():
+        memory = init_memory()
+        turns = []
+        dialogue_history = ""
+        for t_id, msg in enumerate(item["text"]):
+            if "用户" not in msg:
+                dialogue_history += f"客服: {msg['客服']}\n"
                 continue
+            user = msg["用户"]
+            dialogue_history += f"用户: {msg['用户']}\n"
+            # =====================
+            # 1 Query
+            # =====================
+            query_input = build_query_input(memory, user)
+            print("query_input: ", query_input)
+            query_messages = build_messages(query_prompt, query_input)
+            query_output = parallel_inference([query_messages])[0]
+            query_state = parse_json(parse_json(query_output)['response'])
 
-            # parent 不能成为自己的 child
-            if topic == parent_topic:
-                continue
-
-            case_ids = normalize_case_ids(
-                child.get(
-                    "case_ids",
-                    []
-                ),
-                parent_case_ids
+            memory = update_issue_memory(
+                memory,
+                query_state
             )
 
-            if not case_ids:
-                continue
+            # =====================
+            # 2 Trigger
+            # =====================
+            trigger_input = build_trigger_input(memory)
+            print("trigger_input: ", trigger_input)
+            trigger_messages = build_messages(trigger_prompt, trigger_input)
+            trigger_output = parallel_inference([trigger_messages])[0]
+            trigger_state = parse_json(parse_json(trigger_output)['response'])
 
-            child_node = {
-                "node_id":
-                    f"{parent_node_id}.{idx}",
+            # =====================
+            # 3 Evidence
+            # =====================
 
-                "topic":
-                    topic,
+            if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
+                query = memory["issue_state"]["current_issue"]
+                evidence = batch_zefeng_rag([dialogue_history],[query])[0]
+            else:
+                evidence = memory["evidence_state"]["active_cases"]
+            memory = update_evidence_memory(memory, trigger_state, evidence)
 
-                "case_ids":
-                    case_ids,
+            # =====================
+            # 4 Policy
+            # =====================
+            policy_input = build_policy_input(memory, user)
+            print("policy_input: ", policy_input)
+            policy_messages = build_messages(policy_prompt, policy_input)
+            policy_output = parallel_inference([policy_messages])[0]
+            policy_state = parse_json(parse_json(policy_output)['response'])
 
-                "evidence":
-                    child.get(
-                        "evidence",
-                        {}
-                    ),
-
-                "children":
-                    [],
-
-                "status":
-                    "unresolved"
-            }
-
-            normalized_children.append(
-                child_node
+            memory = update_interaction_memory(
+                memory,
+                policy_state
             )
 
-        # ====================================================
-        # Discrimination Check
-        # ====================================================
+            # =====================
+            # 5 Response
+            # =====================
+            response_input = build_response_input(memory, user)
+            print("response_input: ", response_input)
+            response_messages = build_messages(response_prompt, response_input)
+            response_output = parallel_inference([response_messages])[0]
+            response = parse_json(parse_json(response_output)['response'])
 
-        # 单 child + 覆盖全部 parent cases
-        # 没有产生任何新的 partition
-        if len(
-            normalized_children
-        ) == 1:
-            only_child = \
-                normalized_children[0]
-
-            if set(
-                only_child["case_ids"]
-            ) == set(
-                parent_case_ids
-            ):
-                normalized_children = []
-
-        # 如果所有 child 的 case partition 都完全一样，
-        # 也不能视为有效 refinement
-        unique_partitions = {
-            tuple(
-                sorted(
-                    child["case_ids"]
-                )
+            memory = update_dialogue_memory(
+                memory,
+                user,
+                item["text"][t_id+1]["客服"],
             )
-            for child
-            in normalized_children
+
+            turns.append(
+                {
+                    "turn_id": t_id,
+                    "user": user,
+                    "query":
+                        query_state,
+                    "trigger":
+                        trigger_state,
+                    "evidence":
+                        evidence,
+                    "policy":
+                        policy_state,
+                    "response":
+                        response,
+                    "golden_response":
+                        item["text"][t_id+1]["客服"],
+                    # "memory":
+                    #     copy.deepcopy(memory)
+                }
+            )
+
+        results[dialog_id] = {
+            "turns": turns,
+            "final_memory": memory
         }
+    return results
 
-        if (
-            len(unique_partitions) <= 1
-            and len(parent_case_ids) > 1
-        ):
-            normalized_children = []
 
-        if not normalized_children:
-            parent[
-                "status"
-            ] = "no_refinement"
+def run_memory_agent_batch(data, batch_size=8):
+    # 加载prompts
+    query_prompt = prompt_read(Path("prompts/query.prompt"))
+    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
+    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
+    response_prompt = prompt_read(Path("prompts/response.prompt"))
 
-            continue
-
-        parent[
-            "children"
-        ] = normalized_children
-
-        parent[
-            "status"
-        ] = "refined"
-
-        for child_node in \
-                normalized_children:
-
-            new_frontier.append(
-                {
-                    "node_id":
-                        child_node[
-                            "node_id"
-                        ],
-
-                    "topic":
-                        child_node[
-                            "topic"
-                        ],
-
-                    "case_ids":
-                        child_node[
-                            "case_ids"
-                        ]
-                }
-            )
-
-    return structure, new_frontier
-
-
-# ============================================================
-# Structure Update
-# ============================================================
-
-def need_structure_update(x):
-    query_mode = x[
-        "query"
-    ].get(
-        "query_mode",
-        ""
-    )
-
-    evidence_mode = x[
-        "trigger"
-    ].get(
-        "evidence_mode",
-        ""
-    )
-
-    # Query 没有变化且 Evidence 没更新
-    if (
-        query_mode
-        in ["none", "reuse"]
-        and evidence_mode
-        != "retrieve_new_evidence"
-    ):
-        return False
-
-    if query_mode in [
-        "rewrite",
-        "refine"
-    ]:
-        return True
-
-    if evidence_mode == \
-            "retrieve_new_evidence":
-        return True
-
-    return False
-
-
-# ============================================================
-# Judgement + Refinement
-# ============================================================
-
-def run_refinement_pe_batch(
-    items,
-    memories,
-    judgement_prompt,
-    refinement_prompt,
-    max_depth=4
-):
-    """
-    三态 Evidence Judgment：
-
-    matched
-        -> 已经存在高价值 Case
-        -> STOP
-
-    refine
-        -> 答案可能存在于当前 Cases，
-           但需要暴露 Case Difference
-        -> One-Level Refinement
-
-    insufficient
-        -> 当前 Cases 缺关键事实
-        -> STOP
-    """
-
-    active_items = []
-
-    # ========================================================
-    # Initialize
-    # ========================================================
-
-    for x in items:
-        dialog_id = x[
-            "dialog_id"
-        ]
-
-        memory = memories[
-            dialog_id
-        ]
-
-        knowledge_state = memory[
-            "evidence_state"
-        ][
-            "knowledge_state"
-        ]
-
-        if not knowledge_state:
-            x[
-                "topic_structure"
-            ] = {}
-
-            continue
-
-        structure = \
-            init_topic_structure(
-                knowledge_state
-            )
-
-        if not structure.get(
-            "topic"
-        ):
-            x[
-                "topic_structure"
-            ] = {}
-
-            continue
-
-        x[
-            "_structure"
-        ] = structure
-
-        x[
-            "_frontier"
-        ] = [
-            {
-                "node_id":
-                    "root",
-
-                "topic":
-                    structure[
-                        "topic"
-                    ],
-
-                "case_ids":
-                    structure[
-                        "case_ids"
-                    ]
-            }
-        ]
-
-        x[
-            "_judgement_history"
-        ] = []
-
-        x[
-            "_refinement_history"
-        ] = []
-
-        active_items.append(x)
-
-    # ========================================================
-    # Dynamic Iteration
-    # ========================================================
-
-    for depth in range(
-        max_depth + 1
-    ):
-        if not active_items:
-            break
-
-        # ====================================================
-        # 1. Judgement Batch
-        # ====================================================
-
-        print(
-            f"[Refinement Depth {depth}] "
-            f"Judgement Batch: "
-            f"{len(active_items)}"
-        )
-
-        judgement_messages = []
-
-        for x in active_items:
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            judgement_input = \
-                build_judgement_input(
-                    memory,
-                    x["_structure"],
-                    x["_frontier"]
-                )
-
-            judgement_messages.append(
-                build_messages(
-                    judgement_prompt,
-                    judgement_input
-                )
-            )
-
-        judgement_outputs = \
-            parallel_inference(
-                judgement_messages
-            )
-
-        need_refinement = []
-
-        for x, out in zip(
-            active_items,
-            judgement_outputs
-        ):
-            result = \
-                parse_llm_output(out)
-
-            structure = \
-                x["_structure"]
-
-            x[
-                "_judgement_history"
-            ].append(
-                {
-                    "depth":
-                        depth,
-
-                    "frontier":
-                        copy.deepcopy(
-                            x[
-                                "_frontier"
-                            ]
-                        ),
-
-                    "output":
-                        copy.deepcopy(
-                            result
-                        )
-                }
-            )
-
-            # =================================================
-            # Invalid Judgment
-            # =================================================
-
-            if not result:
-                structure[
-                    "evidence_status"
-                ] = "invalid"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "stop_reason"
-                ] = "invalid_judgement"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            status = str(
-                result.get(
-                    "status",
-                    ""
-                )
-            ).strip().lower()
-
-            # =================================================
-            # MATCHED
-            # =================================================
-
-            if status == "matched":
-                matched_case_ids = \
-                    normalize_case_ids(
-                        result.get(
-                            "matched_case_ids",
-                            []
-                        ),
-                        structure.get(
-                            "case_ids",
-                            []
-                        )
-                    )
-
-                if not matched_case_ids:
-                    structure[
-                        "evidence_status"
-                    ] = "invalid"
-
-                    structure[
-                        "decision_sufficient"
-                    ] = False
-
-                    structure[
-                        "stop_reason"
-                    ] = \
-                        "matched_without_valid_case"
-
-                    structure[
-                        "judgement_reason"
-                    ] = result.get(
-                        "reason",
-                        ""
-                    )
-
-                    structure[
-                        "final_depth"
-                    ] = depth
-
-                    continue
-
-                structure[
-                    "evidence_status"
-                ] = "matched"
-
-                structure[
-                    "decision_sufficient"
-                ] = True
-
-                structure[
-                    "matched_case_ids"
-                ] = matched_case_ids
-
-                structure[
-                    "judgement_reason"
-                ] = result.get(
-                    "reason",
-                    ""
-                )
-
-                structure[
-                    "stop_reason"
-                ] = "matched"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            # =================================================
-            # INSUFFICIENT
-            # =================================================
-
-            if status == \
-                    "insufficient":
-
-                structure[
-                    "evidence_status"
-                ] = "insufficient"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "matched_case_ids"
-                ] = []
-
-                structure[
-                    "judgement_reason"
-                ] = result.get(
-                    "reason",
-                    ""
-                )
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "insufficient_evidence"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            # =================================================
-            # Invalid Status
-            # =================================================
-
-            if status != "refine":
-                structure[
-                    "evidence_status"
-                ] = "invalid"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "judgement_reason"
-                ] = result.get(
-                    "reason",
-                    ""
-                )
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "invalid_judgement_status"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            # =================================================
-            # REFINE
-            # =================================================
-
-            if depth >= max_depth:
-                structure[
-                    "evidence_status"
-                ] = "unresolved"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "judgement_reason"
-                ] = result.get(
-                    "reason",
-                    ""
-                )
-
-                structure[
-                    "stop_reason"
-                ] = "max_depth"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            refine_node_ids = \
-                result.get(
-                    "refine_node_ids",
-                    []
-                )
-
-            refine_nodes = []
-
-            for node_id in \
-                    refine_node_ids:
-
-                node = \
-                    find_node_by_id(
-                        structure,
-                        node_id
-                    )
-
-                if node is None:
-                    continue
-
-                case_ids = \
-                    node.get(
-                        "case_ids",
-                        []
-                    )
-
-                # Singleton 不再继续 refine
-                if len(case_ids) <= 1:
-                    continue
-
-                refine_nodes.append(
-                    {
-                        "node_id":
-                            node[
-                                "node_id"
-                            ],
-
-                        "topic":
-                            node[
-                                "topic"
-                            ],
-
-                        "case_ids":
-                            case_ids
-                    }
-                )
-
-            # Judge 认为 refine，
-            # 但结构上没有任何可展开节点
-            if not refine_nodes:
-                structure[
-                    "evidence_status"
-                ] = "insufficient"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "matched_case_ids"
-                ] = []
-
-                structure[
-                    "judgement_reason"
-                ] = result.get(
-                    "reason",
-                    ""
-                )
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "no_refinable_branch"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            x[
-                "_refine_nodes"
-            ] = refine_nodes
-
-            need_refinement.append(x)
-
-        if not need_refinement:
-            break
-
-        # ====================================================
-        # 2. Refinement Batch
-        # ====================================================
-
-        print(
-            f"[Refinement Depth {depth}] "
-            f"Refinement Batch: "
-            f"{len(need_refinement)}"
-        )
-
-        refinement_messages = []
-
-        for x in need_refinement:
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            refinement_input = \
-                build_refinement_input(
-                    memory,
-                    x["_structure"],
-                    x[
-                        "_refine_nodes"
-                    ]
-                )
-
-            refinement_messages.append(
-                build_messages(
-                    refinement_prompt,
-                    refinement_input
-                )
-            )
-
-        refinement_outputs = \
-            parallel_inference(
-                refinement_messages
-            )
-
-        next_active_items = []
-
-        for x, out in zip(
-            need_refinement,
-            refinement_outputs
-        ):
-            result = \
-                parse_llm_output(out)
-
-            structure = \
-                x["_structure"]
-
-            x[
-                "_refinement_history"
-            ].append(
-                {
-                    "depth":
-                        depth,
-
-                    "refine_nodes":
-                        copy.deepcopy(
-                            x[
-                                "_refine_nodes"
-                            ]
-                        ),
-
-                    "output":
-                        copy.deepcopy(
-                            result
-                        )
-                }
-            )
-
-            if not result:
-                structure[
-                    "evidence_status"
-                ] = "insufficient"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "invalid_refinement"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            refinements = \
-                result.get(
-                    "refinements",
-                    []
-                )
-
-            if not refinements:
-                structure[
-                    "evidence_status"
-                ] = "insufficient"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "no_valid_refinement"
-
-                structure[
-                    "final_depth"
-                ] = depth
-
-                continue
-
-            structure, new_frontier = \
-                apply_refinements(
-                    structure,
-                    refinements
-                )
-
-            x[
-                "_structure"
-            ] = structure
-
-            # 无法产生新的 Case Partition
-            if not new_frontier:
-                structure[
-                    "evidence_status"
-                ] = "insufficient"
-
-                structure[
-                    "decision_sufficient"
-                ] = False
-
-                structure[
-                    "matched_case_ids"
-                ] = []
-
-                structure[
-                    "stop_reason"
-                ] = \
-                    "no_discriminative_refinement"
-
-                structure[
-                    "final_depth"
-                ] = depth + 1
-
-                continue
-
-            x[
-                "_frontier"
-            ] = new_frontier
-
-            next_active_items.append(x)
-
-        active_items = \
-            next_active_items
-
-    # ========================================================
-    # Finalize
-    # ========================================================
-
-    for x in items:
-        if "_structure" not in x:
-            continue
-
-        structure = \
-            x["_structure"]
-
-        if "evidence_status" \
-                not in structure:
-
-            structure[
-                "evidence_status"
-            ] = "unresolved"
-
-            structure[
-                "decision_sufficient"
-            ] = False
-
-            structure[
-                "stop_reason"
-            ] = "unfinished"
-
-        structure[
-            "judgement_history"
-        ] = x[
-            "_judgement_history"
-        ]
-
-        structure[
-            "refinement_history"
-        ] = x[
-            "_refinement_history"
-        ]
-
-        x[
-            "topic_structure"
-        ] = structure
-
-        dialog_id = \
-            x["dialog_id"]
-
-        memories[
-            dialog_id
-        ] = \
-            update_topic_structure_memory(
-                memories[
-                    dialog_id
-                ],
-                structure
-            )
-
-        x.pop(
-            "_structure",
-            None
-        )
-
-        x.pop(
-            "_frontier",
-            None
-        )
-
-        x.pop(
-            "_refine_nodes",
-            None
-        )
-
-        x.pop(
-            "_judgement_history",
-            None
-        )
-
-        x.pop(
-            "_refinement_history",
-            None
-        )
-
-
-# ============================================================
-# Main Batch Agent
-# ============================================================
-
-def run_memory_agent_batch(
-    data,
-    batch_size=8,
-    max_refinement_depth=4
-):
-    # ========================================================
-    # Prompts
-    # ========================================================
-
-    query_prompt = prompt_read(
-        Path(
-            "prompts/query.prompt"
-        )
-    )
-
-    trigger_prompt = prompt_read(
-        Path(
-            "prompts/trigger.prompt"
-        )
-    )
-
-    knowledge_prompt = prompt_read(
-        Path(
-            "prompts/knowledge.prompt"
-        )
-    )
-
-    judgement_prompt = prompt_read(
-        Path(
-            "prompts/judgement.prompt"
-        )
-    )
-
-    refinement_prompt = prompt_read(
-        Path(
-            "prompts/refinement.prompt"
-        )
-    )
-
-    policy_prompt = prompt_read(
-        Path(
-            "prompts/policy.prompt"
-        )
-    )
-
-    response_prompt = prompt_read(
-        Path(
-            "prompts/response.prompt"
-        )
-    )
-
-    # ========================================================
-    # Memory
-    # ========================================================
-
+    # 初始化所有dialog memory
     memories = {
-        dialog_id:
-            init_memory()
-        for dialog_id
-        in data
+        dialog_id:init_memory()
+        for dialog_id in data
     }
 
     dialogue_history = {
-        dialog_id:
-            ""
-        for dialog_id
-        in data
+        dialog_id:""
+        for dialog_id in data
     }
 
+    # 保存结果
     results = {
-        dialog_id: {
-            "turns": []
+        dialog_id:{
+            "turns":[]
         }
-        for dialog_id
-        in data
+        for dialog_id in data
     }
 
+    # 当前所有dialog最长轮数
     max_turn = max(
-        len(
-            item["text"]
-        )
-        for item
-        in data.values()
+        len(item["text"])
+        for item in data.values()
     )
 
-    # ========================================================
-    # Dialogue Loop
-    # ========================================================
+    for t_id in range(max_turn):
+        print(f"\n========== TURN {t_id} ==========")
+        # ==================================================
+        # 收集当前轮用户
+        # ==================================================
+        current_batch=[]
 
-    for t_id in range(
-        max_turn
-    ):
-        print(
-            f"\n========== "
-            f"TURN {t_id} "
-            f"=========="
-        )
-
-        current_batch = []
-
-        # ====================================================
-        # Collect User Turns
-        # ====================================================
-
-        for dialog_id, item \
-                in data.items():
-
-            if t_id >= len(
-                item["text"]
-            ):
+        for dialog_id,item in data.items():
+            if t_id >= len(item["text"]):
                 continue
 
-            msg = \
-                item["text"][t_id]
-
+            msg=item["text"][t_id]
             if "用户" in msg:
-                dialogue_history[
-                    dialog_id
-                ] += (
-                    f"用户: "
-                    f"{msg['用户']}\n"
-                )
-
+                dialogue_history[dialog_id] += f"用户: {msg['用户']}\n"
             elif "客服" in msg:
-                dialogue_history[
-                    dialog_id
-                ] += (
-                    f"客服: "
-                    f"{msg['客服']}\n"
-                )
+                dialogue_history[dialog_id] += f"客服: {msg['客服']}\n"
 
             if "用户" not in msg:
                 continue
-
-            golden_response = ""
-
-            if (
-                t_id + 1
-                < len(item["text"])
-                and "客服"
-                in item["text"][
-                    t_id + 1
-                ]
-            ):
-                golden_response = \
-                    item["text"][
-                        t_id + 1
-                    ]["客服"]
-
             current_batch.append(
                 {
-                    "dialog_id":
-                        dialog_id,
-
-                    "user":
-                        msg[
-                            "用户"
-                        ],
-
+                    "dialog_id":dialog_id,
+                    "user":msg["用户"],
                     "golden_response":
-                        golden_response,
-
-                    "dialogue_history":
-                        dialogue_history[
-                            dialog_id
-                        ]
+                        item["text"][t_id+1]["客服"]
+                        if t_id+1<len(item["text"])
+                        else "",
+                    "dialogue_history": dialogue_history[dialog_id],
                 }
             )
 
         if not current_batch:
             continue
 
-        # ====================================================
-        # 1. Query
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Query Batch: "
-            f"{len(current_batch)}"
-        )
-
-        query_messages = []
-
+        # ==================================================
+        # 1. Query Batch
+        # ==================================================
+        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
+        query_messages=[]
         for x in current_batch:
-            memory = memories[
+            memory=memories[
                 x["dialog_id"]
             ]
-
+            query_input=build_query_input(
+                memory,
+                x["user"]
+            )
             query_messages.append(
                 build_messages(
                     query_prompt,
-                    build_query_input(
-                        memory,
+                    query_input
+                )
+            )
+
+        query_outputs=parallel_inference(
+            query_messages
+        )
+
+        for x,out in zip(
+            current_batch,
+            query_outputs
+        ):
+            query_state=parse_json(
+                parse_json(out)["response"]
+            )
+            x["query"]=query_state
+            memories[
+                x["dialog_id"]
+            ]=update_issue_memory(
+                memories[x["dialog_id"]],
+                query_state
+            )
+
+        # ==================================================
+        # 2. Trigger Batch
+        # ==================================================
+        print(f"[Turn {t_id}] Trigger Batch")
+
+        trigger_messages=[]
+        for x in current_batch:
+            memory=memories[
+                x["dialog_id"]
+            ]
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    build_trigger_input(memory)
+                )
+            )
+
+        trigger_outputs=parallel_inference(
+            trigger_messages
+        )
+
+        for x,out in zip(
+            current_batch,
+            trigger_outputs
+        ):
+            trigger_state=parse_json(
+                parse_json(out)["response"]
+            )
+            x["trigger"]=trigger_state
+
+
+
+        # ==================================================
+        # 3. RAG Batch
+        # ==================================================
+        print(f"[Turn {t_id}] RAG Batch")
+
+        rag_dialogs=[]
+        rag_queries=[]
+        rag_indices=[]
+
+        for idx,x in enumerate(current_batch):
+            if x["trigger"].get(
+                "evidence_mode"
+            )=="retrieve_new_evidence":
+                memory=memories[x["dialog_id"]]
+                rag_dialogs.append(x["dialogue_history"])
+                rag_queries.append(memory["issue_state"]["current_issue"])
+                rag_indices.append(idx)
+            else:
+                x["evidence"]=memories[x["dialog_id"]]["evidence_state"]["active_cases"]
+
+        if rag_dialogs:
+            rag_outputs=batch_zefeng_rag(rag_dialogs, rag_queries)
+
+            for idx,e in zip(rag_indices, rag_outputs):
+                current_batch[idx]["evidence"]=e
+
+        for x in current_batch:
+            memories[x["dialog_id"]]=update_evidence_memory(
+                memories[x["dialog_id"]],
+                x["trigger"],
+                x["evidence"]
+            )
+
+        # ==================================================
+        # 4. Policy Batch
+        # ==================================================
+        print(f"[Turn {t_id}] Policy Batch")
+        policy_messages=[]
+        for x in current_batch:
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    build_policy_input(
+                        memories[x["dialog_id"]],
                         x["user"]
                     )
                 )
             )
 
-        query_outputs = \
-            parallel_inference(
-                query_messages
-            )
-
-        for x, out in zip(
-            current_batch,
-            query_outputs
-        ):
-            query_state = \
-                parse_llm_output(
-                    out
-                )
-
-            x[
-                "query"
-            ] = query_state
-
-            memories[
-                x["dialog_id"]
-            ] = \
-                update_issue_memory(
-                    memories[
-                        x[
-                            "dialog_id"
-                        ]
-                    ],
-                    query_state
-                )
-
-        # ====================================================
-        # 2. Trigger
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Trigger Batch"
+        policy_outputs=parallel_inference(
+            policy_messages
         )
 
-        trigger_messages = []
-
-        for x in current_batch:
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            trigger_messages.append(
-                build_messages(
-                    trigger_prompt,
-                    build_trigger_input(
-                        memory,
-                        x["query"]
-                    )
-                )
-            )
-
-        trigger_outputs = \
-            parallel_inference(
-                trigger_messages
-            )
-
-        for x, out in zip(
-            current_batch,
-            trigger_outputs
-        ):
-            x[
-                "trigger"
-            ] = \
-                parse_llm_output(
-                    out
-                )
-
-        # ====================================================
-        # 3. RAG
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"RAG Batch"
-        )
-
-        rag_dialogs = []
-        rag_queries = []
-        rag_indices = []
-
-        for idx, x in enumerate(
-            current_batch
-        ):
-            query_mode = \
-                x["query"].get(
-                    "query_mode",
-                    ""
-                )
-
-            evidence_mode = \
-                x["trigger"].get(
-                    "evidence_mode",
-                    ""
-                )
-
-            if (
-                evidence_mode
-                == "retrieve_new_evidence"
-                and query_mode
-                != "none"
-            ):
-                memory = memories[
-                    x["dialog_id"]
-                ]
-
-                rag_dialogs.append(
-                    x[
-                        "dialogue_history"
-                    ]
-                )
-
-                rag_queries.append(
-                    memory[
-                        "issue_state"
-                    ][
-                        "current_issue"
-                    ]
-                )
-
-                rag_indices.append(
-                    idx
-                )
-
-            else:
-                x[
-                    "evidence"
-                ] = \
-                    copy.deepcopy(
-                        memories[
-                            x[
-                                "dialog_id"
-                            ]
-                        ][
-                            "evidence_state"
-                        ][
-                            "active_cases"
-                        ]
-                    )
-
-                if query_mode == \
-                        "none":
-                    x[
-                        "trigger"
-                    ][
-                        "evidence_mode"
-                    ] = \
-                        "no_evidence_needed"
-
-        if rag_dialogs:
-            rag_outputs = \
-                batch_zefeng_rag(
-                    rag_dialogs,
-                    rag_queries
-                )
-
-            for idx, evidence \
-                    in zip(
-                        rag_indices,
-                        rag_outputs
-                    ):
-                current_batch[
-                    idx
-                ][
-                    "evidence"
-                ] = evidence
-
-        for x in current_batch:
-            memories[
-                x["dialog_id"]
-            ] = \
-                update_evidence_memory(
-                    memories[
-                        x[
-                            "dialog_id"
-                        ]
-                    ],
-                    x["trigger"],
-                    x.get(
-                        "evidence",
-                        []
-                    )
-                )
-
-        # ====================================================
-        # 4. Knowledge PE
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Knowledge PE Batch"
-        )
-
-        knowledge_messages = []
-        knowledge_items = []
-
-        for x in current_batch:
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            if not \
-                    need_structure_update(
-                        x
-                    ):
-                x[
-                    "knowledge_state"
-                ] = \
-                    copy.deepcopy(
-                        memory[
-                            "evidence_state"
-                        ][
-                            "knowledge_state"
-                        ]
-                    )
-
-                continue
-
-            if not memory[
-                "evidence_state"
-            ][
-                "active_cases"
-            ]:
-                x[
-                    "knowledge_state"
-                ] = {}
-
-                continue
-
-            knowledge_messages.append(
-                build_messages(
-                    knowledge_prompt,
-                    build_knowledge_input(
-                        memory
-                    )
-                )
-            )
-
-            knowledge_items.append(
-                x
-            )
-
-        if knowledge_messages:
-            knowledge_outputs = \
-                parallel_inference(
-                    knowledge_messages
-                )
-
-            for x, out in zip(
-                knowledge_items,
-                knowledge_outputs
-            ):
-                knowledge_state = \
-                    parse_llm_output(
-                        out
-                    )
-
-                x[
-                    "knowledge_state"
-                ] = \
-                    knowledge_state
-
-                memories[
-                    x["dialog_id"]
-                ] = \
-                    update_knowledge_memory(
-                        memories[
-                            x[
-                                "dialog_id"
-                            ]
-                        ],
-                        knowledge_state
-                    )
-
-        # ====================================================
-        # 5. Judgement + Refinement
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Evidence Refinement Batch"
-        )
-
-        refinement_items = []
-
-        for x in current_batch:
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            if not \
-                    need_structure_update(
-                        x
-                    ):
-                x[
-                    "topic_structure"
-                ] = \
-                    copy.deepcopy(
-                        memory[
-                            "evidence_state"
-                        ][
-                            "topic_structure"
-                        ]
-                    )
-
-                continue
-
-            if not memory[
-                "evidence_state"
-            ][
-                "knowledge_state"
-            ]:
-                x[
-                    "topic_structure"
-                ] = {}
-
-                continue
-
-            refinement_items.append(
-                x
-            )
-
-        if refinement_items:
-            run_refinement_pe_batch(
-                items=
-                    refinement_items,
-
-                memories=
-                    memories,
-
-                judgement_prompt=
-                    judgement_prompt,
-
-                refinement_prompt=
-                    refinement_prompt,
-
-                max_depth=
-                    max_refinement_depth
-            )
-
-        # ====================================================
-        # 6. Policy
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Policy Batch"
-        )
-
-        policy_messages = []
-
-        for x in current_batch:
-            policy_input = \
-                build_policy_input(
-                    memories[
-                        x[
-                            "dialog_id"
-                        ]
-                    ],
-                    x["user"]
-                )
-
-            policy_messages.append(
-                build_messages(
-                    policy_prompt,
-                    policy_input
-                )
-            )
-
-        policy_outputs = \
-            parallel_inference(
-                policy_messages
-            )
-
-        for x, out in zip(
+        for x,out in zip(
             current_batch,
             policy_outputs
         ):
-            policy_state = \
-                parse_llm_output(
-                    out
-                )
+            policy_state=parse_json(
+                parse_json(out)["response"]
+            )
+            x["policy"]=policy_state
 
-            x[
-                "policy"
-            ] = policy_state
+            memories[x["dialog_id"]]=update_interaction_memory(
+                memories[x["dialog_id"]],
+                policy_state
+            )
 
-            memories[
-                x["dialog_id"]
-            ] = \
-                update_interaction_memory(
-                    memories[
-                        x[
-                            "dialog_id"
-                        ]
-                    ],
-                    policy_state
-                )
-
-        # ====================================================
-        # 7. Response
-        # ====================================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Response Batch"
-        )
-
-        response_messages = []
-
+        # ==================================================
+        # 5. Response Batch
+        # ==================================================
+        print(f"[Turn {t_id}] Response Batch")
+        response_messages=[]
         for x in current_batch:
             response_messages.append(
                 build_messages(
                     response_prompt,
                     build_response_input(
-                        memories[
-                            x[
-                                "dialog_id"
-                            ]
-                        ],
-                        x[
-                            "user"
-                        ]
+                        memories[x["dialog_id"]],
+                        x["user"]
                     )
                 )
             )
 
-        response_outputs = \
-            parallel_inference(
-                response_messages
-            )
+        response_outputs=parallel_inference(
+            response_messages
+        )
 
-        for x, out in zip(
+        for x,out in zip(
             current_batch,
             response_outputs
         ):
-            x[
-                "response"
-            ] = \
-                parse_llm_output(
-                    out
-                )
-
-            memories[
-                x["dialog_id"]
-            ] = \
-                update_dialogue_memory(
-                    memories[
-                        x[
-                            "dialog_id"
-                        ]
-                    ],
-                    x["user"],
-                    x[
-                        "golden_response"
-                    ]
-                )
-
-            turn_result = {
-                k: v
-                for k, v
-                in x.items()
-                if k
-                != "dialogue_history"
-            }
-
-            turn_result[
-                "turn_id"
-            ] = int(
-                t_id / 2
+            x["response"]=parse_json(
+                parse_json(out)["response"]
+            )
+            
+            memories[x["dialog_id"]]=update_dialogue_memory(
+                memories[x["dialog_id"]],
+                x["user"],
+                x["golden_response"]
             )
 
-            results[
-                x["dialog_id"]
-            ][
-                "turns"
-            ].append(
-                turn_result
+            results[x["dialog_id"]]["turns"].append(
+                {
+                    "turn_id":int(t_id/2),
+                    **x,
+                }
             )
-
-    # ========================================================
-    # Final Memory
-    # ========================================================
-
-    for dialog_id in data:
-        results[
-            dialog_id
-        ][
-            "final_memory"
-        ] = memories[
-            dialog_id
-        ]
+    
+    for dialog_id,item in data.items():
+        results[dialog_id]["final_memory"] = memories[dialog_id]
 
     return results
 
 
-# ============================================================
-# Main
-# ============================================================
+def main() -> None:
+    parser = argparse.ArgumentParser()
 
-def main():
-    parser = \
-        argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--data_path",
-        required=True
-    )
-
-    parser.add_argument(
-        "--output_path",
-        required=True
-    )
-
-    parser.add_argument(
-        "--max_dialogues",
-        type=int,
-        default=10
-    )
-
-    parser.add_argument(
-        "--max_refinement_depth",
-        type=int,
-        default=4
-    )
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--batch", default=True)
 
     args = parser.parse_args()
 
-    with open(
-        args.data_path,
-        "r",
-        encoding="utf-8"
-    ) as f:
+    with open(args.data_path, 'r', encoding="utf-8") as f:
         data = json.load(f)
 
-    data = dict(
-        list(
-            data.items()
-        )[
-            :args.max_dialogues
-        ]
-    )
+    data = dict(list(data.items())[:300])
 
-    outputs = \
-        run_memory_agent_batch(
-            data,
-            max_refinement_depth=
-                args.max_refinement_depth
-        )
+    if args.batch:
+        outputs = run_memory_agent_batch(data)
+    else:
+        outputs = run_memory_agent(data)
+    write_json(args.output_path, outputs)
 
-    write_json(
-        args.output_path,
-        outputs
-    )
-
-    print(
-        f"Saved "
-        f"{len(outputs)} "
-        f"dialogues to "
-        f"{args.output_path}"
-    )
+    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
 
 
 if __name__ == "__main__":
