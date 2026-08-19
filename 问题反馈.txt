@@ -1,141 +1,1090 @@
-你是知识密集型对话系统中的 Evidence Sufficiency Judge。
+from __future__ import annotations
 
-你的任务是判断当前 Query 和已有 Topic Structure 是否已经足够支持下一步 Case Selection。你不生成新的 Topic，不修改 Structure。
+import argparse
+import copy
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-## 输入
-
-### query_text
-当前用户 Query。
-
-### knowledge_state
-知识端输出，包括 common_anchor 和每个 Case 的 Case-specific Information。
-
-### current_structure
-当前已经构建的 Topic Structure。
-
-### frontier
-当前最新展开到的 Topic Nodes。
-
-## 判断目标
-
-判断当前 Evidence 是否已经具有足够的决策信息。
-
-`decision_sufficient = true` 表示：根据当前 Query 和 Structure，已经存在一个或少数明显优先的 Case，可以支持 CaseRecommendation 或 ExplainedResponse；继续向下 Refinement 不会明显改善 Case Selection。
-
-`decision_sufficient = false` 表示：当前仍存在多个合理 Case 或处理路径，并且它们之间尚未暴露出的差异会真实改变 Case Selection；需要继续 Refinement。
-
-## 判断原则
-
-1. 不要求 Top-K Cases 被完全区分。
-2. 不要求必须唯一确定一个 Case 才能停止。
-3. 如果存在一个 Case 明显比其他 Cases 更符合 Query，即使不能 100% 确认，也可以认为当前 Evidence 已经足够。
-4. 如果剩余 Cases 的差异不会改变下一步动作，不要继续 Refinement。
-5. 只有当进一步区分能够明显改变 Case Selection 时，才继续 Refinement。
-6. 不要因为 Structure 仍然存在多个 Cases 就自动判断为不足。
-7. 必须严格依据 knowledge_state 和 current_structure，不得使用输入中不存在的 Case 信息。
-8. 如果当前 Query 与某个 Case 的 Case-specific Information 已经形成直接或明显对应，应优先判断为 sufficient。
-9. 如果当前 Structure 已经暴露出一个明显优先路径，不需要为了理解其他无关 Branch 而继续展开。
-
-## 需要继续 Refinement 时
-
-如果 `decision_sufficient = false`，从当前 frontier 中选择真正需要继续展开的节点，输出到 `refine_node_ids`。
-
-只有同时满足以下条件的节点才能进入 `refine_node_ids`：该节点与当前 Query 相关；节点下存在多个仍然合理的 Cases；这些 Cases 的进一步差异可能改变 Case Selection。
-
-不要把已经充分区分的节点加入 `refine_node_ids`。
-
-## 输出
-
-只输出 JSON。
-
-如果当前 Evidence 已经足够：
-{
-  "decision_sufficient": true,
-  "matched_case_ids": ["case_id"],
-  "refine_node_ids": [],
-  "reason": "一句简洁原因"
-}
-
-如果仍需 Refinement：
-{
-  "decision_sufficient": false,
-  "matched_case_ids": [],
-  "refine_node_ids": ["node_id"],
-  "reason": "一句简洁原因"
-}
+from utils.scu_rag import batch_zefeng_rag
+from utils.qwen_api_multi import parallel_inference
 
 
-你是知识密集型对话系统中的 One-Level Topic Refiner。
+# ============================================================
+# Utils
+# ============================================================
 
-你的任务是根据当前 Query、Case-specific Information 和指定的 Parent Nodes，对每个 Parent Node 只进行一次下一层 Topic Refinement。
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
 
-你不负责判断当前 Evidence 是否已经足够，也不负责决定是否停止 Refinement。
 
-## 输入
+def parse_llm_output(output):
+    parsed = parse_json(output)
+    if not parsed:
+        return {}
+    return parse_json(parsed.get("response", ""))
 
-### query_text
-当前用户 Query。
 
-### knowledge_state
-知识端输出，包括 common_anchor 和每个 Case 的 Case-specific Information。
+def prompt_read(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
 
-### current_structure
-当前 Topic Structure。
 
-### refine_nodes
-Judgement 模块指定需要继续展开的 Parent Nodes，每个节点包含 node_id、topic 和 case_ids。
+def write_json(path: str | Path, data: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-## 任务
 
-对每个 refine_node 独立执行一次 One-Level Refinement。
+def build_messages(system_prompt, data):
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(data, ensure_ascii=False)}
+    ]
 
-### 1. 生成下一层 Child Topics
-从该 Parent Node 对应 Cases 的 Case-specific Information 中寻找下一层 Query-relevant + discriminative Topics。
 
-### 2. 下一层约束
-Child Topic 必须是当前 Parent Topic 的直接语义细化；只允许展开一层，不允许一次生成多层 Topic Tree；优先使用当前层级下最浅、最自然、能够体现 Case 差异的语义维度。
+# ============================================================
+# Memory
+# ============================================================
 
-### 3. Query Relevance
-只保留与当前 Query 判断相关的 Child Topics，不要因为 Case 中存在某个差异就加入无关 Topic。
-
-### 4. Case Difference
-Child Topics 应能够暴露当前 Parent 下不同 Cases 之间可能影响 Case Selection 的差异。
-
-### 5. Case–Topic Alignment
-不同 Cases 应尽可能映射到统一的 Topic Space；语义相同或高度相似的信息应归一到同一个 Child Topic；一个 Case 可以映射到多个 Child Topics。
-
-### 6. Evidence Grounding
-每个 Case 映射到某个 Child Topic 时，必须能够从该 Case 的 `information` 中找到明确依据；禁止根据常识补充信息；禁止因为另一个 Case 明确“不支持”就推断当前 Case“支持”；禁止生成 Case-specific Information 中不存在的事实。
-
-## 重要约束
-
-不要判断 decision_sufficient。
-不要输出 unresolved_branches。
-不要重新输出 Parent Node 作为 Child。
-不要生成和当前 Parent 语义层级相同的 Topic。
-不要一次跨越多个语义层级。
-不要为了把 Cases 强行分开而创造没有证据支持的 Topic。
-如果当前 Parent 无法产生合理的下一层差异，children 输出空列表。
-
-## 输出
-
-只输出 JSON。
-
-{
-  "refinements": [
-    {
-      "parent_node_id": "node_id",
-      "parent_topic": "当前 Parent Topic",
-      "children": [
-        {
-          "topic": "下一层 Topic",
-          "case_ids": ["case_id_1", "case_id_2"],
-          "evidence": {
-            "case_id_1": ["对应的 Case-specific Information"],
-            "case_id_2": ["对应的 Case-specific Information"]
-          }
+def init_memory():
+    return {
+        "issue_state": {
+            "current_issue": "",
+            "query_history": []
+        },
+        "dialog_state": {
+            "compressed_history": []
+        },
+        "evidence_state": {
+            "active_cases": [],
+            "knowledge_state": {},
+            "topic_structure": {}
+        },
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": []
         }
-      ]
     }
-  ]
-}
+
+
+# ============================================================
+# Memory Update
+# ============================================================
+
+def update_issue_memory(memory, query_state):
+    mode = query_state.get("query_mode", "none")
+    query = query_state.get("query_text", "")
+    if mode in ["rewrite", "refine"]:
+        memory["issue_state"]["current_issue"] = query
+        memory["issue_state"]["query_history"].append(query)
+    return memory
+
+
+def update_evidence_memory(memory, trigger_state, evidence):
+    mode = trigger_state.get("evidence_mode", "no_evidence_needed")
+    if mode == "retrieve_new_evidence":
+        memory["evidence_state"]["active_cases"] = evidence
+        memory["evidence_state"]["knowledge_state"] = {}
+        memory["evidence_state"]["topic_structure"] = {}
+    return memory
+
+
+def update_knowledge_memory(memory, knowledge_state):
+    memory["evidence_state"]["knowledge_state"] = knowledge_state
+    return memory
+
+
+def update_topic_structure_memory(memory, topic_structure):
+    memory["evidence_state"]["topic_structure"] = topic_structure
+    return memory
+
+
+def update_interaction_memory(memory, policy_state):
+    label = policy_state.get("label", "")
+    memory["interaction_state"]["last_action"] = label
+    memory["interaction_state"]["action_history"].append(label)
+
+    if label in ["AskMissingSlot", "AskClarification"]:
+        memory["interaction_state"]["stage"] = "Clarification"
+    elif label in ["ExplainedResponse", "CaseRecommendation"]:
+        memory["interaction_state"]["stage"] = "Resolution"
+    elif label == "Handoff":
+        memory["interaction_state"]["stage"] = "End"
+
+    return memory
+
+
+def update_dialogue_memory(memory, user, response):
+    history = memory["dialog_state"]["compressed_history"]
+    history.append({"user": user, "assistant": response})
+    memory["dialog_state"]["compressed_history"] = history[-5:]
+    return memory
+
+
+# ============================================================
+# Input Builder
+# ============================================================
+
+def build_query_input(memory, user):
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {"u": user}
+    }
+
+
+def build_trigger_input(memory):
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"]
+        },
+        "dialog_state": memory["dialog_state"]
+    }
+
+
+def build_knowledge_input(memory):
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "evidence": memory["evidence_state"]["active_cases"]
+    }
+
+
+def build_judgement_input(memory, structure, frontier):
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "knowledge_state": memory["evidence_state"]["knowledge_state"],
+        "current_structure": structure,
+        "frontier": frontier
+    }
+
+
+def build_refinement_input(memory, structure, refine_nodes):
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "knowledge_state": memory["evidence_state"]["knowledge_state"],
+        "current_structure": structure,
+        "refine_nodes": refine_nodes
+    }
+
+
+def build_policy_input(memory, user):
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": {
+            "topic_structure": memory["evidence_state"]["topic_structure"]
+        },
+        "interaction_state": memory["interaction_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {"u": user}
+    }
+
+
+def build_response_input(memory, user):
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": memory["evidence_state"],
+        "interaction_state": memory["interaction_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {
+            "u": user,
+            "policy": memory["interaction_state"]["last_action"]
+        }
+    }
+
+
+# ============================================================
+# Topic Structure
+# ============================================================
+
+def init_topic_structure(knowledge_state):
+    anchor = knowledge_state.get("common_anchor", "")
+    cases = knowledge_state.get("cases", [])
+    case_ids = [x.get("case_id") for x in cases if x.get("case_id")]
+
+    return {
+        "node_id": "root",
+        "topic": anchor,
+        "case_ids": case_ids,
+        "children": [],
+        "status": "unresolved"
+    }
+
+
+def find_node_by_id(node: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
+    if node.get("node_id") == node_id:
+        return node
+
+    for child in node.get("children", []):
+        result = find_node_by_id(child, node_id)
+        if result is not None:
+            return result
+
+    return None
+
+
+def apply_refinements(structure, refinements):
+    """
+    将当前一层 refinement 加到 tree 中。
+    同时返回本轮新生成的 child nodes，作为下一轮 Judgement 的 frontier。
+    """
+    new_frontier = []
+
+    for refinement in refinements:
+        parent_node_id = refinement.get("parent_node_id", "")
+        parent = find_node_by_id(structure, parent_node_id)
+
+        if parent is None:
+            continue
+
+        raw_children = refinement.get("children", [])
+        normalized_children = []
+
+        for idx, child in enumerate(raw_children):
+            topic = str(child.get("topic", "")).strip()
+            case_ids = child.get("case_ids", [])
+
+            if not topic:
+                continue
+
+            # 不允许 parent 自己重新成为 child
+            if topic == parent.get("topic", ""):
+                continue
+
+            # 不允许没有 case mapping 的空 child
+            if not case_ids:
+                continue
+
+            child_node = {
+                "node_id": f"{parent_node_id}.{idx}",
+                "topic": topic,
+                "case_ids": case_ids,
+                "evidence": child.get("evidence", {}),
+                "children": [],
+                "status": "unresolved"
+            }
+
+            normalized_children.append(child_node)
+            new_frontier.append({
+                "node_id": child_node["node_id"],
+                "topic": child_node["topic"],
+                "case_ids": child_node["case_ids"]
+            })
+
+        parent["children"] = normalized_children
+        parent["status"] = "refined"
+
+    return structure, new_frontier
+
+
+# ============================================================
+# Structure Update Decision
+# ============================================================
+
+def need_structure_update(x):
+    evidence_mode = x["trigger"].get("evidence_mode", "")
+    query_mode = x["query"].get("query_mode", "")
+
+    if evidence_mode == "retrieve_new_evidence":
+        return True
+
+    if query_mode in ["rewrite", "refine"]:
+        return True
+
+    return False
+
+
+# ============================================================
+# Judgement + Difference-Guided Refinement
+# ============================================================
+
+def run_refinement_pe_batch(
+    items,
+    memories,
+    judgement_prompt,
+    refinement_prompt,
+    max_depth=4
+):
+    """
+    Dynamic Batched Refinement
+
+    每一层执行：
+
+        Judgement Batch
+              ↓
+       sufficient?
+        /        \
+      YES         NO
+      STOP         ↓
+             Refinement Batch
+                  ↓
+           One-Level Children
+                  ↓
+            Update Structure
+                  ↓
+           Next Judgement
+
+    样本内 sequential，样本间 parallel。
+    """
+
+    active_items = []
+
+    # ========================================================
+    # 1. Initialize
+    # ========================================================
+
+    for x in items:
+        dialog_id = x["dialog_id"]
+        memory = memories[dialog_id]
+        knowledge_state = memory["evidence_state"]["knowledge_state"]
+
+        if not knowledge_state:
+            x["topic_structure"] = {}
+            continue
+
+        structure = init_topic_structure(knowledge_state)
+
+        if not structure.get("topic"):
+            x["topic_structure"] = {}
+            continue
+
+        x["_structure"] = structure
+        x["_frontier"] = [{
+            "node_id": "root",
+            "topic": structure["topic"],
+            "case_ids": structure["case_ids"]
+        }]
+        x["_judgement_history"] = []
+        x["_refinement_history"] = []
+
+        active_items.append(x)
+
+    # ========================================================
+    # 2. Iterative Judgement -> Refinement
+    # ========================================================
+
+    for depth in range(max_depth + 1):
+
+        if not active_items:
+            break
+
+        # ====================================================
+        # A. Judgement Batch
+        # ====================================================
+
+        print(
+            f"[Refinement Depth {depth}] "
+            f"Judgement Batch: {len(active_items)}"
+        )
+
+        judgement_messages = []
+
+        for x in active_items:
+            memory = memories[x["dialog_id"]]
+
+            judgement_input = build_judgement_input(
+                memory,
+                x["_structure"],
+                x["_frontier"]
+            )
+
+            judgement_messages.append(
+                build_messages(
+                    judgement_prompt,
+                    judgement_input
+                )
+            )
+
+        judgement_outputs = parallel_inference(judgement_messages)
+
+        need_refinement = []
+
+        for x, out in zip(active_items, judgement_outputs):
+            result = parse_llm_output(out)
+            structure = x["_structure"]
+
+            x["_judgement_history"].append({
+                "depth": depth,
+                "frontier": copy.deepcopy(x["_frontier"]),
+                "output": copy.deepcopy(result)
+            })
+
+            # --------------------------------------------
+            # Invalid Judgement
+            # --------------------------------------------
+
+            if not result:
+                structure["decision_sufficient"] = False
+                structure["stop_reason"] = "invalid_judgement"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # Decision Sufficient -> STOP
+            # --------------------------------------------
+
+            if result.get("decision_sufficient", False):
+                structure["decision_sufficient"] = True
+                structure["matched_case_ids"] = result.get("matched_case_ids", [])
+                structure["judgement_reason"] = result.get("reason", "")
+                structure["stop_reason"] = "decision_sufficient"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # Max Depth
+            # --------------------------------------------
+
+            if depth >= max_depth:
+                structure["decision_sufficient"] = False
+                structure["judgement_reason"] = result.get("reason", "")
+                structure["stop_reason"] = "max_depth"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # Get Nodes Selected by Judgement
+            # --------------------------------------------
+
+            refine_node_ids = result.get("refine_node_ids", [])
+            refine_nodes = []
+
+            for node_id in refine_node_ids:
+                node = find_node_by_id(structure, node_id)
+
+                if node is None:
+                    continue
+
+                # singleton case branch 不再继续 refine
+                if len(node.get("case_ids", [])) <= 1:
+                    continue
+
+                refine_nodes.append({
+                    "node_id": node["node_id"],
+                    "topic": node["topic"],
+                    "case_ids": node["case_ids"]
+                })
+
+            # Judgment 认为 insufficient，
+            # 但没有任何合法 branch 可以 refine
+            if not refine_nodes:
+                structure["decision_sufficient"] = False
+                structure["judgement_reason"] = result.get("reason", "")
+                structure["stop_reason"] = "no_refinable_branch"
+                structure["final_depth"] = depth
+                continue
+
+            x["_refine_nodes"] = refine_nodes
+            need_refinement.append(x)
+
+        # 没有样本还需要展开
+        if not need_refinement:
+            break
+
+        # ====================================================
+        # B. Refinement Batch
+        # ====================================================
+
+        print(
+            f"[Refinement Depth {depth}] "
+            f"Refinement Batch: {len(need_refinement)}"
+        )
+
+        refinement_messages = []
+
+        for x in need_refinement:
+            memory = memories[x["dialog_id"]]
+
+            refinement_input = build_refinement_input(
+                memory,
+                x["_structure"],
+                x["_refine_nodes"]
+            )
+
+            refinement_messages.append(
+                build_messages(
+                    refinement_prompt,
+                    refinement_input
+                )
+            )
+
+        refinement_outputs = parallel_inference(refinement_messages)
+
+        next_active_items = []
+
+        for x, out in zip(need_refinement, refinement_outputs):
+            result = parse_llm_output(out)
+            structure = x["_structure"]
+
+            x["_refinement_history"].append({
+                "depth": depth,
+                "refine_nodes": copy.deepcopy(x["_refine_nodes"]),
+                "output": copy.deepcopy(result)
+            })
+
+            # --------------------------------------------
+            # Invalid Refinement
+            # --------------------------------------------
+
+            if not result:
+                structure["decision_sufficient"] = False
+                structure["stop_reason"] = "invalid_refinement"
+                structure["final_depth"] = depth
+                continue
+
+            refinements = result.get("refinements", [])
+
+            if not refinements:
+                structure["decision_sufficient"] = False
+                structure["stop_reason"] = "no_valid_refinement"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # Update Tree
+            # --------------------------------------------
+
+            structure, new_frontier = apply_refinements(
+                structure,
+                refinements
+            )
+
+            x["_structure"] = structure
+
+            if not new_frontier:
+                structure["decision_sufficient"] = False
+                structure["stop_reason"] = "no_new_child"
+                structure["final_depth"] = depth + 1
+                continue
+
+            # 下一轮重新 Judgment
+            x["_frontier"] = new_frontier
+            next_active_items.append(x)
+
+        active_items = next_active_items
+
+    # ========================================================
+    # 3. Finalize
+    # ========================================================
+
+    for x in items:
+        if "_structure" not in x:
+            continue
+
+        structure = x["_structure"]
+
+        # 理论上若循环异常结束但没有 stop_reason，
+        # 给一个 fallback 状态
+        if "decision_sufficient" not in structure:
+            structure["decision_sufficient"] = False
+            structure["stop_reason"] = "unfinished"
+
+        structure["judgement_history"] = x["_judgement_history"]
+        structure["refinement_history"] = x["_refinement_history"]
+
+        x["topic_structure"] = structure
+
+        dialog_id = x["dialog_id"]
+
+        memories[dialog_id] = update_topic_structure_memory(
+            memories[dialog_id],
+            structure
+        )
+
+        x.pop("_structure", None)
+        x.pop("_frontier", None)
+        x.pop("_refine_nodes", None)
+        x.pop("_judgement_history", None)
+        x.pop("_refinement_history", None)
+
+
+# ============================================================
+# Main Batch Agent
+# ============================================================
+
+def run_memory_agent_batch(
+    data,
+    batch_size=8,
+    max_refinement_depth=4
+):
+    # ========================================================
+    # Prompts
+    # ========================================================
+
+    query_prompt = prompt_read(Path("prompts/query.prompt"))
+    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
+    knowledge_prompt = prompt_read(Path("prompts/knowledge.prompt"))
+    judgement_prompt = prompt_read(Path("prompts/judgement.prompt"))
+    refinement_prompt = prompt_read(Path("prompts/refinement.prompt"))
+    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
+    response_prompt = prompt_read(Path("prompts/response.prompt"))
+
+    # ========================================================
+    # Memory
+    # ========================================================
+
+    memories = {
+        dialog_id: init_memory()
+        for dialog_id in data
+    }
+
+    dialogue_history = {
+        dialog_id: ""
+        for dialog_id in data
+    }
+
+    results = {
+        dialog_id: {
+            "turns": []
+        }
+        for dialog_id in data
+    }
+
+    max_turn = max(
+        len(item["text"])
+        for item in data.values()
+    )
+
+    # ========================================================
+    # Dialogue Loop
+    # ========================================================
+
+    for t_id in range(max_turn):
+        print(f"\n========== TURN {t_id} ==========")
+
+        current_batch = []
+
+        # ====================================================
+        # Collect Current User Turns
+        # ====================================================
+
+        for dialog_id, item in data.items():
+            if t_id >= len(item["text"]):
+                continue
+
+            msg = item["text"][t_id]
+
+            if "用户" in msg:
+                dialogue_history[dialog_id] += f"用户: {msg['用户']}\n"
+            elif "客服" in msg:
+                dialogue_history[dialog_id] += f"客服: {msg['客服']}\n"
+
+            if "用户" not in msg:
+                continue
+
+            current_batch.append({
+                "dialog_id": dialog_id,
+                "user": msg["用户"],
+                "golden_response": (
+                    item["text"][t_id + 1]["客服"]
+                    if (
+                        t_id + 1 < len(item["text"])
+                        and "客服" in item["text"][t_id + 1]
+                    )
+                    else ""
+                ),
+                "dialogue_history": dialogue_history[dialog_id]
+            })
+
+        if not current_batch:
+            continue
+
+        # ====================================================
+        # 1. Query Batch
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Query Batch: {len(current_batch)}"
+        )
+
+        query_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+
+            query_messages.append(
+                build_messages(
+                    query_prompt,
+                    build_query_input(
+                        memory,
+                        x["user"]
+                    )
+                )
+            )
+
+        query_outputs = parallel_inference(query_messages)
+
+        for x, out in zip(current_batch, query_outputs):
+            query_state = parse_llm_output(out)
+            x["query"] = query_state
+
+            memories[x["dialog_id"]] = update_issue_memory(
+                memories[x["dialog_id"]],
+                query_state
+            )
+
+        # ====================================================
+        # 2. Trigger Batch
+        # ====================================================
+
+        print(f"[Turn {t_id}] Trigger Batch")
+
+        trigger_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    build_trigger_input(memory)
+                )
+            )
+
+        trigger_outputs = parallel_inference(trigger_messages)
+
+        for x, out in zip(current_batch, trigger_outputs):
+            trigger_state = parse_llm_output(out)
+            x["trigger"] = trigger_state
+
+        # ====================================================
+        # 3. RAG Batch
+        # ====================================================
+
+        print(f"[Turn {t_id}] RAG Batch")
+
+        rag_dialogs = []
+        rag_queries = []
+        rag_indices = []
+
+        for idx, x in enumerate(current_batch):
+            if x["trigger"].get("evidence_mode") == "retrieve_new_evidence":
+                memory = memories[x["dialog_id"]]
+
+                rag_dialogs.append(
+                    x["dialogue_history"]
+                )
+
+                rag_queries.append(
+                    memory["issue_state"]["current_issue"]
+                )
+
+                rag_indices.append(idx)
+
+            else:
+                x["evidence"] = memories[
+                    x["dialog_id"]
+                ]["evidence_state"]["active_cases"]
+
+        if rag_dialogs:
+            rag_outputs = batch_zefeng_rag(
+                rag_dialogs,
+                rag_queries
+            )
+
+            for idx, evidence in zip(
+                rag_indices,
+                rag_outputs
+            ):
+                current_batch[idx][
+                    "evidence"
+                ] = evidence
+
+        for x in current_batch:
+            memories[x["dialog_id"]] = \
+                update_evidence_memory(
+                    memories[x["dialog_id"]],
+                    x["trigger"],
+                    x.get("evidence", [])
+                )
+
+        # ====================================================
+        # 4. Knowledge-side PE Batch
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Knowledge PE Batch"
+        )
+
+        knowledge_messages = []
+        knowledge_items = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+
+            # 当前结构不用更新
+            if not need_structure_update(x):
+                x["knowledge_state"] = copy.deepcopy(
+                    memory[
+                        "evidence_state"
+                    ]["knowledge_state"]
+                )
+                continue
+
+            # 没有 raw evidence
+            if not memory[
+                "evidence_state"
+            ]["active_cases"]:
+                x["knowledge_state"] = {}
+                continue
+
+            knowledge_messages.append(
+                build_messages(
+                    knowledge_prompt,
+                    build_knowledge_input(
+                        memory
+                    )
+                )
+            )
+
+            knowledge_items.append(x)
+
+        if knowledge_messages:
+            knowledge_outputs = \
+                parallel_inference(
+                    knowledge_messages
+                )
+
+            for x, out in zip(
+                knowledge_items,
+                knowledge_outputs
+            ):
+                knowledge_state = \
+                    parse_llm_output(out)
+
+                x[
+                    "knowledge_state"
+                ] = knowledge_state
+
+                memories[x["dialog_id"]] = \
+                    update_knowledge_memory(
+                        memories[x["dialog_id"]],
+                        knowledge_state
+                    )
+
+        # ====================================================
+        # 5. Judgement + Refinement Batch
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Evidence Refinement Batch"
+        )
+
+        refinement_items = []
+
+        for x in current_batch:
+            memory = memories[
+                x["dialog_id"]
+            ]
+
+            # Query / Evidence 没有变化，直接复用旧结构
+            if not need_structure_update(x):
+                x["topic_structure"] = \
+                    copy.deepcopy(
+                        memory[
+                            "evidence_state"
+                        ][
+                            "topic_structure"
+                        ]
+                    )
+                continue
+
+            # 没有 Knowledge State
+            if not memory[
+                "evidence_state"
+            ]["knowledge_state"]:
+                x["topic_structure"] = {}
+                continue
+
+            refinement_items.append(x)
+
+        if refinement_items:
+            run_refinement_pe_batch(
+                items=refinement_items,
+                memories=memories,
+                judgement_prompt=judgement_prompt,
+                refinement_prompt=refinement_prompt,
+                max_depth=max_refinement_depth
+            )
+
+        # ====================================================
+        # 6. Policy Batch
+        # ====================================================
+
+        print(f"[Turn {t_id}] Policy Batch")
+
+        policy_messages = []
+
+        for x in current_batch:
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    build_policy_input(
+                        memories[x["dialog_id"]],
+                        x["user"]
+                    )
+                )
+            )
+
+        policy_outputs = \
+            parallel_inference(
+                policy_messages
+            )
+
+        for x, out in zip(
+            current_batch,
+            policy_outputs
+        ):
+            policy_state = \
+                parse_llm_output(out)
+
+            x["policy"] = policy_state
+
+            memories[x["dialog_id"]] = \
+                update_interaction_memory(
+                    memories[x["dialog_id"]],
+                    policy_state
+                )
+
+        # ====================================================
+        # 7. Response Batch
+        # ====================================================
+
+        print(f"[Turn {t_id}] Response Batch")
+
+        response_messages = []
+
+        for x in current_batch:
+            response_messages.append(
+                build_messages(
+                    response_prompt,
+                    build_response_input(
+                        memories[x["dialog_id"]],
+                        x["user"]
+                    )
+                )
+            )
+
+        response_outputs = \
+            parallel_inference(
+                response_messages
+            )
+
+        for x, out in zip(
+            current_batch,
+            response_outputs
+        ):
+            x["response"] = \
+                parse_llm_output(out)
+
+            memories[x["dialog_id"]] = \
+                update_dialogue_memory(
+                    memories[x["dialog_id"]],
+                    x["user"],
+                    x["golden_response"]
+                )
+
+            turn_result = {
+                k: v
+                for k, v in x.items()
+                if k != "dialogue_history"
+            }
+
+            turn_result["turn_id"] = \
+                int(t_id / 2)
+
+            results[
+                x["dialog_id"]
+            ]["turns"].append(
+                turn_result
+            )
+
+    # ========================================================
+    # Final Memory
+    # ========================================================
+
+    for dialog_id in data:
+        results[
+            dialog_id
+        ][
+            "final_memory"
+        ] = memories[dialog_id]
+
+    return results
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--output_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--max_dialogues",
+        type=int,
+        default=10
+    )
+
+    parser.add_argument(
+        "--max_refinement_depth",
+        type=int,
+        default=4
+    )
+
+    args = parser.parse_args()
+
+    with open(
+        args.data_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+        data = json.load(f)
+
+    data = dict(
+        list(data.items())[
+            :args.max_dialogues
+        ]
+    )
+
+    outputs = run_memory_agent_batch(
+        data,
+        max_refinement_depth=
+            args.max_refinement_depth
+    )
+
+    write_json(
+        args.output_path,
+        outputs
+    )
+
+    print(
+        f"Saved {len(outputs)} "
+        f"dialogues to "
+        f"{args.output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
