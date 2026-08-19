@@ -1,10 +1,4 @@
-def run_refinement_pe_batch(
-    items,
-    memories,
-    judgement_prompt,
-    refinement_prompt,
-    max_depth=4
-):
+def run_refinement_pe_batch(items, memories, judgement_prompt, refinement_prompt, max_depth=4):
     active_items = []
 
     for x in items:
@@ -25,7 +19,6 @@ def run_refinement_pe_batch(
         x["_frontier"] = [make_frontier_item(structure)]
         x["_judgement_history"] = []
         x["_refinement_history"] = []
-
         active_items.append(x)
 
     for depth in range(max_depth + 1):
@@ -36,112 +29,74 @@ def run_refinement_pe_batch(
         # 1. Judgement Batch
         # ====================================================
 
-        print(
-            f"[Refinement Depth {depth}] "
-            f"Judgement Batch: {len(active_items)}"
-        )
+        print(f"[Refinement Depth {depth}] Judgement Batch: {len(active_items)}")
 
         judgement_messages = []
 
         for x in active_items:
             memory = memories[x["dialog_id"]]
+            judgement_input = build_judgement_input(memory, x["_structure"], x["_frontier"])
+            judgement_messages.append(build_messages(judgement_prompt, judgement_input))
 
-            judgement_input = build_judgement_input(
-                memory,
-                x["_structure"],
-                x["_frontier"]
-            )
-
-            judgement_messages.append(
-                build_messages(
-                    judgement_prompt,
-                    judgement_input
-                )
-            )
-
-        judgement_outputs = parallel_inference(
-            judgement_messages
-        )
-
+        judgement_outputs = parallel_inference(judgement_messages)
         need_refinement = []
 
-        for x, out in zip(
-            active_items,
-            judgement_outputs
-        ):
+        for x, out in zip(active_items, judgement_outputs):
             judgement = parse_llm_output(out)
             structure = x["_structure"]
 
             x["_judgement_history"].append({
                 "depth": depth,
-                "frontier": copy.deepcopy(
-                    x["_frontier"]
-                ),
-                "output": copy.deepcopy(
-                    judgement
-                )
+                "frontier": copy.deepcopy(x["_frontier"]),
+                "output": copy.deepcopy(judgement)
             })
 
-            if not validate_judgement(
-                judgement,
-                x["_frontier"]
-            ):
+            if not validate_judgement(judgement, x["_frontier"]):
                 structure["decision_sufficient"] = False
                 structure["evidence_status"] = "invalid"
                 structure["stop_reason"] = "invalid_judgement"
                 structure["final_depth"] = depth
                 continue
 
-            decision_sufficient = judgement.get(
-                "decision_sufficient",
-                False
-            )
-
-            matched_case_ids = judgement.get(
-                "matched_case_ids",
-                []
-            )
-
-            reason = judgement.get(
-                "reason",
-                ""
-            )
+            status = str(judgement.get("status", "")).strip().lower()
+            matched_case_ids = judgement.get("matched_case_ids", [])
+            refine_node_ids = judgement.get("refine_node_ids", [])
+            reason = judgement.get("reason", "")
 
             # --------------------------------------------
-            # 已经足够
+            # matched
             # --------------------------------------------
 
-            if decision_sufficient:
+            if status == "matched":
                 structure["decision_sufficient"] = True
-                structure["evidence_status"] = "sufficient"
+                structure["evidence_status"] = "matched"
                 structure["matched_case_ids"] = matched_case_ids
                 structure["judgement_reason"] = reason
-                structure["stop_reason"] = "decision_sufficient"
+                structure["stop_reason"] = "matched"
                 structure["final_depth"] = depth
                 continue
 
-            refine_node_ids = judgement.get(
-                "refine_node_ids",
-                []
-            )
-
             # --------------------------------------------
-            # 没有可继续展开节点
+            # insufficient
             # --------------------------------------------
 
-            if not refine_node_ids:
+            if status == "insufficient":
                 structure["decision_sufficient"] = False
                 structure["evidence_status"] = "insufficient"
-                structure["matched_case_ids"] = matched_case_ids
+                structure["matched_case_ids"] = []
                 structure["judgement_reason"] = reason
-                structure["stop_reason"] = "no_refinable_branch"
+                structure["stop_reason"] = "insufficient_evidence"
                 structure["final_depth"] = depth
                 continue
+
+            # --------------------------------------------
+            # refine
+            # --------------------------------------------
 
             if depth >= max_depth:
                 structure["decision_sufficient"] = False
-                structure["evidence_status"] = "insufficient"
-                structure["matched_case_ids"] = matched_case_ids
+                structure["evidence_status"] = "unresolved"
+                structure["matched_case_ids"] = []
                 structure["judgement_reason"] = reason
                 structure["stop_reason"] = "max_depth"
                 structure["final_depth"] = depth
@@ -150,28 +105,21 @@ def run_refinement_pe_batch(
             refine_nodes = []
 
             for node_id in refine_node_ids:
-                node = find_node_by_id(
-                    structure,
-                    node_id
-                )
+                node = find_node_by_id(structure, node_id)
 
                 if node is None:
                     continue
 
-                if len(
-                    node.get("case_ids", [])
-                ) <= 1:
+                if len(node.get("case_ids", [])) <= 1:
                     node["status"] = "terminal"
                     continue
 
-                refine_nodes.append(
-                    make_frontier_item(node)
-                )
+                refine_nodes.append(make_frontier_item(node))
 
             if not refine_nodes:
                 structure["decision_sufficient"] = False
                 structure["evidence_status"] = "insufficient"
-                structure["matched_case_ids"] = matched_case_ids
+                structure["matched_case_ids"] = []
                 structure["judgement_reason"] = reason
                 structure["stop_reason"] = "no_refinable_branch"
                 structure["final_depth"] = depth
@@ -187,72 +135,38 @@ def run_refinement_pe_batch(
         # 2. Refinement Batch
         # ====================================================
 
-        print(
-            f"[Refinement Depth {depth}] "
-            f"Refinement Batch: {len(need_refinement)}"
-        )
+        print(f"[Refinement Depth {depth}] Refinement Batch: {len(need_refinement)}")
 
         refinement_messages = []
 
         for x in need_refinement:
             memory = memories[x["dialog_id"]]
+            refinement_input = build_refinement_input(memory, x["_structure"], x["_refine_nodes"])
+            refinement_messages.append(build_messages(refinement_prompt, refinement_input))
 
-            refinement_input = build_refinement_input(
-                memory,
-                x["_structure"],
-                x["_refine_nodes"]
-            )
-
-            refinement_messages.append(
-                build_messages(
-                    refinement_prompt,
-                    refinement_input
-                )
-            )
-
-        refinement_outputs = parallel_inference(
-            refinement_messages
-        )
-
+        refinement_outputs = parallel_inference(refinement_messages)
         next_active_items = []
 
-        for x, out in zip(
-            need_refinement,
-            refinement_outputs
-        ):
-            refinement_result = parse_llm_output(
-                out
-            )
-
+        for x, out in zip(need_refinement, refinement_outputs):
+            refinement_result = parse_llm_output(out)
             structure = x["_structure"]
 
             x["_refinement_history"].append({
                 "depth": depth,
-                "refine_nodes": copy.deepcopy(
-                    x["_refine_nodes"]
-                ),
-                "output": copy.deepcopy(
-                    refinement_result
-                )
+                "refine_nodes": copy.deepcopy(x["_refine_nodes"]),
+                "output": copy.deepcopy(refinement_result)
             })
 
-            refinements = refinement_result.get(
-                "refinements",
-                []
-            )
+            refinements = refinement_result.get("refinements", [])
 
-            if not refinements:
+            if not isinstance(refinements, list) or not refinements:
                 structure["decision_sufficient"] = False
                 structure["evidence_status"] = "insufficient"
                 structure["stop_reason"] = "no_valid_refinement"
                 structure["final_depth"] = depth
                 continue
 
-            structure, new_frontier, created_count = apply_refinements(
-                structure,
-                refinements
-            )
-
+            structure, new_frontier, created_count = apply_refinements(structure, refinements)
             x["_structure"] = structure
 
             if created_count == 0 or not new_frontier:
@@ -288,15 +202,8 @@ def run_refinement_pe_batch(
         x["topic_structure"] = structure
 
         dialog_id = x["dialog_id"]
-
-        memories[dialog_id] = update_topic_structure_memory(
-            memories[dialog_id],
-            structure
-        )
-
-        memories[dialog_id] = mark_pe_version(
-            memories[dialog_id]
-        )
+        memories[dialog_id] = update_topic_structure_memory(memories[dialog_id], structure)
+        memories[dialog_id] = mark_pe_version(memories[dialog_id])
 
         x.pop("_structure", None)
         x.pop("_frontier", None)
@@ -306,47 +213,34 @@ def run_refinement_pe_batch(
 
 
 
+def validate_judgement(result, frontier):
+    if not isinstance(result, dict):
+        return False
 
+    status = str(result.get("status", "")).strip().lower()
+    if status not in ["matched", "refine", "insufficient"]:
+        return False
 
+    matched_case_ids = result.get("matched_case_ids", [])
+    refine_node_ids = result.get("refine_node_ids", [])
 
-# ====================================================
-# 6. Difference-Guided Adaptive Refinement Batch
-# ====================================================
+    if not isinstance(matched_case_ids, list) or not isinstance(refine_node_ids, list):
+        return False
 
-print(
-    f"[Turn {t_id}] "
-    f"Topic Refinement Batch"
-)
+    valid_node_ids = {x.get("node_id") for x in frontier if x.get("node_id")}
 
-refinement_items = []
+    if status == "matched":
+        if not matched_case_ids or refine_node_ids:
+            return False
 
-for x in current_batch:
-    memory = memories[
-        x["dialog_id"]
-    ]
+    elif status == "refine":
+        if matched_case_ids or not refine_node_ids:
+            return False
+        if any(node_id not in valid_node_ids for node_id in refine_node_ids):
+            return False
 
-    if not x["structure_update"]:
-        x["topic_structure"] = copy.deepcopy(
-            memory["evidence_state"]["topic_structure"]
-        )
-        continue
+    elif status == "insufficient":
+        if matched_case_ids or refine_node_ids:
+            return False
 
-    if not memory["evidence_state"]["knowledge_state"]:
-        x["topic_structure"] = {}
-        memory["evidence_state"]["topic_structure"] = {}
-        memories[x["dialog_id"]] = mark_pe_version(
-            memory
-        )
-        continue
-
-    refinement_items.append(x)
-
-
-if refinement_items:
-    run_refinement_pe_batch(
-        items=refinement_items,
-        memories=memories,
-        judgement_prompt=judgement_prompt,
-        refinement_prompt=refinement_prompt,
-        max_depth=max_refinement_depth
-    )
+    return True
