@@ -1,346 +1,578 @@
-Role
-
-你是 IT 客服系统中的 Policy Predictor。
-
-根据当前问题、对话状态和已有案例，预测当前轮客服下一步最合理的服务动作。
-
-你不回答用户，只输出 Policy。
-
-Input
-
-输入包含：
-
-* issue_state：当前问题及历史检索意图。
-* evidence_state.active_cases：Top-K 完整候选案例，包含具体问题、条件、原因和解决方案。
-* evidence_state.topic_structure：对 Active Cases 的 Query-Anchored、Diversity-Guided 层级组织，突出候选 Cases 之间最有判别力的主题差异。
-* interaction_state：当前服务阶段及历史动作。
-* dialog_state：最近若干轮完整对话。
-* current.u：当前用户输入。
-
-如果当前回复很短，如“是的”“Mac”“还是不行”，必须结合历史对话理解。
-
-Core Objective
-
-你的目标不是完全识别唯一 Case，也不是获得最多信息，而是：
-
-以最少交互成本，让用户最快获得有效帮助。
-
-因此，不需要消除所有 Case uncertainty 后才能行动。
-
-如果已有 Case 足够值得使用，应优先帮助用户；只有当继续询问能够明显改善下一步决策时才询问。
-
-Evidence Understanding
-
-topic_structure 和 active_cases 必须联合使用，但作用不同。
-
-Topic Structure：Compare
-
-Topic Structure 是 Active Cases 的对比索引（Contrastive Index）。
-
-它帮助你快速理解：
-
-* 当前 Cases 的共同问题范围；
-* Cases 之间真正重要的区别；
-* 哪些 Cases 属于不同处理路径；
-* 当前用户信息更支持哪些 Case / Topic Path；
-* 如果需要进一步区分，什么信息最有判别力。
-
-Topic Structure 中存在多个 Branch，不代表必须继续询问。
-
-discriminative_dimension 表示：
-
-如果需要进一步区分 Cases，哪个维度最有信息价值。
-
-它不表示：
-
-必须先确认这个维度才能采取行动。
-
-不要为了走到唯一叶节点而不断询问用户。
-
-Active Cases：Verify
-
-完整 Active Cases 是最终事实依据。
-
-结合 Topic Structure 找到关键差异后，回到完整 Cases 判断：
-
-* Case 条件是否与用户一致；
-* 是否存在明显冲突；
-* Case 是否包含当前可执行的信息；
-* 解决方案是否安全、低成本；
-* Case 是否值得优先尝试；
-* Evidence 是否已经足够直接解决问题。
-
-不要只根据 Topic Structure 选择 Case。
-
-Evidence Reasoning
-
-按照以下逻辑理解 Evidence：
-
-Dialogue + Query → Topic Structure 比较 Cases → Active Cases 验证关键条件 → 比较 Ask 与 Act 的价值 → Policy
-
-Topic Structure 的作用是减少理解完整 Cases 的难度，而不是替代完整 Cases 或直接决定动作。
-
-Ask vs. Act
-
-这是最重要的决策边界。
-
-首先判断当前 Evidence 是否已经支持行动：
-
-Act = CaseRecommendation 或 ExplainedResponse
-
-然后判断继续询问是否具有明显额外价值：
-
-Ask = AskMissingSlot 或 AskClarification
-
-只有当：
-
-新增信息很可能改变 Case Selection、处理路径，或避免明显错误/高风险操作
-
-时，Ask 才优于 Act。
-
-如果：
-
-* 一个 Case 已明显更值得优先尝试；
-* 当前 Case 与用户信息没有明显冲突；
-* 尝试成本低；
-* 风险低；
-* 即使进一步区分其他 Cases，当前下一步仍不会明显改变；
-
-则：
-
-优先 Act，不要继续 Ask。
-
-不要把“存在其他可能 Case”本身视为询问理由。
-
-Decision Process
-
-1. ProcessAcknowledgement
-
-如果用户只是感谢、确认、等待或结束问题，并且没有提供新的故障信息：
-
-→ ProcessAcknowledgement
-
-如果出现新的条件、报错、操作结果或限制，继续判断。
-
-2. Understand the Issue
-
-判断是否知道用户真正遇到什么问题。
-
-如果问题对象、目标或基本故障本身仍不明确：
-
-→ AskClarification
-
-这里解决的是：
-
-用户到底在问什么？
-
-不要使用 AskClarification 去区分已经明确问题下的不同 Cases。
-
-3. Compare Current Cases
-
-问题明确后，利用 topic_structure 理解：
-
-* 当前 Cases 的主要区别是什么；
-* 用户已有信息支持哪些 Topic / Case；
-* 哪些 Difference 与当前问题真正相关。
-
-然后结合完整 active_cases 验证这些区别。
-
-不要因为 Tree 尚未到达唯一 Case 就自动询问。
-
-4. Evaluate Current Actionability
-
-检查当前是否已经存在值得使用的 Case。
-
-如果某个 Case：
-
-* 与当前问题高度相关；
-* 与已有用户条件一致；
-* 没有明显冲突；
-* 提供了有价值的信息或操作；
-* 用户尝试成本和风险较低；
-
-则当前 Evidence 已具有 Action Value。
-
-即使还有其他可能 Cases，也可以直接行动。
-
-5. Evaluate Clarification Value
-
-只有当前无法安全、有效地行动时，再判断 Topic Structure 暴露出的 Difference 是否值得询问。
-
-选择 AskMissingSlot 必须同时满足：
-
-1. 当前问题本身已经明确；
-2. 缺少一个具体关键条件；
-3. 该条件能够区分当前合理候选 Cases；
-4. 不同答案会明显导致不同 Case Selection 或处理路径；
-5. 当前没有一个已经足够值得低成本尝试的 Case。
-
-如果以上条件不能同时满足，不要选择 AskMissingSlot。
-
-6. Select Action
-
-AskClarification
-
-用户的问题本身仍然不明确。
-
-AskMissingSlot
-
-问题已经明确，但缺少的关键条件会明显改变 Case Selection 或处理路径，而且当前还没有值得直接使用的低风险 Case。
-
-CaseRecommendation
-
-存在值得优先参考或尝试的 Case。
-
-不要求 100% 确定命中，也不要求 Topic Structure 已经定位到唯一叶节点。
-
-只要：
-
-* 高相关；
-* 无明显冲突；
-* 有实际参考价值；
-* 成本低；
-* 风险低；
-
-即可推荐。
-
-如果存在明确最佳 Case，只输出该 Case。
-
-ExplainedResponse
-
-Evidence 已足够支持直接解释、回答或提供明确解决步骤。
-
-要求高于 CaseRecommendation。
-
-必须结合完整 Active Case 确认解决方案确实适用于当前用户条件。
-
-Handoff
-
-当前 Evidence 无法有效处理，而且合理澄清也无法明显推进，需要人工、后台、专家、审批或工单。
-
-ProcessAcknowledgement
-
-当前无需继续解决，只需要确认、等待或结束。
-
-Decision Priority
-
-在问题已经明确的情况下，优先考虑：
-
-ExplainedResponse / CaseRecommendation
-
-再考虑：
-
-AskMissingSlot
-
-也就是说：
-
-先判断“现在能不能帮助用户”，再判断“还能不能获得更多信息”。
-
-不要反过来先寻找缺失信息。
-
-推荐并不要求完全确定。
-
-询问则必须证明：
-
-这个问题值得多花一轮交互成本。
-
-Important Principles
-
-1. Policy 是服务决策，不是 Case Classification。
-
-你的任务不是找到唯一 Case，而是决定当前最有价值的客服动作。
-
-2. Topic Structure 是 Contrastive Index，不是 Decision Tree。
-
-不要机械沿 Topic Tree 一直询问直到唯一 Case。
-
-3. Unresolved Difference ≠ Missing Slot。
-
-Cases 之间仍存在差异，不意味着必须让用户提供该差异。
-
-4. Discriminative Dimension ≠ Required Slot。
-
-它只是最有价值的 Case Difference。只有当确认它会明显改变下一步动作时，才转化为 AskMissingSlot。
-
-5. Active Cases 是事实依据。
-
-Topic Structure 用于定位关键 Difference，最终 Case 是否可用必须回到完整 Case 验证。
-
-6. Recommendation allows uncertainty。
-
-CaseRecommendation 不要求 Case 已被唯一确认。
-
-高相关、无明显冲突、低风险、低成本且值得尝试即可推荐。
-
-7. ExplainedResponse requires stronger evidence。
-
-只有 Evidence 已经足够支持明确解释或解决方案时才选择 ExplainedResponse。
-
-8. Ask has interaction cost。
-
-只有新增信息的预期决策收益明显高于额外交互成本时才询问。
-
-9. Do not ask for information already provided。
-
-必须结合 Dialogue State 判断用户已经提供的条件。
-
-10. New feedback requires re-evaluation。
-
-“还是不行”“已经试过”“报错变了”等反馈意味着原来的 Case 可能不再适用，应重新结合 Topic Structure 和 Active Cases 判断。
-
-Key Boundary Examples
-
-Multiple Cases, but one is already actionable
-
-Topic Structure:
-Case A / Case B 尚未完全区分
-Case A:
-高度相关、无冲突、低风险、操作简单
-进一步区分 A/B 不会明显改变当前第一步处理
-
-→ CaseRecommendation(A)
-
-不要 AskMissingSlot。
-
-Multiple Cases and difference changes treatment
-
-Case A:
-Windows处理方法
-Case B:
-Mac处理方法
-用户系统未知
-
-系统类型会直接改变解决方案。
-
-→ AskMissingSlot
-
-Unique Case but evidence conflicts
-
-Topic Structure:
-当前 Path 只剩 Case A
-Active Case A:
-仅适用于 Windows
-User:
-明确使用 Mac
-
-不要因为 Structure 已经到达唯一 Case 就推荐 A。
-
-应重新判断 Evidence；必要时询问或 Handoff。
-
-Output
-
-仅输出 JSON：
-
-{
-  "label": "AskMissingSlot | AskClarification | ExplainedResponse | CaseRecommendation | Handoff | ProcessAcknowledgement",
-  "case_id": [],
-  "reason": "一句简洁原因"
-}
-
-case_id 规则：
-
-* CaseRecommendation：只能输出一个最值得推荐的 Case ID。
-* ExplainedResponse：如果依赖具体 Case，只能输出一个 Case ID。
-* 其他动作：输出 []。
-
-禁止同时输出多个 Case。
+      {
+        "dialog_id": "220598242",
+        "user": "这个可以每个议题传附件吗？",
+        "golden_response": "[案例链接: KT00151023]。\n您编辑好之后可以在outlook里面插入附件。\n您好，请问还有其它可以帮到您的吗？",
+        "query": {
+          "query_mode": "refine",
+          "query_text": "有没有支持每个议题传附件的本地会议纪要编辑软件",
+          "reason": "用户补充了功能需求：支持每个议题上传附件"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 中的案例主要涉及会议纪要格式、模板设置、整理流程及保存问题，未提及支持每个议题传附件的本地会议纪要编辑软件相关内容，无法支撑用户当前问题的处理。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00319771",
+            "title": "【数字化会议】会议纪要如何整理和发送？",
+            "keywords": [
+              "会议纪要整理",
+              "数字化会议"
+            ],
+            "content": "反馈在会议议题下面的会议纪要，发会议纪要的时候，不会显示任何内容，需要自己手动复制到下面的会议纪要内\n目前的流程是先收集议题的纪要，会务人员根据议题纪要来整理会议纪要（可以根据议题纪要自动生成），再整体发送。\n议题相关人员反馈各自的议题纪要\n会务人员在会议纪要栏生成和整理所有纪要：\n选中“会议议题及结论”，点击“覆盖”或“追加”按钮，可快速将议题纪要汇总到会议纪要中。\n其它的会议纪要标题、本次会议与会情况、会议运作规范，可根据会议要求决定是否生成到会议纪要中。\n自动生成的会议纪要内容，可在编辑框中修改\n整理完成后，会务人员统一发送会议纪要。可点击“发送会议纪要”按钮，进入纪要发送界面。\n① 可导入会议相关人员到收件人中。\n② 可配置纪要中议题表格展示的字段或顺序。\n③ 可配置会议纪要的模板，后续系列会议下创建的子会议可自动继承改模板，减少没法发送纪要的修改内容。\n④ 系统按内置模板生成的会议纪要内容，在编辑框中展示，可修改内容后再发送。\n⑤ 点击“发送邮件”系统将按照修改后的内容发送。"
+          },
+          {
+            "case_id": "KT00151023",
+            "title": "会议纪要发送如何附带材料或添加邮件附件",
+            "keywords": [
+              "会议纪要",
+              "添加附件"
+            ],
+            "content": "【问题现象】：\n（1）会议空间发送会议纪要时，纪要材料不会随纪要内容发送，纪要发送只是单纯的邮件发送，内容只包括会议纪要和议题纪要；\n（2）会议空间里上传有文件，但是在发会议通知时无法带出这些文件。\n【问题原因】：\n（1）上传的材料是不会附带发送的；\n（2）如果要查看文件需要点会议通知里的“”跳转到会议空间查看。\n【解决方案】：\n从会议空间发送时，点“下载编辑”按钮，将纪要内容或会议通知下载到本地邮箱，再手动添加附件后发送（或如有材料归档，也可附加材料共享链接后本地发送）"
+          },
+          {
+            "case_id": "KT00411793",
+            "title": "会议纪要里面怎么插入图片？",
+            "keywords": [
+              "会议纪要",
+              "插入图片"
+            ],
+            "content": "一、问题现象：\n会议纪要不支持上传图片，但可以下载到本地后拖入会议纪要编辑框内。\n二、解决方案：\n图片另存为保存到本地，进入会议纪要界面，鼠标左键点击图片拖到至会议纪要编辑框内即可："
+          },
+          {
+            "case_id": "KT00154446",
+            "title": "会议空间如何添加纪要以及纪要权限",
+            "keywords": [
+              "会议纪要",
+              "添加与权限"
+            ],
+            "content": "一、问题现象：\n会议空间支持会议成员编辑会议纪要或者议题纪要，编辑规则或者权限如下：\n1、召集人、管理员可以编辑会议纪要、议题纪要\n2、各个议题的参与人员只可以维护自己议题的议题纪要\n3、其他会议人员无权限维护任何纪要\n二、解决方案：\n1、点击w3首页会议预定或直接访问http://w3.huawei.com/emeeting/#/，进入会议空间，点击会议主题进入会议详情页面，点击“会议纪要”按钮\n2、进入纪要编辑列表，点击编写纪要或者编辑图标，开始编辑纪要信息"
+          },
+          {
+            "case_id": "KT00332042",
+            "title": "【数字化会议】发送会议纪要：支持发送前编辑、配置纪要模板",
+            "keywords": [
+              "会议纪要发送",
+              "模板配置"
+            ],
+            "content": "本次发送会议纪要功能进行了优化调整：\n发送会议纪要前可在页面编辑+预览。\n同时支持配置纪要模板，不同的会议可配置差异化的纪要模板（系列会议下子会议自动继承），待发送的纪要根据配置好模板格式生成。\n如果会议纪要中包含议题信息时，可通过议题列配置显示的字段及顺序（不再按照议题配置中的是否保密控制议题列是否展示）。\n取消了使用应用号发送会议纪要的选项（不常用）。\n点击“发送会议纪要按钮”\n跳转到发送邮件页面，支持用户编辑修改邮件内容。\n支持修改收件人（支持导入会议成员）、抄送人、密送人、主题。\n注意：如果邮件内容修改变动较大，为确保发送的邮件内容无异常错乱， 可使用“下载邮件”功能，使用outlook打开文件确认邮件格式是否正常。\n支持配置会议议题表格显示的字段和顺序、系列会议支持选择其他子会议邮件模板。\n在发送邮件页面，用户也可下载邮件内容，随后导入outlook自行编辑内容\n用户通过点击配置模板按钮，针对纪要邮件模板进行会议级定制修改\n邮件内容默认了一些系统变量，支持用户通过工具栏变量插入功能增加变量内容占位（该变量会在邮件发送页面替换为会议相关字段真实内容）\n目前支持的变量有：会议名称、会议时间、会议日期、会议地点、召集人、全程与会人、团队成员-主任、团队成员-核心成员、团队成员-扩展成员、团队成员-执行秘书、会议议题、会议纪要、会议备注、会议材料、遗留事项、会议提醒人、当前日期、查看会议详情链接等。\n也支持用户重置模板内容，恢复为系统默认内容"
+          }
+        ],
+        "topic_structure": {
+          "common_anchor": "会议纪要编辑与发送功能",
+          "root": {
+            "case_ids": [
+              "KT00319771",
+              "KT00151023",
+              "KT00411793",
+              "KT00154446",
+              "KT00332042"
+            ],
+            "discriminative_dimension": "是否支持议题材料/附件的集成处理",
+            "children": [
+              {
+                "topic": "支持议题材料或附件集成处理",
+                "case_ids": [
+                  "KT00319771",
+                  "KT00332042"
+                ],
+                "cue": "系统支持议题纪要自动汇总、模板配置及邮件内容编辑，可继承模板并调整字段展示",
+                "discriminative_dimension": "是否支持自动生成和模板继承",
+                "children": [
+                  {
+                    "topic": "支持议题纪要自动汇总与模板继承",
+                    "case_ids": [
+                      "KT00319771"
+                    ],
+                    "cue": "议题相关人员提交纪要后，会务人员可通过覆盖或追加按钮将内容汇总到会议纪要中，并使用模板生成整体纪要",
+                    "children": []
+                  },
+                  {
+                    "topic": "支持邮件模板配置与字段定制",
+                    "case_ids": [
+                      "KT00332042"
+                    ],
+                    "cue": "支持配置邮件模板，可插入变量如会议名称、议题等，并控制议题表格字段展示顺序",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "topic": "不支持议题材料或附件集成处理",
+                "case_ids": [
+                  "KT00151023",
+                  "KT00411793",
+                  "KT00154446"
+                ],
+                "cue": "上传的材料不会随纪要自动附带发送，需手动操作添加附件或图片",
+                "discriminative_dimension": "是否涉及权限或格式限制",
+                "children": [
+                  {
+                    "topic": "仅支持手动添加附件或图片",
+                    "case_ids": [
+                      "KT00151023",
+                      "KT00411793"
+                    ],
+                    "cue": "需下载纪要后手动添加附件或拖入图片，无法在系统内直接附加材料",
+                    "discriminative_dimension": "是否涉及图片或文件类型",
+                    "children": [
+                      {
+                        "topic": "支持图片插入（需本地保存后拖入）",
+                        "case_ids": [
+                          "KT00411793"
+                        ],
+                        "cue": "图片需另存为本地后拖入编辑框",
+                        "children": []
+                      },
+                      {
+                        "topic": "支持附件添加（需手动下载后附加）",
+                        "case_ids": [
+                          "KT00151023"
+                        ],
+                        "cue": "需下载纪要后手动添加附件再发送",
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "topic": "涉及纪要编辑权限设置",
+                    "case_ids": [
+                      "KT00154446"
+                    ],
+                    "cue": "召集人和管理员可编辑纪要，其他成员权限受限",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "policy": {
+          "label": "AskClarification",
+          "case_id": [],
+          "reason": "用户的问题从寻找本地会议纪要软件转变为关注是否支持每个议题传附件，当前 Evidence 中未明确提及支持该功能的本地软件，需进一步澄清具体需求和使用场景。"
+        },
+        "response": {
+          "response": "您提到的“每个议题传附件”是指希望在本地会议纪要编辑软件中，为每个议题单独上传和管理相关附件吗？还是有其他具体需求呢？"
+        },
+        "turn_id": 2
+      }
+
+
+      {
+        "dialog_id": "220600199",
+        "user": "你好，我目前正在休产假，电脑的的外网权限好像到期了？您这边能不能查询到？如何重新申请。\n因为偶尔需要回复工作邮件，电脑的外网权限到期比较不方便。",
+        "golden_response": "[案例链接: KT00002092] 如何申请iAccess账号和权限。\n您好，您目前没有权限，工作需要可以申请下权限。\n案例我发您welink。",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "员工休产假后电脑外网权限到期，如何重新申请外网权限",
+          "reason": "用户提出新的 IT 问题：外网权限到期及重新申请流程"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "not_needed",
+          "case_id": "",
+          "reason": "当前没有可用的案例证据，需要重新检索相关案例"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00002092",
+            "title": "如何申请xGate外网接入权限",
+            "keywords": [
+              "xGate外网接入",
+              "权限申请"
+            ],
+            "content": "查询是否有xGate外网接入权限：\n华为员工默认开通xGate外网权限，若您不确定是否有权限，请点击查询链接进行查询。若未显示对应权限，请点击xGate外网接入权限申请链接进行申请。\nxGate外网接入权限申请的注意事项：\n公共/专业账号不能申请xGate外网接入权限；\n新员工申请xGate外网接入权限，需要在入职24小时后提交申请；\n权限有效期：默认最长一年到期，到期后重新申请或提前申请延期；\n权限生效时间：电子流提交--主管审批通过后--权限立即生效，审批状态查看请点击此处；\n若无法打开申请链接或者申请完无法提交等情况，可以尝试清理浏览器缓存（或者更换浏览器)重新填写提交。\nxGate权限使用注意事项：\n首次登陆xGate时需要进行双因子认证，无手机号请在W3通讯录中登记/修改手机号。\n若连接xGate时提示没有权限，可参考：外网接入失败提示：没有外网接入权限。\n特别注意：工号以3,6,8开头的员工在申请权限时，请先在iauth确认是否有未过期的External Staff权限，如果有，先取消后再选择申请“Leasing Employee”权限。\n权限开通电子流：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n选择\"权限申请\"->\"按应用权限申请\"\n填入申请人信息\n第一步: 填入申请人w3账号, 如果是代他人申请, 请填写实际使用人w3账号\n第二步: 填入xGate, 会自动带出”xGate外网接入”\n第三步: 勾选对应的权限:\n使用公司便携机: 华为员工(含慧通), 请选择”Huawei Staff”\n合作员工（WX，实习生等）请选择”External Staff”\n工号以3,6,8开头员工请选择“Leasing Employee”\n填写审批人, 申请原因, 并提交申请即可\n如若权限即将到期，可以申请权限延期。\n其他相关链接：\n什么是双因子认证？是否每次登陆都需要认证？\n外网接入认证连接失败"
+          },
+          {
+            "case_id": "KT00191104",
+            "title": "内网怎样申请iAccess(xGate外网接入)权限？",
+            "keywords": [
+              "iAccess权限",
+              "申请流程"
+            ],
+            "content": "iAccess(xGate外网接入)权限仅支持在公司内网申请，不支持在外网申请。\n查询是否有iAccess权限：\n华为员工(工号00开头的)默认开通iAccess（xGate外网接入）权限。\n若您不确定是否有iAccess（xGate外网接入）权限，请点击查询链接进行查询（注：请在个人申请的权限和业务管理的权限栏目中展开查询确认，如下图）。\n若未查询到iAccess(xGate外网接入)的应用权限，可参考下文进行权限申请。\niAccess权限申请的注意事项：\n公共/专业账号不能申请iAccess权限；\niAccess权限有效期：默认最长一年到期，到期后重新申请；\niAccess权限生效时间：iAccess权限生效时间：电子流提交--直接主管审批--部门权签人（部门系统中任命的主管）审批--权限需要0.5小时同步生效；审批状态查看请点击此处。\n若无法打开申请链接或者申请完无法提交等情况，可以尝试清理浏览器缓存（或者更换浏览器)重新填写提交。\n新入职员工申请iAccess权限报错注意事项：\n新入职员工申请IAccess权限的时候通常会报“人员信息未同步-新员工需要等待24小时后申请”或者“无部门权签人-无法获取你的部门权签人”，此时需要等部门HR数据集成，系统同步新员工部门数据，之后才能申请；\niAccess权限开通电子流：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n选择\"权限申请\"->\"按应用权限申请\"\n第一步: 填入申请人w3账号, 如果是代他人申请, 请填写实际使用人w3账号\n第二步: 在中间第二个方框内填入iAccess或者xGate, 会自动带出”xGate外网接入”\n第三步: 勾选对应的权限:\n:华为员工(含慧通), 请选择”Huawei Staff”(默认有权限无需申请)；\n外协员工工号WX开头，实习生， 请选择”External Staff”；\n租赁, OD, 工号3/6/8开头，请选择”Leasing Employee”；\n填写直接主管, 申请原因, 并提交申请即可\n相关案例：XGate外网接入权限申请时，审批人与实际不符\n若权限已经申请了或者名下有权限了，无法外网连接请咨询或联系iAccess(xGate外网接入)的支持人员：\n其他相关链接：\nXGate外网接入权限申请时，审批人与实际不符\n什么是双因子认证？是否每次登陆都需要认证？\nspes外网接入认证连接失败"
+          },
+          {
+            "case_id": "KT00233757",
+            "title": "xGate外网接入权限重新申请方法",
+            "keywords": [
+              "xGate权限重新申请",
+              "取消权限"
+            ],
+            "content": "https://w3.huawei.com/iauth/#/myApprove\n我的工作流---查看以往的权限申请记录--找到“xGate外网接入”权限的申请记录\n点击“查看全部”\n只有一条审批记录的，不符合安全规定，需要取消当前权限重新申请\n点击取消权限\n重新申请xGate外网接入权限\n提交申请即可"
+          },
+          {
+            "case_id": "KT00193201",
+            "title": "【Workplace】外网用户权限如何延期",
+            "keywords": [
+              "外网权限",
+              "延期"
+            ],
+            "content": "1.外网用户登录：https://iauth.huawei.com/iauth/#/myApprover，勾选需要延期的权限进行延期即可\n2.联系业务/代表处助理/县代表等对接人，在该页面右上角中输入对应的外网账号查询权限勾选延期\n如有疑问请及时联系IT同事进行核实处理，感谢。"
+          },
+          {
+            "case_id": "KT00400663",
+            "title": "延期外网用户权限指导",
+            "keywords": [
+              "外网权限延期",
+              "项目组接口人"
+            ],
+            "content": "外网用户报告自动化权限即将到期，需要联系项目组接口人XXX进行延期使用权限\n项目组接口人进入MBB首页（https://mbbcn.huawei.com/mbb/#/），访问“工作台”—“我的权限”。\n切换到“我管理的权限”页面（https://mbbcn.huawei.com/mbb/customerRight/#/permissionManagement/extranetPermissionManagement），找到要延期的账号，点击“延期”按钮。\n选择权限有效期，点击确定。"
+          }
+        ],
+        "structure_error": "invalid_topic_structure",
+        "raw_topic_structure": {
+          "common_anchor": "华为员工外网权限申请与延期",
+          "root": {
+            "case_ids": [
+              "KT00002092",
+              "KT00191104",
+              "KT00233757",
+              "KT00193201",
+              "KT00400663"
+            ],
+            "discriminative_dimension": "权限操作类型",
+            "children": [
+              {
+                "topic": "首次申请外网权限",
+                "case_ids": [
+                  "KT00002092",
+                  "KT00191104"
+                ],
+                "cue": "适用于未开通或新入职员工首次申请xGate/iAccess外网接入权限",
+                "children": []
+              },
+              {
+                "topic": "重新申请/取消后重申外网权限",
+                "case_ids": [
+                  "KT00233757"
+                ],
+                "cue": "适用于已有权限但需取消并重新提交申请的情况",
+                "children": []
+              },
+              {
+                "topic": "外网权限延期",
+                "case_ids": [
+                  "KT00193201",
+                  "KT00400663"
+                ],
+                "discriminative_dimension": "延期操作方式",
+                "children": [
+                  {
+                    "topic": "用户自助延期",
+                    "case_ids": [
+                      "KT00193201"
+                    ],
+                    "cue": "外网用户可自行登录iAuth系统进行权限延期",
+                    "children": []
+                  },
+                  {
+                    "topic": "项目组接口人协助延期",
+                    "case_ids": [
+                      "KT00400663"
+                    ],
+                    "cue": "需由项目组接口人通过MBB平台协助延期",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "topic_structure": {
+          "common_anchor": "华为员工外网权限申请与延期",
+          "root": {
+            "case_ids": [
+              "KT00002092",
+              "KT00191104",
+              "KT00233757",
+              "KT00193201",
+              "KT00400663"
+            ],
+            "discriminative_dimension": "权限操作类型",
+            "children": [
+              {
+                "topic": "首次申请外网权限",
+                "case_ids": [
+                  "KT00002092",
+                  "KT00191104"
+                ],
+                "cue": "适用于未开通或新入职员工首次申请xGate/iAccess外网接入权限",
+                "children": []
+              },
+              {
+                "topic": "重新申请/取消后重申外网权限",
+                "case_ids": [
+                  "KT00233757"
+                ],
+                "cue": "适用于已有权限但需取消并重新提交申请的情况",
+                "children": []
+              },
+              {
+                "topic": "外网权限延期",
+                "case_ids": [
+                  "KT00193201",
+                  "KT00400663"
+                ],
+                "discriminative_dimension": "延期操作方式",
+                "children": [
+                  {
+                    "topic": "用户自助延期",
+                    "case_ids": [
+                      "KT00193201"
+                    ],
+                    "cue": "外网用户可自行登录iAuth系统进行权限延期",
+                    "children": []
+                  },
+                  {
+                    "topic": "项目组接口人协助延期",
+                    "case_ids": [
+                      "KT00400663"
+                    ],
+                    "cue": "需由项目组接口人通过MBB平台协助延期",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [
+            "KT00193201"
+          ],
+          "reason": "用户外网权限已到期，且需要重新申请或延期。已有 Case 提供了明确的自助延期方法，操作简单、风险低，可优先推荐。"
+        },
+        "response": {
+          "response": "您好，关于员工休产假后电脑外网权限到期的问题，您可以参考以下案例进行重新申请：\n\n1. **xGate外网接入权限重新申请方法**（案例编号：KT00233757）\n   - 访问链接：https://w3.huawei.com/iauth/#/myApprove\n   - 进入“我的工作流”查看以往的权限申请记录。\n   - 找到“xGate外网接入”权限的申请记录，点击“查看全部”。\n   - 如果只有一条审批记录，不符合安全规定，需要取消当前权限并重新申请。\n   - 点击“取消权限”，然后重新提交xGate外网接入权限的申请即可。\n\n2. **外网用户权限如何延期**（案例编号：KT00193201）\n   - 外网用户登录：https://iauth.huawei.com/iauth/#/myApprover\n   - 勾选需要延期的权限进行延期操作。\n   - 如有疑问，请及时联系IT同事核实处理。\n\n如需进一步帮助或遇到问题，建议联系IT支持人员协助处理。希望对您有所帮助！"
+        },
+        "turn_id": 0
+      },
+
+
+
+      {
+        "dialog_id": "220600652",
+        "user": "你好，我的手机版welink在对话界面无法上传图片和文件。\n这个是有什么权限限制吗？",
+        "golden_response": "[案例链接: KT00318831] WeLink消息移动端富媒体权限如何申请。\n您好，没有富媒体权限，工作需要可以参考案例申请下呢？",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "welink手机版 对话界面无法上传图片和文件 权限限制",
+          "reason": "用户提出了一个新的IT问题，涉及welink手机版上传功能异常及权限限制。"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "not_needed",
+          "case_id": "",
+          "reason": "当前没有可用案例，需要重新检索"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00040816",
+            "title": "如何申请手机WeLink消息的图片，视频、文件收发权限",
+            "keywords": [
+              "WeLink移动端",
+              "富媒体权限",
+              "申请"
+            ],
+            "content": "手机端Welink无法查看消息中的图片和文件，提示去PC查看\n1.未开通移动端富媒体权限\n2.权限开通后未刷新或重新登录\n申请手机WeLink消息的图片，视频、文件收发权限。\n打开链接：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true，在添加申请人W3账号一栏填写需要开通WeLink移动端聊天富媒体权限的账号；\n在权限申请---应用角色权限，输入“WeLink”，点击搜索；\n勾选“移动端富媒体权限”；\n点击下一步；\n在申请信息中填写“直接主管”、“申请原因”；注：直接主管必须是华为方主管，且请勿填写与自己业务不相关的主管\n确认申请信息无误，点击“提交申请”即可。\n在申请电子流审批完成之后，10min左右开通权限，查看已有权限中已具备移动端富媒体权限但不能使用时，请退出重新登录手机端Welink；若还是无法使用请联系二级支持雷瑞 lwx1208033"
+          },
+          {
+            "case_id": "KT00318831",
+            "title": "WeLink消息移动端富媒体权限如何申请",
+            "keywords": [
+              "WeLink",
+              "富媒体权限",
+              "申请"
+            ],
+            "content": "如果您需要在移动端红版welink中查看图片、附件等富媒体消息，请参考本案例申请对应权限：\n登录权限申请平台：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n选择welink应用，并输入WeLink消息移动端富媒体权限，搜索后勾选并点击下一步：\n填写直接主管和申请原因后，提交申请并跟进审批完成即可。\n注：权限的生效时间是审批结束后10分钟，请10分钟后重登手机welink"
+          },
+          {
+            "case_id": "KT00358996",
+            "title": "移动端welink无法上传文档到云空间个人空间，提示“权限不足，信息安全”等？",
+            "keywords": [
+              "移动端WeLink",
+              "云空间上传",
+              "权限不足"
+            ],
+            "content": "现象：wx和600工号使用移动端welink无法上传文档到云空间，提示“权限不足，信息安全”等\n合作方同事不支持移动端操作，安全策略拦截，华为研发员工在移动端welink上传文档到云空间连接huaweiemployee网络进行上传操作。\n合作方同事可申请welink移动富媒体权限后上传至群空间：移动端富媒体权限"
+          },
+          {
+            "case_id": "KT00289492",
+            "title": "WeLink (red version mobile version) cannot share photos",
+            "keywords": [
+              "WeLink红版",
+              "iOS14.5",
+              "照片分享失败"
+            ],
+            "content": "[Problem]:When using WeLink on a mobile phone with iOS 14.5 or above, there is no response or prompt when clicking on a photo from the mobile phone album to share it with WeLink. Sharing it with colleagues, email, or cloud disk has no response or prompt.\n[Cause Analysis]:Compatibility issues with the new iOS14.5 and iOS14.6 systems\nThe latest version of WeLinkV5.26.9 released on August 4, 2021 has fixed this problem. Just upgrade the WeLink version to 5.26.9 ordownload the latest version at his.huawei.com.\nUpgrade method: Go to the avatar in the upper left corner of WeLink - Settings - About WeLink - Software version to pop up an upgrade prompt.\nFor more information on WeLink download and installation issues, pleaseclick here."
+          },
+          {
+            "case_id": "KT00298913",
+            "title": "文件/图片上传失败怎么办？",
+            "keywords": [
+              "文件/图片",
+              "上传失败",
+              "Proxy权限"
+            ],
+            "content": "平台上相关文件上传失败是因为没有Proxy文件上传权限，需要在iauth平台申请权限后才可上传成功。\n1.访问iauth平台：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n2.在权限名称中输入 proxy后点击搜索，然后选择第一条“上传权限”，待权限审批完成后即可正常上传相关文件"
+          }
+        ],
+        "structure_error": "invalid_topic_structure",
+        "raw_topic_structure": {
+          "common_anchor": "WeLink移动端文件和图片上传权限问题",
+          "root": {
+            "case_ids": [
+              "KT00040816",
+              "KT00318831",
+              "KT00358996",
+              "KT00289492",
+              "KT00298913"
+            ],
+            "discriminative_dimension": "权限类型与限制场景",
+            "children": [
+              {
+                "topic": "消息中图片/文件收发权限不足",
+                "case_ids": [
+                  "KT00040816",
+                  "KT00318831"
+                ],
+                "cue": "手机端无法查看消息中的图片和文件，提示去PC查看；需申请移动端富媒体权限",
+                "discriminative_dimension": "具体权限申请方式",
+                "children": [
+                  {
+                    "topic": "通过W3平台申请WeLink移动端富媒体权限",
+                    "case_ids": [
+                      "KT00040816",
+                      "KT00318831"
+                    ],
+                    "cue": "填写直接主管、申请原因并提交审批，权限生效后需重新登录",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "topic": "云空间上传权限不足",
+                "case_ids": [
+                  "KT00358996"
+                ],
+                "cue": "合作方同事在移动端无法上传文档到云空间，提示“权限不足，信息安全”",
+                "discriminative_dimension": "用户身份与网络环境",
+                "children": [
+                  {
+                    "topic": "华为研发员工可通过连接huaweiemployee网络上传",
+                    "case_ids": [
+                      "KT00358996"
+                    ],
+                    "cue": "非合作方可通过申请移动端富媒体权限上传至群空间",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "topic": "iOS系统兼容性导致照片分享失败",
+                "case_ids": [
+                  "KT00289492"
+                ],
+                "cue": "iOS14.5及以上版本点击相册无响应，升级WeLink至V5.26.9可解决",
+                "children": []
+              },
+              {
+                "topic": "Proxy文件上传权限不足",
+                "case_ids": [
+                  "KT00298913"
+                ],
+                "cue": "文件上传失败因缺少Proxy权限，需在iauth平台申请对应权限",
+                "children": []
+              }
+            ]
+          }
+        },
+        "topic_structure": {
+          "common_anchor": "WeLink移动端文件和图片上传权限问题",
+          "root": {
+            "case_ids": [
+              "KT00040816",
+              "KT00318831",
+              "KT00358996",
+              "KT00289492",
+              "KT00298913"
+            ],
+            "discriminative_dimension": "权限类型与限制场景",
+            "children": [
+              {
+                "topic": "消息中图片/文件收发权限不足",
+                "case_ids": [
+                  "KT00040816",
+                  "KT00318831"
+                ],
+                "cue": "手机端无法查看消息中的图片和文件，提示去PC查看；需申请移动端富媒体权限",
+                "discriminative_dimension": "具体权限申请方式",
+                "children": [
+                  {
+                    "topic": "通过W3平台申请WeLink移动端富媒体权限",
+                    "case_ids": [
+                      "KT00040816",
+                      "KT00318831"
+                    ],
+                    "cue": "填写直接主管、申请原因并提交审批，权限生效后需重新登录",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "topic": "云空间上传权限不足",
+                "case_ids": [
+                  "KT00358996"
+                ],
+                "cue": "合作方同事在移动端无法上传文档到云空间，提示“权限不足，信息安全”",
+                "discriminative_dimension": "用户身份与网络环境",
+                "children": [
+                  {
+                    "topic": "华为研发员工可通过连接huaweiemployee网络上传",
+                    "case_ids": [
+                      "KT00358996"
+                    ],
+                    "cue": "非合作方可通过申请移动端富媒体权限上传至群空间",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "topic": "iOS系统兼容性导致照片分享失败",
+                "case_ids": [
+                  "KT00289492"
+                ],
+                "cue": "iOS14.5及以上版本点击相册无响应，升级WeLink至V5.26.9可解决",
+                "children": []
+              },
+              {
+                "topic": "Proxy文件上传权限不足",
+                "case_ids": [
+                  "KT00298913"
+                ],
+                "cue": "文件上传失败因缺少Proxy权限，需在iauth平台申请对应权限",
+                "children": []
+              }
+            ]
+          }
+        },
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [
+            "KT00040816"
+          ],
+          "reason": "用户明确描述了移动端WeLink无法上传图片和文件的问题，且主动询问是否为权限限制。Case KT00040816直接针对该问题，提供权限申请方式及操作指引，与用户当前情况高度匹配，无明显冲突，推荐优先尝试。"
+        },
+        "response": {
+          "response": "您好，您遇到的WeLink手机版对话界面无法上传图片和文件的问题，可能是由于权限限制导致的。以下是相关的案例信息供您参考：\n\n1. **如何申请手机WeLink消息的图片、视频、文件收发权限**（案例编号：KT00040816）\n   - 如果您未开通移动端富媒体权限，或权限开通后未刷新或重新登录，可能会出现此问题。\n   - 您可以通过以下链接申请权限：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n   - 在添加申请人W3账号一栏填写需要开通WeLink移动端聊天富媒体权限的账号；\n   - 在权限申请---应用角色权限，输入“WeLink”，点击搜索；\n   - 勾选“移动端富媒体权限”；\n   - 点击下一步；\n   - 在申请信息中填写“直接主管”、“申请原因”；\n   - 确认申请信息无误，点击“提交申请”即可。\n   - 审批完成后，大约10分钟权限会生效，请退出并重新登录手机端WeLink。\n\n2. **WeLink消息移动端富媒体权限如何申请**（案例编号：KT00318831）\n   - 登录权限申请平台：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true\n   - 选择WeLink应用，并输入WeLink消息移动端富媒体权限，搜索后勾选并点击下一步；\n   - 填写直接主管和申请原因后，提交申请并跟进审批完成即可。\n   - 权限的生效时间是审批结束后10分钟，请10分钟后重登手机WeLink。\n\n如果您还有其他疑问或需要进一步帮助，请随时告诉我！"
+        },
+        "turn_id": 0
+      },
