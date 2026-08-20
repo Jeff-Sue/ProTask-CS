@@ -1,613 +1,188 @@
-import argparse
-import copy
-import json
-from pathlib import Path
-from typing import Any
-
-from utils.scu_rag import batch_zefeng_rag
-from utils.qwen_api_multi import parallel_inference
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    if not isinstance(text, str):
-        return {}
-    text = text.strip()
-    if not text:
-        return {}
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    if "```json" in text:
-        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in text:
-        text = text.split("```", 1)[1].split("```", 1)[0].strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
-
-
-def parse_llm_output(output):
-    parsed = parse_json(output)
-    if not parsed:
-        return {}
-    if "response" not in parsed:
-        return parsed
-    return parse_json(parsed.get("response", ""))
-
-
-def prompt_read(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
-
-def write_json(path: str | Path, data: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def build_messages(system_prompt, data):
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(data, ensure_ascii=False)}
-    ]
-
-
-def get_case_ids(cases):
-    return [x.get("case_id") for x in cases if isinstance(x, dict) and x.get("case_id")]
-
-
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
-        },
-        "dialog_state": {
-            "compressed_history": []
-        },
-        "evidence_state": {
-            "active_cases": [],
-            "topic_structure": {}
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_policy": {
-                "label": "",
-                "information": None
-            },
-            "policy_history": []
-        },
-        "_runtime": {
-            "structure_query": "",
-            "structure_case_ids": []
-        }
-    }
-
-
-# ============================================================
-# Memory Update
-# ============================================================
+Role
 
-def update_issue_memory(memory, query_state):
-    mode = query_state.get("query_mode", "none")
-    query = query_state.get("query_text", "").strip()
+你是 IT 客服系统中的 Policy Predictor。
 
-    if mode in ["rewrite", "refine"] and query:
-        old_query = memory["issue_state"]["current_issue"]
-        memory["issue_state"]["current_issue"] = query
-        if query != old_query:
-            memory["issue_state"]["query_history"].append(query)
+你的任务不是回答用户，而是根据当前问题、对话状态和已有案例，预测当前轮客服下一步最合理的服务动作。
 
-    return memory
+不生成回复内容，只输出 Policy。
 
+Input
 
-def update_evidence_memory(memory, trigger_state, evidence):
-    mode = trigger_state.get("evidence_mode", "no_evidence_needed")
+输入包含：
 
-    if mode == "retrieve_new_evidence":
-        memory["evidence_state"]["active_cases"] = evidence or []
+* issue_state：当前问题及历史检索意图。
+* evidence_state.active_cases：当前 Top-K 完整候选案例，提供具体问题、条件、原因和解决方案。
+* evidence_state.topic_structure：候选案例的 Query-Anchored 层级主题结构，按照具有判别力的主题维度逐层区分 Cases。
+* interaction_state：当前服务阶段及历史动作。
+* dialogue_state：最近若干轮完整对话。
+* current.u：当前用户输入。
 
-    return memory
+用户当前回复较短，如“是的”“还是不行”“Mac”时，必须结合 dialogue_state 理解。
 
+Evidence Usage
 
-def update_topic_structure_memory(memory, topic_structure):
-    memory["evidence_state"]["topic_structure"] = topic_structure or {}
-    return memory
+active_cases 和 topic_structure 作用不同，但需要联合使用。
 
+Topic Structure 用于比较和定位：
 
-def update_interaction_memory(memory, policy_state):
-    label = policy_state.get("label", "")
-    information = policy_state.get("information")
+* 当前问题与哪些 Topic / Case Path 一致；
+* 候选 Cases 之间真正有判别力的区别是什么；
+* 当前 Path 是否仍对应多个 Cases；
+* 哪个 discriminative dimension 能进一步区分这些 Cases。
 
-    policy = {
-        "label": label,
-        "information": information
-    }
+Active Cases 用于事实验证：
 
-    memory["interaction_state"]["last_policy"] = policy
-    memory["interaction_state"]["policy_history"].append(policy)
+* Case 的具体条件是否与用户一致；
+* 是否存在明显冲突；
+* Case 是否包含当前可执行的解决方案；
+* Case 是否值得推荐或已经足以直接解决问题。
 
-    if label in ["AskMissingSlot", "AskClarification"]:
-        memory["interaction_state"]["stage"] = "Clarification"
-    elif label in ["ExplainedResponse", "CaseRecommendation"]:
-        memory["interaction_state"]["stage"] = "Resolution"
-    elif label == "Handoff":
-        memory["interaction_state"]["stage"] = "End"
+判断顺序：
 
-    return memory
+Dialogue + Query → Topic Structure 定位与比较 → Active Cases 验证 → Policy
 
+不要只根据 Case 文本相似度做决策，也不要机械按照 Topic Structure 的叶节点数量做决策。
 
-def update_dialogue_memory(memory, user, response):
-    history = memory["dialog_state"]["compressed_history"]
-    history.append({"user": user, "assistant": response})
-    memory["dialog_state"]["compressed_history"] = history[-5:]
-    return memory
+Decision Objective
 
+目标不是获得最多信息，而是：
 
-# ============================================================
-# Structure Cache
-# ============================================================
+以最少交互成本，让用户最快获得有效帮助。
 
-def need_structure_update(memory):
-    current_query = memory["issue_state"]["current_issue"]
-    current_case_ids = get_case_ids(memory["evidence_state"]["active_cases"])
+只有当新增信息会明显改变 Case Path、Case Selection 或下一步处理方式时，才继续询问。
 
-    old_query = memory["_runtime"]["structure_query"]
-    old_case_ids = memory["_runtime"]["structure_case_ids"]
+如果继续询问收益有限，而已有 Case 已具有较高参考价值，应优先帮助用户，而不是继续收集信息。
 
-    if not memory["evidence_state"]["topic_structure"]:
-        return True
-    if current_query != old_query:
-        return True
-    if current_case_ids != old_case_ids:
-        return True
+Decision Process
 
-    return False
+按以下顺序判断。
 
+1. ProcessAcknowledgement
 
-def mark_structure_version(memory):
-    memory["_runtime"]["structure_query"] = memory["issue_state"]["current_issue"]
-    memory["_runtime"]["structure_case_ids"] = get_case_ids(memory["evidence_state"]["active_cases"])
-    return memory
+如果用户只是感谢、确认、等待或明确结束问题，且没有提供新的故障信息：
 
+→ ProcessAcknowledgement
 
-# ============================================================
-# Prompt Input Builder
-# ============================================================
+如果用户提供了新的条件、报错、操作结果或限制，继续判断。
 
-def build_query_input(memory, user):
-    return {
-        "issue_state": memory["issue_state"],
-        "dialog_state": memory["dialog_state"],
-        "current": {"u": user}
-    }
+2. AskClarification
 
+如果还不能明确用户真正遇到的问题，例如问题对象、用户目标或当前故障不清楚：
 
-def build_trigger_input(memory):
-    return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": {
-            "active_cases": memory["evidence_state"]["active_cases"],
-            "topic_structure": memory["evidence_state"]["topic_structure"]
-        },
-        "dialog_state": memory["dialog_state"]
-    }
+→ AskClarification
 
+Topic Structure 可以辅助判断当前信息是否连主要 Topic Branch 都无法确定。
 
-def build_structure_input(memory):
-    return {
-        "query_text": memory["issue_state"]["current_issue"],
-        "active_cases": memory["evidence_state"]["active_cases"]
-    }
+这里要解决的是：
 
+“用户到底遇到哪类问题？”
 
-def build_policy_input(memory, user):
-    return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": {
-            "topic_structure": memory["evidence_state"]["topic_structure"]
-        },
-        "interaction_state": memory["interaction_state"],
-        "dialog_state": memory["dialog_state"],
-        "current": {"u": user}
-    }
+不要询问用户已经提供过的信息。
 
+3. AskMissingSlot
 
-def build_response_input(memory, user):
-    return {
-        "issue_state": memory["issue_state"],
-        "evidence_state": {
-            "active_cases": memory["evidence_state"]["active_cases"],
-            "topic_structure": memory["evidence_state"]["topic_structure"]
-        },
-        "interaction_state": memory["interaction_state"],
-        "dialog_state": memory["dialog_state"],
-        "current": {
-            "u": user,
-            "policy": memory["interaction_state"]["last_policy"]
-        }
-    }
+如果问题已经明确，但当前仍存在多个合理 Case / Case Path，并且缺少某个会改变后续处理的关键条件：
 
+→ AskMissingSlot
 
-# ============================================================
-# Topic Structure Validation
-# ============================================================
+优先参考 Topic Structure 中当前候选 Cases 的 discriminative_dimension，再结合 Active Cases 判断该区别是否真的需要用户确认。
 
-def validate_topic_node(node, allowed_case_ids, is_root=False):
-    if not isinstance(node, dict):
-        return False
+这里要解决的是：
 
-    case_ids = node.get("case_ids", [])
-    children = node.get("children", [])
+“还缺什么信息，才能决定走哪条处理路径？”
 
-    if not isinstance(case_ids, list) or not case_ids:
-        return False
-    if not isinstance(children, list):
-        return False
+只有当该信息会明显改变 Case Selection 或处理动作时才询问。
 
-    case_set = set(case_ids)
+如果即使不知道该信息，下一步仍然会使用同一个 Case，则不要询问。
 
-    if len(case_set) != len(case_ids):
-        return False
-    if not case_set.issubset(allowed_case_ids):
-        return False
+4. CaseRecommendation
 
-    if not is_root:
-        topic = node.get("topic", "")
-        if not isinstance(topic, str) or not topic.strip():
-            return False
+如果当前信息已经明显支持某个 Case 或 Case Path，并且结合 Active Cases 判断：
 
-    # Leaf: ideally one unique case
-    if not children:
-        return len(case_ids) == 1
+* 与当前问题高度相关；
+* 没有明显条件冲突；
+* 用户尝试成本较低；
+* 即使不能完全确定，尝试风险也较低；
 
-    dimension = node.get("discriminative_dimension", "")
-    if not isinstance(dimension, str) or not dimension.strip():
-        return False
+→ CaseRecommendation
 
-    child_sets = []
+不要求 Case 100% 命中。
 
-    for child in children:
-        if not validate_topic_node(child, allowed_case_ids, is_root=False):
-            return False
+Topic Structure 中仍存在其他候选，也不代表必须继续询问。如果某个 Case 已明显更值得优先尝试，应直接推荐。
 
-        child_set = set(child.get("case_ids", []))
+如果存在明确候选 Case，输出对应 case_id。
 
-        if not child_set.issubset(case_set):
-            return False
+5. ExplainedResponse
 
-        child_sets.append(child_set)
+如果当前 Case Path 已经较明确，并且 Active Cases 已提供足够信息，可以直接：
 
-    # Sibling topics must partition the parent case set
-    for i in range(len(child_sets)):
-        for j in range(i + 1, len(child_sets)):
-            if child_sets[i] & child_sets[j]:
-                return False
+* 解释原因；
+* 回答问题；
+* 给出明确操作步骤；
+* 提供确定的解决方案；
 
-    union_cases = set()
-    for child_set in child_sets:
-        union_cases |= child_set
+→ ExplainedResponse
 
-    if union_cases != case_set:
-        return False
+其证据要求高于 CaseRecommendation。
 
-    return True
+如果依赖具体 Case，输出对应 case_id。
 
+6. Handoff
 
-def validate_topic_structure(structure, active_cases):
-    if not isinstance(structure, dict):
-        return False
+如果当前 Evidence 无法支持有效处理，并且：
 
-    common_anchor = structure.get("common_anchor", "")
-    root = structure.get("root")
+* 没有可靠 Case；
+* 无法通过合理澄清明显推进；
+* 需要人工、后台、专家、审批或工单处理；
 
-    if not isinstance(common_anchor, str) or not common_anchor.strip():
-        return False
-    if not isinstance(root, dict):
-        return False
+→ Handoff
 
-    allowed_case_ids = set(get_case_ids(active_cases))
-    root_case_ids = set(root.get("case_ids", []))
+Decision Boundary
 
-    if not allowed_case_ids:
-        return False
-    if root_case_ids != allowed_case_ids:
-        return False
+优先按照以下边界判断：
 
-    return validate_topic_node(root, allowed_case_ids, is_root=True)
+问题本身不明确 → AskClarification
 
+问题明确，但缺少会改变 Case Path / Case Selection 的关键条件 → AskMissingSlot
 
-# ============================================================
-# Topic Structure Generator Batch
-# ============================================================
+已有 Case 明显值得优先尝试，继续询问收益较低 → CaseRecommendation
 
-def run_structure_batch(items, memories, structure_prompt):
-    messages = []
-    structure_items = []
+Evidence 已足够直接解释或解决 → ExplainedResponse
 
-    for x in items:
-        dialog_id = x["dialog_id"]
-        memory = memories[dialog_id]
+继续处理无法产生明显收益 → Handoff
 
-        if not x["structure_update"]:
-            x["topic_structure"] = copy.deepcopy(memory["evidence_state"]["topic_structure"])
-            continue
+问题已经结束或只需确认 → ProcessAcknowledgement
 
-        if not memory["evidence_state"]["active_cases"]:
-            x["topic_structure"] = {}
-            memory["evidence_state"]["topic_structure"] = {}
-            memories[dialog_id] = mark_structure_version(memory)
-            continue
+Important Principles
 
-        messages.append(build_messages(structure_prompt, build_structure_input(memory)))
-        structure_items.append(x)
+1. Policy 是服务动作，不是 Case 分类。
+2. Topic Structure 是辅助决策的 Case 比较结构，不是决策结果。
+    到达唯一 Case 不代表必须推荐；存在多个 Cases 也不代表必须询问。
+3. Active Cases 是事实依据。
+    最终推荐、解释和解决必须与完整 Case 内容一致。
+4. 只询问决策相关信息。
+    不要为了获得更多信息而询问；新增信息必须能够明显改变 Case Path、Case Selection 或处理动作。
+5. 优先利用已有 Evidence。
+    如果已有 Case 高相关、低风险且值得尝试，不要因为缺少非必要细节而延迟推荐。
+6. ExplainedResponse 的证据要求高于 CaseRecommendation。
+    不能确定完全命中但值得尝试时，优先 CaseRecommendation。
+7. 始终结合 Dialogue State。
+    不要重复询问已经回答的问题；“还是不行”“已经试过”“报错变了”等新反馈意味着需要重新评估当前 Case Path 和 Evidence。
+8. 不要机械依赖文本相似度。
+    优先利用 Topic Structure 暴露出的 Case Differences 判断哪些差异真正影响当前决策，再用 Active Cases 验证。
 
-    if not messages:
-        return
+Output
 
-    outputs = parallel_inference(messages)
+仅输出 JSON：
 
-    for x, out in zip(structure_items, outputs):
-        dialog_id = x["dialog_id"]
-        memory = memories[dialog_id]
+{
+  "label": "AskMissingSlot | AskClarification | ExplainedResponse | CaseRecommendation | Handoff | ProcessAcknowledgement",
+  "case_id": [],
+  "reason": "一句简洁原因"
+}
 
-        structure = parse_llm_output(out)
+case_id 规则：
 
-        if not validate_topic_structure(structure, memory["evidence_state"]["active_cases"]):
-            x["structure_error"] = "invalid_topic_structure"
-            x["raw_topic_structure"] = copy.deepcopy(structure)
-            structure = {}
-
-        x["topic_structure"] = structure
-        memories[dialog_id] = update_topic_structure_memory(memory, structure)
-        memories[dialog_id] = mark_structure_version(memories[dialog_id])
-
-
-# ============================================================
-# Batch Agent
-# ============================================================
-
-def run_memory_agent_batch(data):
-    query_prompt = prompt_read(Path("prompts/query.prompt"))
-    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
-    structure_prompt = prompt_read(Path("prompts/structure.prompt"))
-    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
-    response_prompt = prompt_read(Path("prompts/response.prompt"))
-
-    memories = {dialog_id: init_memory() for dialog_id in data}
-    dialogue_history = {dialog_id: "" for dialog_id in data}
-    results = {dialog_id: {"turns": []} for dialog_id in data}
-
-    max_turn = max(len(item["text"]) for item in data.values())
-
-    for t_id in range(max_turn):
-        print(f"\n========== TURN {t_id} ==========")
-
-        current_batch = []
-
-        # ====================================================
-        # Collect Current User Turns
-        # ====================================================
-
-        for dialog_id, item in data.items():
-            if t_id >= len(item["text"]):
-                continue
-
-            msg = item["text"][t_id]
-
-            if "用户" in msg:
-                dialogue_history[dialog_id] += f"用户: {msg['用户']}\n"
-            elif "客服" in msg:
-                dialogue_history[dialog_id] += f"客服: {msg['客服']}\n"
-
-            if "用户" not in msg:
-                continue
-
-            golden_response = ""
-            if t_id + 1 < len(item["text"]) and "客服" in item["text"][t_id + 1]:
-                golden_response = item["text"][t_id + 1]["客服"]
-
-            current_batch.append({
-                "dialog_id": dialog_id,
-                "user": msg["用户"],
-                "golden_response": golden_response,
-                "dialogue_history": dialogue_history[dialog_id]
-            })
-
-        if not current_batch:
-            continue
-
-        # ====================================================
-        # 1. Query Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
-
-        query_messages = [
-            build_messages(
-                query_prompt,
-                build_query_input(memories[x["dialog_id"]], x["user"])
-            )
-            for x in current_batch
-        ]
-
-        query_outputs = parallel_inference(query_messages)
-
-        for x, out in zip(current_batch, query_outputs):
-            query_state = parse_llm_output(out)
-            x["query"] = query_state
-            dialog_id = x["dialog_id"]
-            memories[dialog_id] = update_issue_memory(memories[dialog_id], query_state)
-
-        # ====================================================
-        # 2. Trigger Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] Trigger Batch")
-
-        trigger_messages = [
-            build_messages(trigger_prompt, build_trigger_input(memories[x["dialog_id"]]))
-            for x in current_batch
-        ]
-
-        trigger_outputs = parallel_inference(trigger_messages)
-
-        for x, out in zip(current_batch, trigger_outputs):
-            x["trigger"] = parse_llm_output(out)
-
-        # ====================================================
-        # 3. RAG Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] RAG Batch")
-
-        rag_dialogs = []
-        rag_queries = []
-        rag_indices = []
-
-        for idx, x in enumerate(current_batch):
-            dialog_id = x["dialog_id"]
-            memory = memories[dialog_id]
-
-            if x["trigger"].get("evidence_mode") == "retrieve_new_evidence":
-                rag_dialogs.append(x["dialogue_history"])
-                rag_queries.append(memory["issue_state"]["current_issue"])
-                rag_indices.append(idx)
-            else:
-                x["evidence"] = copy.deepcopy(memory["evidence_state"]["active_cases"])
-
-        if rag_dialogs:
-            rag_outputs = batch_zefeng_rag(rag_dialogs, rag_queries)
-
-            for idx, evidence in zip(rag_indices, rag_outputs):
-                current_batch[idx]["evidence"] = evidence
-
-        for x in current_batch:
-            dialog_id = x["dialog_id"]
-            memories[dialog_id] = update_evidence_memory(
-                memories[dialog_id],
-                x["trigger"],
-                x.get("evidence", [])
-            )
-
-        # ====================================================
-        # 4. Topic Structure Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] Topic Structure Batch")
-
-        for x in current_batch:
-            x["structure_update"] = need_structure_update(memories[x["dialog_id"]])
-
-        run_structure_batch(
-            items=current_batch,
-            memories=memories,
-            structure_prompt=structure_prompt
-        )
-
-        # ====================================================
-        # 5. Policy Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] Policy Batch")
-
-        policy_messages = [
-            build_messages(
-                policy_prompt,
-                build_policy_input(memories[x["dialog_id"]], x["user"])
-            )
-            for x in current_batch
-        ]
-
-        policy_outputs = parallel_inference(policy_messages)
-
-        for x, out in zip(current_batch, policy_outputs):
-            policy_state = parse_llm_output(out)
-            x["policy"] = policy_state
-            dialog_id = x["dialog_id"]
-            memories[dialog_id] = update_interaction_memory(memories[dialog_id], policy_state)
-
-        # ====================================================
-        # 6. Response Batch
-        # ====================================================
-
-        print(f"[Turn {t_id}] Response Batch")
-
-        response_messages = [
-            build_messages(
-                response_prompt,
-                build_response_input(memories[x["dialog_id"]], x["user"])
-            )
-            for x in current_batch
-        ]
-
-        response_outputs = parallel_inference(response_messages)
-
-        for x, out in zip(current_batch, response_outputs):
-            x["response"] = parse_llm_output(out)
-
-            dialog_id = x["dialog_id"]
-            memories[dialog_id] = update_dialogue_memory(
-                memories[dialog_id],
-                x["user"],
-                x["golden_response"]
-            )
-
-            turn_result = {
-                k: v for k, v in x.items()
-                if k not in ["dialogue_history", "structure_update"]
-            }
-
-            turn_result["turn_id"] = int(t_id / 2)
-            results[dialog_id]["turns"].append(turn_result)
-
-    # ========================================================
-    # Final Memory
-    # ========================================================
-
-    for dialog_id in data:
-        final_memory = copy.deepcopy(memories[dialog_id])
-        final_memory.pop("_runtime", None)
-        results[dialog_id]["final_memory"] = final_memory
-
-    return results
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_path", required=True)
-    parser.add_argument("--max_dialogues", type=int, default=10)
-    args = parser.parse_args()
-
-    with open(args.data_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    data = dict(list(data.items())[:args.max_dialogues])
-
-    outputs = run_memory_agent_batch(data)
-
-    write_json(args.output_path, outputs)
-    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
-
-
-if __name__ == "__main__":
-    main()
+* CaseRecommendation：如果存在明确推荐案例，填写对应 case_id。
+* ExplainedResponse：如果回复依赖具体案例，填写对应 case_id。
+* 其他动作：通常输出空列表 []。
