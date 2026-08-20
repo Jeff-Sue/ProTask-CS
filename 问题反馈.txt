@@ -1,246 +1,2610 @@
-def run_refinement_pe_batch(items, memories, judgement_prompt, refinement_prompt, max_depth=4):
-    active_items = []
+from __future__ import annotations
 
-    for x in items:
-        memory = memories[x["dialog_id"]]
-        knowledge_state = memory["evidence_state"]["knowledge_state"]
+import argparse
+import copy
+import json
+from pathlib import Path
+from typing import Any
 
-        if not knowledge_state:
-            x["topic_structure"] = {}
+from utils.scu_rag import batch_zefeng_rag
+from utils.qwen_api_multi import parallel_inference
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+
+    if not isinstance(text, str):
+        return {}
+
+    text = text.strip()
+
+    if not text:
+        return {}
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    if "```json" in text:
+        text = (
+            text.split("```json", 1)[1]
+            .split("```", 1)[0]
+            .strip()
+        )
+
+    elif "```" in text:
+        text = (
+            text.split("```", 1)[1]
+            .split("```", 1)[0]
+            .strip()
+        )
+
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def parse_llm_output(output):
+    parsed = parse_json(output)
+
+    if not parsed:
+        return {}
+
+    if "response" not in parsed:
+        return parsed
+
+    return parse_json(
+        parsed.get("response", "")
+    )
+
+
+def prompt_read(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}"
+        )
+
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
+
+
+def write_json(
+    path: str | Path,
+    data: Any
+) -> None:
+
+    path = Path(path)
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+
+def build_messages(
+    system_prompt,
+    data
+):
+    return [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                data,
+                ensure_ascii=False
+            )
+        }
+    ]
+
+
+# ============================================================
+# Memory
+# ============================================================
+
+def init_memory():
+    """
+    Memory 中只保留真正的状态。
+
+    evidence_state:
+        active_cases:
+            原始检索知识。
+            用于：
+                1. Topic Structure Construction
+                2. Response Grounding
+
+        topic_structure:
+            压缩后的决策知识表示。
+            Policy 只能看到它。
+
+    _runtime:
+        纯程序缓存信息。
+        不属于模型状态。
+        不进入任何 Prompt。
+    """
+
+    return {
+        "issue_state": {
+            "current_issue": "",
+            "query_history": []
+        },
+
+        "dialog_state": {
+            "compressed_history": []
+        },
+
+        "evidence_state": {
+            "active_cases": [],
+            "topic_structure": {}
+        },
+
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": []
+        },
+
+        "_runtime": {
+            "structure_query": "",
+            "structure_case_ids": []
+        }
+    }
+
+
+# ============================================================
+# Memory Update
+# ============================================================
+
+def update_issue_memory(
+    memory,
+    query_state
+):
+    mode = query_state.get(
+        "query_mode",
+        "none"
+    )
+
+    query = query_state.get(
+        "query_text",
+        ""
+    ).strip()
+
+    if mode in [
+        "rewrite",
+        "refine"
+    ] and query:
+
+        old_query = (
+            memory[
+                "issue_state"
+            ][
+                "current_issue"
+            ]
+        )
+
+        memory[
+            "issue_state"
+        ][
+            "current_issue"
+        ] = query
+
+        if query != old_query:
+            memory[
+                "issue_state"
+            ][
+                "query_history"
+            ].append(query)
+
+    # reuse:
+    # 不修改 current_issue
+
+    return memory
+
+
+def update_evidence_memory(
+    memory,
+    trigger_state,
+    evidence
+):
+    mode = trigger_state.get(
+        "evidence_mode",
+        "no_evidence_needed"
+    )
+
+    if mode == "retrieve_new_evidence":
+        memory[
+            "evidence_state"
+        ][
+            "active_cases"
+        ] = evidence or []
+
+    return memory
+
+
+def update_topic_structure_memory(
+    memory,
+    topic_structure
+):
+    memory[
+        "evidence_state"
+    ][
+        "topic_structure"
+    ] = topic_structure or {}
+
+    return memory
+
+
+def update_interaction_memory(
+    memory,
+    policy_state
+):
+    label = policy_state.get(
+        "label",
+        ""
+    )
+
+    memory[
+        "interaction_state"
+    ][
+        "last_action"
+    ] = label
+
+    memory[
+        "interaction_state"
+    ][
+        "action_history"
+    ].append(label)
+
+    if label in [
+        "AskMissingSlot",
+        "AskClarification"
+    ]:
+        memory[
+            "interaction_state"
+        ][
+            "stage"
+        ] = "Clarification"
+
+    elif label in [
+        "ExplainedResponse",
+        "CaseRecommendation"
+    ]:
+        memory[
+            "interaction_state"
+        ][
+            "stage"
+        ] = "Resolution"
+
+    elif label == "Handoff":
+        memory[
+            "interaction_state"
+        ][
+            "stage"
+        ] = "End"
+
+    return memory
+
+
+def update_dialogue_memory(
+    memory,
+    user,
+    response
+):
+    history = (
+        memory[
+            "dialog_state"
+        ][
+            "compressed_history"
+        ]
+    )
+
+    history.append({
+        "user": user,
+        "assistant": response
+    })
+
+    memory[
+        "dialog_state"
+    ][
+        "compressed_history"
+    ] = history[-5:]
+
+    return memory
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def get_case_ids(cases):
+    return [
+        x.get("case_id")
+        for x in cases
+        if isinstance(x, dict)
+        and x.get("case_id")
+    ]
+
+
+def normalize_case_ids(
+    case_ids,
+    allowed_case_ids
+):
+    if not isinstance(
+        case_ids,
+        list
+    ):
+        return []
+
+    allowed = set(
+        allowed_case_ids
+    )
+
+    result = []
+
+    for case_id in case_ids:
+        if (
+            case_id in allowed
+            and case_id not in result
+        ):
+            result.append(case_id)
+
+    return result
+
+
+def mark_structure_version(
+    memory
+):
+    """
+    纯缓存控制。
+
+    不属于：
+        issue_state
+        evidence_state
+        dialog_state
+        interaction_state
+
+    不进入任何 Prompt。
+    """
+
+    memory[
+        "_runtime"
+    ][
+        "structure_query"
+    ] = memory[
+        "issue_state"
+    ][
+        "current_issue"
+    ]
+
+    memory[
+        "_runtime"
+    ][
+        "structure_case_ids"
+    ] = get_case_ids(
+        memory[
+            "evidence_state"
+        ][
+            "active_cases"
+        ]
+    )
+
+    return memory
+
+
+def need_structure_update(
+    memory
+):
+    """
+    Topic Structure = f(
+        current_query,
+        active_cases
+    )
+
+    以下情况重建：
+        1. 当前没有 Topic Structure
+        2. Query 改变
+        3. Active Cases 改变
+    """
+
+    current_query = (
+        memory[
+            "issue_state"
+        ][
+            "current_issue"
+        ]
+    )
+
+    current_case_ids = get_case_ids(
+        memory[
+            "evidence_state"
+        ][
+            "active_cases"
+        ]
+    )
+
+    old_query = (
+        memory[
+            "_runtime"
+        ].get(
+            "structure_query",
+            ""
+        )
+    )
+
+    old_case_ids = (
+        memory[
+            "_runtime"
+        ].get(
+            "structure_case_ids",
+            []
+        )
+    )
+
+    topic_structure = (
+        memory[
+            "evidence_state"
+        ].get(
+            "topic_structure",
+            {}
+        )
+    )
+
+    if not topic_structure:
+        return True
+
+    if current_query != old_query:
+        return True
+
+    if current_case_ids != old_case_ids:
+        return True
+
+    return False
+
+
+# ============================================================
+# Input Builders
+# ============================================================
+
+def build_query_input(
+    memory,
+    user
+):
+    return {
+        "issue_state":
+            memory[
+                "issue_state"
+            ],
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ],
+
+        "current": {
+            "u": user
+        }
+    }
+
+
+def build_trigger_input(
+    memory
+):
+    """
+    Trigger 决定：
+        retrieve_new_evidence
+        reuse_existing
+        no_evidence_needed
+
+    Trigger 可以看到 active_cases，
+    因为它要判断现有知识是否需要更新。
+
+    但不看 temporary knowledge。
+    """
+
+    return {
+        "issue_state":
+            memory[
+                "issue_state"
+            ],
+
+        "evidence_state": {
+            "active_cases":
+                memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ],
+
+            "topic_structure":
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+        },
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ]
+    }
+
+
+def build_knowledge_input(
+    memory
+):
+    """
+    Knowledge Processing 输入。
+
+    输出是 temporary knowledge，
+    只服务于 Topic Structure Construction。
+
+    不进入 Memory。
+    不进入 Policy。
+    """
+
+    return {
+        "query_text":
+            memory[
+                "issue_state"
+            ][
+                "current_issue"
+            ],
+
+        "active_cases":
+            memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]
+    }
+
+
+def build_topic_candidate_input(
+    memory,
+    temporary_knowledge
+):
+    """
+    Candidate Generation：
+
+    在 Shared Common Topic 下，
+    生成多个 candidate discriminative levels。
+
+    每个 level 对应一个统一的 semantic dimension。
+    """
+
+    return {
+        "query_text":
+            memory[
+                "issue_state"
+            ][
+                "current_issue"
+            ],
+
+        "active_cases":
+            memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ],
+
+        "temporary_knowledge":
+            temporary_knowledge
+    }
+
+
+def build_topic_selection_input(
+    memory,
+    temporary_knowledge,
+    candidate_levels
+):
+    """
+    从多个 Candidate Levels 中，
+    选择唯一一个最具有决策判别力的 level。
+    """
+
+    return {
+        "query_text":
+            memory[
+                "issue_state"
+            ][
+                "current_issue"
+            ],
+
+        "active_cases":
+            memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ],
+
+        "temporary_knowledge":
+            temporary_knowledge,
+
+        "candidate_levels":
+            candidate_levels
+    }
+
+
+def build_policy_input(
+    memory,
+    user
+):
+    """
+    ========================================================
+    IMPORTANT
+    ========================================================
+
+    Policy 只允许看到 Topic Structure。
+
+    Policy 不允许看到：
+        active_cases
+        temporary_knowledge
+        candidate_levels
+        debug trace
+
+    这样才能验证：
+
+        Topic Structure
+            是否是
+        sufficient decision representation
+    """
+
+    return {
+        "issue_state":
+            memory[
+                "issue_state"
+            ],
+
+        "evidence_state": {
+            "topic_structure":
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+        },
+
+        "interaction_state":
+            memory[
+                "interaction_state"
+            ],
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ],
+
+        "current": {
+            "u": user
+        }
+    }
+
+
+def build_response_input(
+    memory,
+    user
+):
+    """
+    Response Generator 和 Policy 分离。
+
+    Response 可以读取：
+        active_cases
+        topic_structure
+
+    因为这里负责的是：
+        how to answer
+
+    而不是：
+        what decision to make
+    """
+
+    return {
+        "issue_state":
+            memory[
+                "issue_state"
+            ],
+
+        "evidence_state": {
+            "active_cases":
+                memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ],
+
+            "topic_structure":
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+        },
+
+        "interaction_state":
+            memory[
+                "interaction_state"
+            ],
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ],
+
+        "current": {
+            "u": user,
+
+            "policy":
+                memory[
+                    "interaction_state"
+                ][
+                    "last_action"
+                ]
+        }
+    }
+
+
+# ============================================================
+# Topic Structure Normalization
+# ============================================================
+
+def normalize_topic(
+    topic,
+    allowed_case_ids
+):
+    """
+    单个 discriminative topic：
+
+    {
+        "topic": "...",
+        "case_ids": [...],
+        "cue": "..."
+    }
+    """
+
+    if not isinstance(
+        topic,
+        dict
+    ):
+        return None
+
+    topic_name = str(
+        topic.get(
+            "topic",
+            ""
+        )
+    ).strip()
+
+    if not topic_name:
+        return None
+
+    case_ids = normalize_case_ids(
+        topic.get(
+            "case_ids",
+            []
+        ),
+        allowed_case_ids
+    )
+
+    if not case_ids:
+        return None
+
+    result = {
+        "topic": topic_name,
+        "case_ids": case_ids
+    }
+
+    cue = topic.get(
+        "cue",
+        ""
+    )
+
+    if isinstance(
+        cue,
+        str
+    ) and cue.strip():
+
+        result["cue"] = (
+            cue.strip()
+        )
+
+    return result
+
+
+def normalize_candidate_level(
+    candidate,
+    allowed_case_ids
+):
+    """
+    一个 Candidate Level：
+
+    {
+        "dimension": "故障原因",
+        "topics": [
+            {
+                "topic": "代理异常",
+                "case_ids": [...]
+            },
+            ...
+        ]
+    }
+
+    约束：
+        1. 必须有 dimension
+        2. 至少 2 个 sibling topics
+        3. topic 必须关联真实 case
+    """
+
+    if not isinstance(
+        candidate,
+        dict
+    ):
+        return None
+
+    dimension = str(
+        candidate.get(
+            "dimension",
+            ""
+        )
+    ).strip()
+
+    if not dimension:
+        return None
+
+    topics = candidate.get(
+        "topics",
+        []
+    )
+
+    if not isinstance(
+        topics,
+        list
+    ):
+        return None
+
+    normalized_topics = []
+
+    seen_topics = set()
+
+    for topic in topics:
+
+        normalized = normalize_topic(
+            topic,
+            allowed_case_ids
+        )
+
+        if not normalized:
             continue
 
-        structure = init_topic_structure(knowledge_state)
+        topic_name = (
+            normalized[
+                "topic"
+            ]
+        )
 
-        if not structure.get("topic"):
-            x["topic_structure"] = {}
+        if topic_name in seen_topics:
             continue
 
-        x["_structure"] = structure
-        x["_frontier"] = [make_frontier_item(structure)]
-        x["_judgement_history"] = []
-        x["_refinement_history"] = []
-        active_items.append(x)
+        seen_topics.add(
+            topic_name
+        )
 
-    for depth in range(max_depth + 1):
-        if not active_items:
-            break
+        normalized_topics.append(
+            normalized
+        )
 
-        # ====================================================
-        # 1. Judgement Batch
-        # ====================================================
+    # Diversity Level 至少要有两个 sibling topics
+    if len(normalized_topics) < 2:
+        return None
 
-        print(f"[Refinement Depth {depth}] Judgement Batch: {len(active_items)}")
+    return {
+        "dimension":
+            dimension,
 
-        judgement_messages = []
+        "topics":
+            normalized_topics
+    }
 
-        for x in active_items:
-            memory = memories[x["dialog_id"]]
-            judgement_input = build_judgement_input(memory, x["_structure"], x["_frontier"])
-            judgement_messages.append(build_messages(judgement_prompt, judgement_input))
 
-        judgement_outputs = parallel_inference(judgement_messages)
-        need_refinement = []
+def normalize_candidate_levels(
+    raw_candidates,
+    allowed_case_ids
+):
+    if not isinstance(
+        raw_candidates,
+        list
+    ):
+        return []
 
-        for x, out in zip(active_items, judgement_outputs):
-            judgement = parse_llm_output(out)
-            structure = x["_structure"]
+    result = []
 
-            x["_judgement_history"].append({
-                "depth": depth,
-                "frontier": copy.deepcopy(x["_frontier"]),
-                "output": copy.deepcopy(judgement)
-            })
+    seen_dimensions = set()
 
-            if not validate_judgement(judgement, x["_frontier"]):
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "invalid"
-                structure["stop_reason"] = "invalid_judgement"
-                structure["final_depth"] = depth
-                continue
+    for candidate in raw_candidates:
 
-            status = str(judgement.get("status", "")).strip().lower()
-            matched_case_ids = judgement.get("matched_case_ids", [])
-            refine_node_ids = judgement.get("refine_node_ids", [])
-            reason = judgement.get("reason", "")
+        normalized = (
+            normalize_candidate_level(
+                candidate,
+                allowed_case_ids
+            )
+        )
 
-            # --------------------------------------------
-            # matched
-            # --------------------------------------------
-
-            if status == "matched":
-                structure["decision_sufficient"] = True
-                structure["evidence_status"] = "matched"
-                structure["matched_case_ids"] = matched_case_ids
-                structure["judgement_reason"] = reason
-                structure["stop_reason"] = "matched"
-                structure["final_depth"] = depth
-                continue
-
-            # --------------------------------------------
-            # insufficient
-            # --------------------------------------------
-
-            if status == "insufficient":
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "insufficient"
-                structure["matched_case_ids"] = []
-                structure["judgement_reason"] = reason
-                structure["stop_reason"] = "insufficient_evidence"
-                structure["final_depth"] = depth
-                continue
-
-            # --------------------------------------------
-            # refine
-            # --------------------------------------------
-
-            if depth >= max_depth:
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "unresolved"
-                structure["matched_case_ids"] = []
-                structure["judgement_reason"] = reason
-                structure["stop_reason"] = "max_depth"
-                structure["final_depth"] = depth
-                continue
-
-            refine_nodes = []
-
-            for node_id in refine_node_ids:
-                node = find_node_by_id(structure, node_id)
-
-                if node is None:
-                    continue
-
-                if len(node.get("case_ids", [])) <= 1:
-                    node["status"] = "terminal"
-                    continue
-
-                refine_nodes.append(make_frontier_item(node))
-
-            if not refine_nodes:
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "insufficient"
-                structure["matched_case_ids"] = []
-                structure["judgement_reason"] = reason
-                structure["stop_reason"] = "no_refinable_branch"
-                structure["final_depth"] = depth
-                continue
-
-            x["_refine_nodes"] = refine_nodes
-            need_refinement.append(x)
-
-        if not need_refinement:
-            break
-
-        # ====================================================
-        # 2. Refinement Batch
-        # ====================================================
-
-        print(f"[Refinement Depth {depth}] Refinement Batch: {len(need_refinement)}")
-
-        refinement_messages = []
-
-        for x in need_refinement:
-            memory = memories[x["dialog_id"]]
-            refinement_input = build_refinement_input(memory, x["_structure"], x["_refine_nodes"])
-            refinement_messages.append(build_messages(refinement_prompt, refinement_input))
-
-        refinement_outputs = parallel_inference(refinement_messages)
-        next_active_items = []
-
-        for x, out in zip(need_refinement, refinement_outputs):
-            refinement_result = parse_llm_output(out)
-            structure = x["_structure"]
-
-            x["_refinement_history"].append({
-                "depth": depth,
-                "refine_nodes": copy.deepcopy(x["_refine_nodes"]),
-                "output": copy.deepcopy(refinement_result)
-            })
-
-            refinements = refinement_result.get("refinements", [])
-
-            if not isinstance(refinements, list) or not refinements:
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "insufficient"
-                structure["stop_reason"] = "no_valid_refinement"
-                structure["final_depth"] = depth
-                continue
-
-            structure, new_frontier, created_count = apply_refinements(structure, refinements)
-            x["_structure"] = structure
-
-            if created_count == 0 or not new_frontier:
-                structure["decision_sufficient"] = False
-                structure["evidence_status"] = "insufficient"
-                structure["stop_reason"] = "no_new_child"
-                structure["final_depth"] = depth + 1
-                continue
-
-            x["_frontier"] = new_frontier
-            next_active_items.append(x)
-
-        active_items = next_active_items
-
-    # ========================================================
-    # Finalize
-    # ========================================================
-
-    for x in items:
-        if "_structure" not in x:
+        if not normalized:
             continue
 
-        structure = x["_structure"]
+        dimension = (
+            normalized[
+                "dimension"
+            ]
+        )
 
-        if "evidence_status" not in structure:
-            structure["decision_sufficient"] = False
-            structure["evidence_status"] = "unresolved"
-            structure["stop_reason"] = "unfinished"
+        if dimension in seen_dimensions:
+            continue
 
-        structure["judgement_history"] = x["_judgement_history"]
-        structure["refinement_history"] = x["_refinement_history"]
+        seen_dimensions.add(
+            dimension
+        )
 
-        x["topic_structure"] = structure
+        result.append(
+            normalized
+        )
 
-        dialog_id = x["dialog_id"]
-        memories[dialog_id] = update_topic_structure_memory(memories[dialog_id], structure)
-        memories[dialog_id] = mark_pe_version(memories[dialog_id])
-
-        x.pop("_structure", None)
-        x.pop("_frontier", None)
-        x.pop("_refine_nodes", None)
-        x.pop("_judgement_history", None)
-        x.pop("_refinement_history", None)
+    return result
 
 
+# ============================================================
+# Topic Structure Validation
+# ============================================================
 
-def validate_judgement(result, frontier):
-    if not isinstance(result, dict):
+def validate_selection_result(
+    selection_result,
+    candidate_levels,
+    allowed_case_ids
+):
+    """
+    Selection Prompt 推荐输出：
+
+    {
+        "selected_dimension": "故障原因",
+        "decision_sufficient": false,
+        "matched_case_ids": [],
+        "missing_discriminator": "具体报错",
+        "reason": "..."
+    }
+    """
+
+    if not isinstance(
+        selection_result,
+        dict
+    ):
         return False
 
-    status = str(result.get("status", "")).strip().lower()
-    if status not in ["matched", "refine", "insufficient"]:
+    selected_dimension = str(
+        selection_result.get(
+            "selected_dimension",
+            ""
+        )
+    ).strip()
+
+    valid_dimensions = {
+        x.get(
+            "dimension"
+        )
+        for x in candidate_levels
+        if x.get(
+            "dimension"
+        )
+    }
+
+    if selected_dimension not in valid_dimensions:
         return False
 
-    matched_case_ids = result.get("matched_case_ids", [])
-    refine_node_ids = result.get("refine_node_ids", [])
+    decision_sufficient = (
+        selection_result.get(
+            "decision_sufficient"
+        )
+    )
 
-    if not isinstance(matched_case_ids, list) or not isinstance(refine_node_ids, list):
+    if not isinstance(
+        decision_sufficient,
+        bool
+    ):
         return False
 
-    valid_node_ids = {x.get("node_id") for x in frontier if x.get("node_id")}
+    matched_case_ids = (
+        selection_result.get(
+            "matched_case_ids",
+            []
+        )
+    )
 
-    if status == "matched":
-        if not matched_case_ids or refine_node_ids:
+    if not isinstance(
+        matched_case_ids,
+        list
+    ):
+        return False
+
+    allowed = set(
+        allowed_case_ids
+    )
+
+    for case_id in matched_case_ids:
+        if case_id not in allowed:
             return False
 
-    elif status == "refine":
-        if matched_case_ids or not refine_node_ids:
-            return False
-        if any(node_id not in valid_node_ids for node_id in refine_node_ids):
-            return False
-
-    elif status == "insufficient":
-        if matched_case_ids or refine_node_ids:
-            return False
+    # 如果说 decision sufficient，
+    # 理论上应该至少有一个 matched case。
+    if (
+        decision_sufficient
+        and not matched_case_ids
+    ):
+        return False
 
     return True
+
+
+def get_selected_candidate(
+    candidate_levels,
+    selected_dimension
+):
+    for candidate in candidate_levels:
+
+        if (
+            candidate.get(
+                "dimension"
+            )
+            == selected_dimension
+        ):
+            return candidate
+
+    return None
+
+
+# ============================================================
+# Final Topic Structure Construction
+# ============================================================
+
+def construct_final_topic_structure(
+    temporary_knowledge,
+    selected_candidate,
+    selection_result,
+    active_cases
+):
+    """
+    ========================================================
+    Final Topic Structure
+    ========================================================
+
+    固定结构：
+
+        Shared Common Topic
+                ↓
+        One Optimal Discriminative Dimension
+                ↓
+        Multiple Sibling Topics
+
+    不允许：
+        arbitrary-depth tree
+        node.0.1.0
+        recursive refinement
+
+    最终只保留对 Policy 有效的信息。
+    """
+
+    allowed_case_ids = get_case_ids(
+        active_cases
+    )
+
+    common_anchor = str(
+        temporary_knowledge.get(
+            "common_anchor",
+            ""
+        )
+    ).strip()
+
+    matched_case_ids = normalize_case_ids(
+        selection_result.get(
+            "matched_case_ids",
+            []
+        ),
+        allowed_case_ids
+    )
+
+    structure = {
+        "common_anchor":
+            common_anchor,
+
+        "discriminative_dimension":
+            selected_candidate[
+                "dimension"
+            ],
+
+        "topics":
+            copy.deepcopy(
+                selected_candidate[
+                    "topics"
+                ]
+            ),
+
+        "decision_sufficient":
+            bool(
+                selection_result.get(
+                    "decision_sufficient",
+                    False
+                )
+            ),
+
+        "matched_case_ids":
+            matched_case_ids
+    }
+
+    missing_discriminator = str(
+        selection_result.get(
+            "missing_discriminator",
+            ""
+        )
+    ).strip()
+
+    if missing_discriminator:
+        structure[
+            "missing_discriminator"
+        ] = missing_discriminator
+
+    # 可以保留非常简短的结构判定原因，
+    # 但不要把完整 reasoning history 放进去。
+    reason = str(
+        selection_result.get(
+            "reason",
+            ""
+        )
+    ).strip()
+
+    if reason:
+        structure[
+            "decision_reason"
+        ] = reason
+
+    return structure
+
+
+# ============================================================
+# Topic Structure Construction
+# ============================================================
+
+def run_topic_structure_batch(
+    items,
+    memories,
+    temporary_knowledge_map,
+    candidate_prompt,
+    selection_prompt
+):
+    """
+    ========================================================
+    Stage 1
+        Candidate Discriminative Level Generation
+
+    Stage 2
+        Select Exactly ONE Best Level
+
+    Final:
+        Common Anchor
+            +
+        One Discriminative Dimension
+            +
+        Sibling Topics
+
+    不再进行 recursive refinement。
+    ========================================================
+    """
+
+    # ========================================================
+    # Stage 1:
+    # Candidate Discriminative Level Generation
+    # ========================================================
+
+    print(
+        f"[Topic Structure] "
+        f"Candidate Generation Batch: {len(items)}"
+    )
+
+    candidate_messages = []
+    candidate_items = []
+
+    for x in items:
+
+        dialog_id = x[
+            "dialog_id"
+        ]
+
+        memory = memories[
+            dialog_id
+        ]
+
+        temporary_knowledge = (
+            temporary_knowledge_map.get(
+                dialog_id,
+                {}
+            )
+        )
+
+        if not temporary_knowledge:
+
+            x[
+                "topic_structure"
+            ] = {}
+
+            memories[
+                dialog_id
+            ] = update_topic_structure_memory(
+                memories[
+                    dialog_id
+                ],
+                {}
+            )
+
+            memories[
+                dialog_id
+            ] = mark_structure_version(
+                memories[
+                    dialog_id
+                ]
+            )
+
+            continue
+
+        candidate_input = (
+            build_topic_candidate_input(
+                memory,
+                temporary_knowledge
+            )
+        )
+
+        candidate_messages.append(
+            build_messages(
+                candidate_prompt,
+                candidate_input
+            )
+        )
+
+        candidate_items.append(x)
+
+    if not candidate_messages:
+        return
+
+    candidate_outputs = parallel_inference(
+        candidate_messages
+    )
+
+    # dialog_id -> normalized candidate levels
+    candidate_level_map = {}
+
+    for x, out in zip(
+        candidate_items,
+        candidate_outputs
+    ):
+
+        dialog_id = x[
+            "dialog_id"
+        ]
+
+        memory = memories[
+            dialog_id
+        ]
+
+        raw_result = (
+            parse_llm_output(
+                out
+            )
+        )
+
+        raw_candidates = (
+            raw_result.get(
+                "candidate_levels",
+                []
+            )
+        )
+
+        allowed_case_ids = get_case_ids(
+            memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]
+        )
+
+        normalized_candidates = (
+            normalize_candidate_levels(
+                raw_candidates,
+                allowed_case_ids
+            )
+        )
+
+        # --------------------------------------------
+        # Candidate generation failed
+        # --------------------------------------------
+
+        if not normalized_candidates:
+
+            x[
+                "topic_structure"
+            ] = {}
+
+            memories[
+                dialog_id
+            ] = update_topic_structure_memory(
+                memories[
+                    dialog_id
+                ],
+                {}
+            )
+
+            memories[
+                dialog_id
+            ] = mark_structure_version(
+                memories[
+                    dialog_id
+                ]
+            )
+
+            x[
+                "structure_debug"
+            ] = {
+                "candidate_generation":
+                    raw_result,
+
+                "error":
+                    "no_valid_candidate_level"
+            }
+
+            continue
+
+        candidate_level_map[
+            dialog_id
+        ] = normalized_candidates
+
+        # Debug only
+        x[
+            "_candidate_generation_debug"
+        ] = raw_result
+
+    # ========================================================
+    # Stage 2:
+    # Select ONE Best Discriminative Level
+    # ========================================================
+
+    print(
+        "[Topic Structure] "
+        "Best Level Selection Batch"
+    )
+
+    selection_messages = []
+    selection_items = []
+
+    for x in candidate_items:
+
+        dialog_id = x[
+            "dialog_id"
+        ]
+
+        if (
+            dialog_id
+            not in candidate_level_map
+        ):
+            continue
+
+        memory = memories[
+            dialog_id
+        ]
+
+        temporary_knowledge = (
+            temporary_knowledge_map[
+                dialog_id
+            ]
+        )
+
+        candidate_levels = (
+            candidate_level_map[
+                dialog_id
+            ]
+        )
+
+        selection_input = (
+            build_topic_selection_input(
+                memory,
+                temporary_knowledge,
+                candidate_levels
+            )
+        )
+
+        selection_messages.append(
+            build_messages(
+                selection_prompt,
+                selection_input
+            )
+        )
+
+        selection_items.append(x)
+
+    if not selection_messages:
+        return
+
+    selection_outputs = parallel_inference(
+        selection_messages
+    )
+
+    for x, out in zip(
+        selection_items,
+        selection_outputs
+    ):
+
+        dialog_id = x[
+            "dialog_id"
+        ]
+
+        memory = memories[
+            dialog_id
+        ]
+
+        selection_result = (
+            parse_llm_output(
+                out
+            )
+        )
+
+        candidate_levels = (
+            candidate_level_map[
+                dialog_id
+            ]
+        )
+
+        allowed_case_ids = get_case_ids(
+            memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]
+        )
+
+        # --------------------------------------------
+        # Validate selected level
+        # --------------------------------------------
+
+        if not validate_selection_result(
+            selection_result,
+            candidate_levels,
+            allowed_case_ids
+        ):
+
+            x[
+                "topic_structure"
+            ] = {}
+
+            memories[
+                dialog_id
+            ] = update_topic_structure_memory(
+                memories[
+                    dialog_id
+                ],
+                {}
+            )
+
+            memories[
+                dialog_id
+            ] = mark_structure_version(
+                memories[
+                    dialog_id
+                ]
+            )
+
+            x[
+                "structure_debug"
+            ] = {
+                "candidate_generation":
+                    x.get(
+                        "_candidate_generation_debug",
+                        {}
+                    ),
+
+                "selection":
+                    selection_result,
+
+                "error":
+                    "invalid_level_selection"
+            }
+
+            x.pop(
+                "_candidate_generation_debug",
+                None
+            )
+
+            continue
+
+        selected_dimension = (
+            selection_result[
+                "selected_dimension"
+            ]
+        )
+
+        selected_candidate = (
+            get_selected_candidate(
+                candidate_levels,
+                selected_dimension
+            )
+        )
+
+        if selected_candidate is None:
+
+            x[
+                "topic_structure"
+            ] = {}
+
+            memories[
+                dialog_id
+            ] = update_topic_structure_memory(
+                memories[
+                    dialog_id
+                ],
+                {}
+            )
+
+            memories[
+                dialog_id
+            ] = mark_structure_version(
+                memories[
+                    dialog_id
+                ]
+            )
+
+            x[
+                "structure_debug"
+            ] = {
+                "candidate_generation":
+                    x.get(
+                        "_candidate_generation_debug",
+                        {}
+                    ),
+
+                "selection":
+                    selection_result,
+
+                "error":
+                    "selected_dimension_not_found"
+            }
+
+            x.pop(
+                "_candidate_generation_debug",
+                None
+            )
+
+            continue
+
+        # --------------------------------------------
+        # Construct final compact structure
+        # --------------------------------------------
+
+        final_structure = (
+            construct_final_topic_structure(
+                temporary_knowledge=
+                    temporary_knowledge_map[
+                        dialog_id
+                    ],
+
+                selected_candidate=
+                    selected_candidate,
+
+                selection_result=
+                    selection_result,
+
+                active_cases=
+                    memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+            )
+        )
+
+        x[
+            "topic_structure"
+        ] = final_structure
+
+        memories[
+            dialog_id
+        ] = update_topic_structure_memory(
+            memories[
+                dialog_id
+            ],
+            final_structure
+        )
+
+        memories[
+            dialog_id
+        ] = mark_structure_version(
+            memories[
+                dialog_id
+            ]
+        )
+
+        # Debug trace 和正式 memory 完全分离
+        x[
+            "structure_debug"
+        ] = {
+            "candidate_generation":
+                x.get(
+                    "_candidate_generation_debug",
+                    {}
+                ),
+
+            "normalized_candidate_levels":
+                copy.deepcopy(
+                    candidate_levels
+                ),
+
+            "selection":
+                selection_result
+        }
+
+        x.pop(
+            "_candidate_generation_debug",
+            None
+        )
+
+
+# ============================================================
+# Main Batch Agent
+# ============================================================
+
+def run_memory_agent_batch(
+    data,
+    batch_size=8
+):
+    """
+    Overall pipeline:
+
+        Dialogue
+            ↓
+        Query
+            ↓
+        Trigger
+            ↓
+        Retrieval
+            ↓
+        Temporary Knowledge Processing
+            ↓
+        Candidate Discriminative Levels
+            ↓
+        Select ONE Best Level
+            ↓
+        Topic Structure
+            ↓
+        Policy
+            ↓
+        Response
+    """
+
+    # ========================================================
+    # Prompts
+    # ========================================================
+
+    query_prompt = prompt_read(
+        Path(
+            "prompts/query.prompt"
+        )
+    )
+
+    trigger_prompt = prompt_read(
+        Path(
+            "prompts/trigger.prompt"
+        )
+    )
+
+    knowledge_prompt = prompt_read(
+        Path(
+            "prompts/knowledge.prompt"
+        )
+    )
+
+    topic_candidate_prompt = prompt_read(
+        Path(
+            "prompts/topic_candidate.prompt"
+        )
+    )
+
+    topic_selection_prompt = prompt_read(
+        Path(
+            "prompts/topic_selection.prompt"
+        )
+    )
+
+    policy_prompt = prompt_read(
+        Path(
+            "prompts/policy.prompt"
+        )
+    )
+
+    response_prompt = prompt_read(
+        Path(
+            "prompts/response.prompt"
+        )
+    )
+
+    # ========================================================
+    # State
+    # ========================================================
+
+    memories = {
+        dialog_id:
+            init_memory()
+        for dialog_id
+        in data
+    }
+
+    dialogue_history = {
+        dialog_id:
+            ""
+        for dialog_id
+        in data
+    }
+
+    results = {
+        dialog_id: {
+            "turns": []
+        }
+        for dialog_id
+        in data
+    }
+
+    max_turn = max(
+        len(
+            item[
+                "text"
+            ]
+        )
+        for item
+        in data.values()
+    )
+
+    # ========================================================
+    # Dialogue Loop
+    # ========================================================
+
+    for t_id in range(
+        max_turn
+    ):
+
+        print(
+            f"\n========== TURN {t_id} =========="
+        )
+
+        current_batch = []
+
+        # ====================================================
+        # Collect User Turns
+        # ====================================================
+
+        for dialog_id, item in data.items():
+
+            if (
+                t_id
+                >= len(
+                    item[
+                        "text"
+                    ]
+                )
+            ):
+                continue
+
+            msg = (
+                item[
+                    "text"
+                ][
+                    t_id
+                ]
+            )
+
+            if "用户" in msg:
+
+                dialogue_history[
+                    dialog_id
+                ] += (
+                    f"用户: "
+                    f"{msg['用户']}\n"
+                )
+
+            elif "客服" in msg:
+
+                dialogue_history[
+                    dialog_id
+                ] += (
+                    f"客服: "
+                    f"{msg['客服']}\n"
+                )
+
+            if "用户" not in msg:
+                continue
+
+            golden_response = ""
+
+            if (
+                t_id + 1
+                < len(
+                    item[
+                        "text"
+                    ]
+                )
+                and "客服"
+                in item[
+                    "text"
+                ][
+                    t_id + 1
+                ]
+            ):
+                golden_response = (
+                    item[
+                        "text"
+                    ][
+                        t_id + 1
+                    ][
+                        "客服"
+                    ]
+                )
+
+            current_batch.append({
+                "dialog_id":
+                    dialog_id,
+
+                "user":
+                    msg[
+                        "用户"
+                    ],
+
+                "golden_response":
+                    golden_response,
+
+                "dialogue_history":
+                    dialogue_history[
+                        dialog_id
+                    ]
+            })
+
+        if not current_batch:
+            continue
+
+        # ====================================================
+        # 1. Query
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Query Batch: "
+            f"{len(current_batch)}"
+        )
+
+        query_messages = []
+
+        for x in current_batch:
+
+            memory = memories[
+                x[
+                    "dialog_id"
+                ]
+            ]
+
+            query_input = (
+                build_query_input(
+                    memory,
+                    x[
+                        "user"
+                    ]
+                )
+            )
+
+            query_messages.append(
+                build_messages(
+                    query_prompt,
+                    query_input
+                )
+            )
+
+        query_outputs = parallel_inference(
+            query_messages
+        )
+
+        for x, out in zip(
+            current_batch,
+            query_outputs
+        ):
+
+            query_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "query"
+            ] = query_state
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memories[
+                dialog_id
+            ] = update_issue_memory(
+                memories[
+                    dialog_id
+                ],
+                query_state
+            )
+
+        # ====================================================
+        # 2. Trigger
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Trigger Batch"
+        )
+
+        trigger_messages = []
+
+        for x in current_batch:
+
+            memory = memories[
+                x[
+                    "dialog_id"
+                ]
+            ]
+
+            trigger_input = (
+                build_trigger_input(
+                    memory
+                )
+            )
+
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    trigger_input
+                )
+            )
+
+        trigger_outputs = parallel_inference(
+            trigger_messages
+        )
+
+        for x, out in zip(
+            current_batch,
+            trigger_outputs
+        ):
+
+            x[
+                "trigger"
+            ] = parse_llm_output(
+                out
+            )
+
+        # ====================================================
+        # 3. RAG
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"RAG Batch"
+        )
+
+        rag_dialogs = []
+        rag_queries = []
+        rag_indices = []
+
+        for idx, x in enumerate(
+            current_batch
+        ):
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memory = memories[
+                dialog_id
+            ]
+
+            evidence_mode = (
+                x[
+                    "trigger"
+                ].get(
+                    "evidence_mode"
+                )
+            )
+
+            if (
+                evidence_mode
+                == "retrieve_new_evidence"
+            ):
+
+                rag_dialogs.append(
+                    x[
+                        "dialogue_history"
+                    ]
+                )
+
+                rag_queries.append(
+                    memory[
+                        "issue_state"
+                    ][
+                        "current_issue"
+                    ]
+                )
+
+                rag_indices.append(
+                    idx
+                )
+
+            else:
+
+                x[
+                    "evidence"
+                ] = copy.deepcopy(
+                    memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+                )
+
+        if rag_dialogs:
+
+            rag_outputs = (
+                batch_zefeng_rag(
+                    rag_dialogs,
+                    rag_queries
+                )
+            )
+
+            for idx, evidence in zip(
+                rag_indices,
+                rag_outputs
+            ):
+
+                current_batch[
+                    idx
+                ][
+                    "evidence"
+                ] = evidence
+
+        for x in current_batch:
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memories[
+                dialog_id
+            ] = update_evidence_memory(
+                memories[
+                    dialog_id
+                ],
+                x[
+                    "trigger"
+                ],
+                x.get(
+                    "evidence",
+                    []
+                )
+            )
+
+        # ====================================================
+        # 4. Determine Whether Topic Structure Must Update
+        # ====================================================
+
+        for x in current_batch:
+
+            memory = memories[
+                x[
+                    "dialog_id"
+                ]
+            ]
+
+            x[
+                "structure_update"
+            ] = need_structure_update(
+                memory
+            )
+
+        # ====================================================
+        # 5. Temporary Knowledge Processing
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Temporary Knowledge Processing Batch"
+        )
+
+        knowledge_messages = []
+        knowledge_items = []
+
+        # ----------------------------------------------------
+        # IMPORTANT
+        #
+        # 临时变量。
+        # 当前 Turn 结束后即释放。
+        #
+        # 不进入 memory。
+        # ----------------------------------------------------
+
+        temporary_knowledge_map = {}
+
+        for x in current_batch:
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memory = memories[
+                dialog_id
+            ]
+
+            # --------------------------------------------
+            # Reuse existing Topic Structure
+            # --------------------------------------------
+
+            if not x[
+                "structure_update"
+            ]:
+
+                x[
+                    "topic_structure"
+                ] = copy.deepcopy(
+                    memory[
+                        "evidence_state"
+                    ][
+                        "topic_structure"
+                    ]
+                )
+
+                continue
+
+            # --------------------------------------------
+            # No active evidence
+            # --------------------------------------------
+
+            if not memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]:
+
+                x[
+                    "topic_structure"
+                ] = {}
+
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ] = {}
+
+                memories[
+                    dialog_id
+                ] = mark_structure_version(
+                    memory
+                )
+
+                continue
+
+            # --------------------------------------------
+            # Build Temporary Knowledge
+            # --------------------------------------------
+
+            knowledge_input = (
+                build_knowledge_input(
+                    memory
+                )
+            )
+
+            knowledge_messages.append(
+                build_messages(
+                    knowledge_prompt,
+                    knowledge_input
+                )
+            )
+
+            knowledge_items.append(x)
+
+        if knowledge_messages:
+
+            knowledge_outputs = (
+                parallel_inference(
+                    knowledge_messages
+                )
+            )
+
+            for x, out in zip(
+                knowledge_items,
+                knowledge_outputs
+            ):
+
+                temporary_knowledge = (
+                    parse_llm_output(
+                        out
+                    )
+                )
+
+                dialog_id = x[
+                    "dialog_id"
+                ]
+
+                temporary_knowledge_map[
+                    dialog_id
+                ] = temporary_knowledge
+
+                # 仅输出用于 debug / experiment inspection
+                x[
+                    "temporary_knowledge"
+                ] = temporary_knowledge
+
+        # ====================================================
+        # 6. Topic Structure Construction
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Topic Structure Construction Batch"
+        )
+
+        structure_items = []
+
+        for x in current_batch:
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memory = memories[
+                dialog_id
+            ]
+
+            # 已复用
+            if not x[
+                "structure_update"
+            ]:
+                continue
+
+            # 没有 evidence
+            if not memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]:
+                continue
+
+            # knowledge extraction failed
+            if (
+                dialog_id
+                not in temporary_knowledge_map
+            ):
+                continue
+
+            structure_items.append(
+                x
+            )
+
+        if structure_items:
+
+            run_topic_structure_batch(
+                items=
+                    structure_items,
+
+                memories=
+                    memories,
+
+                temporary_knowledge_map=
+                    temporary_knowledge_map,
+
+                candidate_prompt=
+                    topic_candidate_prompt,
+
+                selection_prompt=
+                    topic_selection_prompt
+            )
+
+        # ====================================================
+        # 7. Policy
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Policy Batch"
+        )
+
+        policy_messages = []
+
+        for x in current_batch:
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memory = memories[
+                dialog_id
+            ]
+
+            policy_input = (
+                build_policy_input(
+                    memory,
+                    x[
+                        "user"
+                    ]
+                )
+            )
+
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    policy_input
+                )
+            )
+
+        policy_outputs = parallel_inference(
+            policy_messages
+        )
+
+        for x, out in zip(
+            current_batch,
+            policy_outputs
+        ):
+
+            policy_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "policy"
+            ] = policy_state
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memories[
+                dialog_id
+            ] = update_interaction_memory(
+                memories[
+                    dialog_id
+                ],
+                policy_state
+            )
+
+        # ====================================================
+        # 8. Response
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Response Batch"
+        )
+
+        response_messages = []
+
+        for x in current_batch:
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            memory = memories[
+                dialog_id
+            ]
+
+            response_input = (
+                build_response_input(
+                    memory,
+                    x[
+                        "user"
+                    ]
+                )
+            )
+
+            response_messages.append(
+                build_messages(
+                    response_prompt,
+                    response_input
+                )
+            )
+
+        response_outputs = parallel_inference(
+            response_messages
+        )
+
+        for x, out in zip(
+            current_batch,
+            response_outputs
+        ):
+
+            response_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "response"
+            ] = response_state
+
+            dialog_id = x[
+                "dialog_id"
+            ]
+
+            # ------------------------------------------------
+            # 当前仍使用 Golden Response 更新历史，
+            # 保持你原本 static multi-turn evaluation 设定。
+            # ------------------------------------------------
+
+            memories[
+                dialog_id
+            ] = update_dialogue_memory(
+                memories[
+                    dialog_id
+                ],
+                x[
+                    "user"
+                ],
+                x[
+                    "golden_response"
+                ]
+            )
+
+            turn_result = {
+                k: v
+                for k, v
+                in x.items()
+                if k not in [
+                    "dialogue_history",
+                    "structure_update"
+                ]
+            }
+
+            turn_result[
+                "turn_id"
+            ] = int(
+                t_id / 2
+            )
+
+            results[
+                dialog_id
+            ][
+                "turns"
+            ].append(
+                turn_result
+            )
+
+    # ========================================================
+    # Final Memory
+    # ========================================================
+
+    for dialog_id in data:
+
+        final_memory = copy.deepcopy(
+            memories[
+                dialog_id
+            ]
+        )
+
+        # Runtime metadata 不属于 Memory State
+        final_memory.pop(
+            "_runtime",
+            None
+        )
+
+        results[
+            dialog_id
+        ][
+            "final_memory"
+        ] = final_memory
+
+    return results
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--output_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--max_dialogues",
+        type=int,
+        default=300
+    )
+
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8
+    )
+
+    args = parser.parse_args()
+
+    # ========================================================
+    # Load Data
+    # ========================================================
+
+    with open(
+        args.data_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        data = json.load(
+            f
+        )
+
+    data = dict(
+        list(
+            data.items()
+        )[
+            :args.max_dialogues
+        ]
+    )
+
+    # ========================================================
+    # Run
+    # ========================================================
+
+    outputs = run_memory_agent_batch(
+        data=data,
+        batch_size=args.batch_size
+    )
+
+    # ========================================================
+    # Save
+    # ========================================================
+
+    write_json(
+        args.output_path,
+        outputs
+    )
+
+    print(
+        f"Saved "
+        f"{len(outputs)} dialogues "
+        f"to {args.output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
