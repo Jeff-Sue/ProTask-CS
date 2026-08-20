@@ -1,45 +1,86 @@
-========== 案例轮指标 ==========
-案例轮数量: 31
-知识链路触发率: 0.8710
-Top-5有效案例召回率: 0.7037
-Top-3有效案例召回率: 0.7037
-Top-1有效案例召回率: 0.4815
-知识型策略命中率: 0.8421
-案例选择准确率: 0.8125
-最终案例推荐准确率: 0.4194
+## How to Use Topic Structure
 
-========== 所有轮推荐时机 ==========
-推荐时机Precision: 0.4615
-推荐时机Recall: 0.7742
-推荐时机F1: 0.5783
-过早推荐率: 0.5385
-漏推荐率: 0.2258
+topic_structure 是 active_cases 的判别性摘要，不替代完整 Case 信息。
 
-========== 对话级指标 ==========
-对话成功率: 0.5333
-Golden案例首次推荐平均轮数: 0.7333
-Predicted案例首次推荐平均轮数: 0.3214
+使用原则：
+1. 先利用 topic_structure 快速理解 Top-K Cases 的关键区别；
+2. 再结合 Query 和 active_cases 原文判断具体 Case 是否值得使用；
+3. Topic Structure 中存在多个候选分支，不代表必须 AskClarification 或 AskMissingSlot；
+4. 如果 Query 已明显对应某条 Topic Path，且对应 Case 原文能够支持处理，应直接考虑 CaseRecommendation 或 ExplainedResponse；
+5. 只有当不同 Topic Paths 对应不同处理动作，且当前 Query 确实缺少区分它们所必需的信息时，才进行询问。
+
+不要把 topic_structure 当作额外的不确定性来源。
+它的作用是帮助理解 Case 差异，而不是提高推荐门槛。
 
 
 
-========== 案例轮指标 ==========
-案例轮数量: 31
-知识链路触发率: 0.8065
-Top-5有效案例召回率: 0.7600
-Top-3有效案例召回率: 0.7600
-Top-1有效案例召回率: 0.5200
-知识型策略命中率: 0.6842
-案例选择准确率: 0.7692
-最终案例推荐准确率: 0.3226
 
-========== 所有轮推荐时机 ==========
-推荐时机Precision: 0.4872
-推荐时机Recall: 0.6129
-推荐时机F1: 0.5429
-过早推荐率: 0.5128
-漏推荐率: 0.3871
 
-========== 对话级指标 ==========
-对话成功率: 0.4667
-Golden案例首次推荐平均轮数: 0.7333
-Predicted案例首次推荐平均轮数: 0.6250
+## Core Constraints
+
+1. Query-conditioned representation
+Topic Structure 不是对 Case 原文做完整分类，而是在当前 Query 条件下，为每个 Case 选择最有决策价值的主题路径。
+一个 Case 即使包含多个方面，也只能根据当前 Query 最相关、最能区别于其他 Case 的信息进入一个子节点。
+
+2. Exclusive assignment
+同一父节点下，每个 Case 必须且只能属于一个 child：
+- sibling 的 case_ids 不得重叠；
+- 所有 children 的 case_ids 并集必须等于 parent.case_ids；
+- 不得遗漏任何 Case。
+
+3. Query-relevant assignment
+Case 应进入哪个 child，不能仅根据标题、主要内容或 Case 的一般主题判断。
+必须优先依据：
+- 当前 Query 明确询问的需求；
+- Case 中与该需求直接相关的内容；
+- 该内容相对于其他 Cases 的区别。
+
+例如：
+Query = “外网权限到期后如何重新申请”
+某 Case 同时包含“首次申请、到期重新申请、提前延期”，
+该 Case 应按照“到期重新申请”这一与 Query 最相关的 facet 进行划分，
+而不是按照 Case 的标题或整体主题划入“首次申请”。
+
+4. Diversity-guided dimension
+对于 case_ids 数量 > 1 的节点，选择一个且仅一个 discriminative_dimension。
+该维度必须同时满足：
+- 与当前 Query 相关；
+- 能最大程度区分当前节点中的 Cases；
+- 区分依据能够从 Case 原文中找到证据。
+
+不要选择虽然能够区分 Cases、但与当前 Query 决策无关的维度。
+
+5. Recursive refinement
+任何 case_ids 数量 > 1 的 child 都必须继续生成下一层 discriminative_dimension 和 children。
+只有 case_ids 数量 = 1 时才能成为 leaf。
+
+因此最终必须满足：
+每个输入 Case 都存在且仅存在一条从 root 到 leaf 的 Topic Path，
+并且每个 leaf 只对应一个 Case。
+
+6. Common Anchor
+common_anchor 是 Query 与所有候选 Cases 能够共享的最具体父主题。
+
+它不要求等于 Query。
+如果 Query 比所有 Cases 的共同主题更具体，应向上寻找能够覆盖 Query 和全部 Cases 的最近共同父主题。
+
+不要直接复制 Query 作为 common_anchor，除非 Query 本身确实能够覆盖全部 Cases。
+
+## Generation Procedure
+
+Step 1. 找到 Query 与全部 Cases 的最近 Common Anchor。
+
+Step 2. 对当前节点中的每个 Case，只提取与 Query 和当前节点相关的 discriminative facet。
+
+Step 3. 基于这些 facets 生成多个候选 discriminative dimensions。
+
+Step 4. 选择 Query relevance 高且 Case diversity 最大的一个 dimension。
+
+Step 5. 在该 dimension 下，每个 Case 只能进入一个最符合当前 Query 的 child。
+
+Step 6. 检查：
+- 是否遗漏 Case；
+- 是否重复分配 Case；
+- 是否存在 case_ids > 1 但没有继续拆分的节点。
+
+Step 7. 对所有 case_ids > 1 的节点递归执行 Step 2–6，直到每个 leaf 只有一个 Case。
