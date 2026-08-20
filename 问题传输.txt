@@ -1,462 +1,958 @@
-        "topic_structure": {
-          "node_id": "root",
-          "topic": "xGate外网接入失败",
-          "case_ids": [
-            "KT00009526",
-            "KT00396032",
-            "KT00245074",
-            "KT00236162",
-            "KT00042679"
-          ],
-          "children": [
-            {
-              "node_id": "root.0",
-              "topic": "提示连接失败或权限问题",
-              "case_ids": [
-                "KT00009526",
-                "KT00042679"
-              ],
-              "evidence": {
-                "KT00009526": [
-                  "提示连接失败（新版本spes）",
-                  "提示没有权限"
-                ],
-                "KT00042679": [
-                  "提示没有权限"
-                ]
-              },
-              "children": [],
-              "status": "unresolved"
-            },
-            {
-              "node_id": "root.1",
-              "topic": "提示需要安装系统组件或驱动",
-              "case_ids": [
-                "KT00396032"
-              ],
-              "evidence": {
-                "KT00396032": [
-                  "诊断工具提示缺少系统关键组件",
-                  "未安装外网接入驱动",
-                  "需要安装文件：C:\\Program Files (x86)\\SPES5.0\\Composites\\SPES\\SSLVPNSetup\\VPNSetup64.exe"
-                ]
-              },
-              "children": [],
-              "status": "unresolved"
-            },
-            {
-              "node_id": "root.2",
-              "topic": "提示需重启网卡或Windows",
-              "case_ids": [
-                "KT00245074",
-                "KT00009526"
-              ],
-              "evidence": {
-                "KT00245074": [
-                  "提示\"重启网卡或重启windows”"
-                ],
-                "KT00009526": [
-                  "提示\"重启网卡或重启windows”"
-                ]
-              },
-              "children": [],
-              "status": "unresolved"
-            },
-            {
-              "node_id": "root.3",
-              "topic": "代理设置导致接入失败",
-              "case_ids": [
-                "KT00236162",
-                "KT00009526"
-              ],
-              "evidence": {
-                "KT00236162": [
-                  "诊断信息提示：“外网接入时使用代理”",
-                  "问题原因：使用了iE代理或指定代理导致访问公网失败",
-                  "建议设置为“不使用代理”"
-                ],
-                "KT00009526": [
-                  "提示“外网接入时使用代理”"
-                ]
-              },
-              "children": [
-                {
-                  "node_id": "root.3.0",
-                  "topic": "是否使用了IE代理或指定代理",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ],
-                  "evidence": {
-                    "KT00236162": [
-                      "问题原因：使用了iE代理或指定代理导致访问公网失败"
-                    ],
-                    "KT00009526": [
-                      "提示“外网接入时使用代理”"
-                    ]
-                  },
-                  "children": [
-                    {
-                      "node_id": "root.3.0.0",
-                      "topic": "具体使用的代理类型",
-                      "case_ids": [
-                        "KT00236162",
-                        "KT00009526"
-                      ],
-                      "evidence": {
-                        "KT00236162": [
-                          "问题原因：使用了iE代理或指定代理导致访问公网失败"
-                        ],
-                        "KT00009526": [
-                          "提示“外网接入时使用代理”"
-                        ]
-                      },
-                      "children": [],
-                      "status": "terminal"
-                    }
-                  ],
-                  "status": "refined"
-                },
-                {
-                  "node_id": "root.3.1",
-                  "topic": "如何解决代理设置导致的接入失败",
-                  "case_ids": [
-                    "KT00236162"
-                  ],
-                  "evidence": {
-                    "KT00236162": [
-                      "建议设置为“不使用代理”",
-                      "在外网接入设置中勾选“不使用代理”，保存配置后重新登录"
-                    ]
-                  },
-                  "children": [],
-                  "status": "unresolved"
-                }
-              ],
-              "status": "refined"
-            }
-          ],
-          "status": "refined",
-          "decision_sufficient": false,
-          "evidence_status": "insufficient",
-          "stop_reason": "no_new_child",
-          "final_depth": 4,
-          "judgement_history": [
-            {
-              "depth": 0,
-              "frontier": [
-                {
-                  "node_id": "root",
-                  "topic": "xGate外网接入失败",
-                  "case_ids": [
-                    "KT00009526",
-                    "KT00396032",
-                    "KT00245074",
-                    "KT00236162",
-                    "KT00042679"
-                  ]
-                }
-              ],
-              "output": {
-                "status": "refine",
-                "matched_case_ids": [],
-                "refine_node_ids": [
-                  "root"
-                ],
-                "reason": "当前Query涉及便携机连接xGate提示无法从外网接入，但Evidence中多个Case可能相关（如代理设置、权限问题、系统组件缺失等），需要进一步区分具体原因。"
-              }
-            },
-            {
-              "depth": 1,
-              "frontier": [
-                {
-                  "node_id": "root.0",
-                  "topic": "提示连接失败或权限问题",
-                  "case_ids": [
-                    "KT00009526",
-                    "KT00042679"
-                  ]
-                },
-                {
-                  "node_id": "root.1",
-                  "topic": "提示需要安装系统组件或驱动",
-                  "case_ids": [
-                    "KT00396032"
-                  ]
-                },
-                {
-                  "node_id": "root.2",
-                  "topic": "提示需重启网卡或Windows",
-                  "case_ids": [
-                    "KT00245074",
-                    "KT00009526"
-                  ]
-                },
-                {
-                  "node_id": "root.3",
-                  "topic": "代理设置导致接入失败",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                }
-              ],
-              "output": {
-                "status": "refine",
-                "matched_case_ids": [],
-                "refine_node_ids": [
-                  "root.3"
-                ],
-                "reason": "Query 提到“连接xgate提示无法从外网接入”，而 Case KT00236162 和 KT00009526 都涉及“外网接入时使用代理”的问题，需要进一步区分是否与 Query 中的代理设置冲突。"
-              }
-            },
-            {
-              "depth": 2,
-              "frontier": [
-                {
-                  "node_id": "root.3.0",
-                  "topic": "是否使用了IE代理或指定代理",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                },
-                {
-                  "node_id": "root.3.1",
-                  "topic": "如何解决代理设置导致的接入失败",
-                  "case_ids": [
-                    "KT00236162"
-                  ]
-                }
-              ],
-              "output": {
-                "status": "refine",
-                "matched_case_ids": [],
-                "refine_node_ids": [
-                  "root.3.0"
-                ],
-                "reason": "Query 提示“无法从外网接入”，与 Case KT00236162 和 KT00009526 中的“外网接入时使用代理”相关，但需要进一步确认是否因代理设置导致问题。"
-              }
-            },
-            {
-              "depth": 3,
-              "frontier": [
-                {
-                  "node_id": "root.3.0.0",
-                  "topic": "具体使用的代理类型",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                }
-              ],
-              "output": {
-                "status": "refine",
-                "matched_case_ids": [],
-                "refine_node_ids": [
-                  "root.3.0.0"
-                ],
-                "reason": "需要进一步确认具体使用的代理类型，以判断是否与当前问题相关"
-              }
-            }
-          ],
-          "refinement_history": [
-            {
-              "depth": 0,
-              "refine_nodes": [
-                {
-                  "node_id": "root",
-                  "topic": "xGate外网接入失败",
-                  "case_ids": [
-                    "KT00009526",
-                    "KT00396032",
-                    "KT00245074",
-                    "KT00236162",
-                    "KT00042679"
-                  ]
-                }
-              ],
-              "output": {
-                "refinements": [
-                  {
-                    "parent_node_id": "root",
-                    "parent_topic": "xGate外网接入失败",
-                    "children": [
-                      {
-                        "topic": "提示连接失败或权限问题",
-                        "case_ids": [
-                          "KT00009526",
-                          "KT00042679"
-                        ],
-                        "evidence": {
-                          "KT00009526": [
-                            "提示连接失败（新版本spes）",
-                            "提示没有权限"
-                          ],
-                          "KT00042679": [
-                            "提示没有权限"
-                          ]
-                        }
-                      },
-                      {
-                        "topic": "提示需要安装系统组件或驱动",
-                        "case_ids": [
-                          "KT00396032"
-                        ],
-                        "evidence": {
-                          "KT00396032": [
-                            "诊断工具提示缺少系统关键组件",
-                            "未安装外网接入驱动",
-                            "需要安装文件：C:\\Program Files (x86)\\SPES5.0\\Composites\\SPES\\SSLVPNSetup\\VPNSetup64.exe"
-                          ]
-                        }
-                      },
-                      {
-                        "topic": "提示需重启网卡或Windows",
-                        "case_ids": [
-                          "KT00245074",
-                          "KT00009526"
-                        ],
-                        "evidence": {
-                          "KT00245074": [
-                            "提示\"重启网卡或重启windows”"
-                          ],
-                          "KT00009526": [
-                            "提示\"重启网卡或重启windows”"
-                          ]
-                        }
-                      },
-                      {
-                        "topic": "代理设置导致接入失败",
-                        "case_ids": [
-                          "KT00236162",
-                          "KT00009526"
-                        ],
-                        "evidence": {
-                          "KT00236162": [
-                            "诊断信息提示：“外网接入时使用代理”",
-                            "问题原因：使用了iE代理或指定代理导致访问公网失败",
-                            "建议设置为“不使用代理”"
-                          ],
-                          "KT00009526": [
-                            "提示“外网接入时使用代理”"
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            },
-            {
-              "depth": 1,
-              "refine_nodes": [
-                {
-                  "node_id": "root.3",
-                  "topic": "代理设置导致接入失败",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                }
-              ],
-              "output": {
-                "refinements": [
-                  {
-                    "parent_node_id": "root.3",
-                    "parent_topic": "代理设置导致接入失败",
-                    "children": [
-                      {
-                        "topic": "是否使用了IE代理或指定代理",
-                        "case_ids": [
-                          "KT00236162",
-                          "KT00009526"
-                        ],
-                        "evidence": {
-                          "KT00236162": [
-                            "问题原因：使用了iE代理或指定代理导致访问公网失败"
-                          ],
-                          "KT00009526": [
-                            "提示“外网接入时使用代理”"
-                          ]
-                        }
-                      },
-                      {
-                        "topic": "如何解决代理设置导致的接入失败",
-                        "case_ids": [
-                          "KT00236162"
-                        ],
-                        "evidence": {
-                          "KT00236162": [
-                            "建议设置为“不使用代理”",
-                            "在外网接入设置中勾选“不使用代理”，保存配置后重新登录"
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            },
-            {
-              "depth": 2,
-              "refine_nodes": [
-                {
-                  "node_id": "root.3.0",
-                  "topic": "是否使用了IE代理或指定代理",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                }
-              ],
-              "output": {
-                "refinements": [
-                  {
-                    "parent_node_id": "root.3.0",
-                    "parent_topic": "是否使用了IE代理或指定代理",
-                    "children": [
-                      {
-                        "topic": "具体使用的代理类型",
-                        "case_ids": [
-                          "KT00236162",
-                          "KT00009526"
-                        ],
-                        "evidence": {
-                          "KT00236162": [
-                            "问题原因：使用了iE代理或指定代理导致访问公网失败"
-                          ],
-                          "KT00009526": [
-                            "提示“外网接入时使用代理”"
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            },
-            {
-              "depth": 3,
-              "refine_nodes": [
-                {
-                  "node_id": "root.3.0.0",
-                  "topic": "具体使用的代理类型",
-                  "case_ids": [
-                    "KT00236162",
-                    "KT00009526"
-                  ]
-                }
-              ],
-              "output": {
-                "refinements": [
-                  {
-                    "parent_node_id": "root.3.0.0",
-                    "parent_topic": "具体使用的代理类型",
-                    "children": []
-                  }
-                ]
-              }
-            }
-          ]
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+from pathlib import Path
+from typing import Any
+
+from utils.scu_rag import batch_zefeng_rag
+from utils.qwen_api_multi import parallel_inference
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str):
+        return {}
+    text = text.strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def parse_llm_output(output):
+    parsed = parse_json(output)
+    if not parsed:
+        return {}
+    if "response" not in parsed:
+        return parsed
+    return parse_json(parsed.get("response", ""))
+
+
+def prompt_read(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def write_json(path: str | Path, data: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_messages(system_prompt, data):
+    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": json.dumps(data, ensure_ascii=False)}]
+
+
+# ============================================================
+# Memory
+# ============================================================
+
+def init_memory():
+    return {
+        "issue_state": {
+            "current_issue": "",
+            "query_history": []
         },
+        "dialog_state": {
+            "compressed_history": []
+        },
+        "evidence_state": {
+            # Raw evidence：始终作为事实依据保留
+            "active_cases": [],
+            # Query-conditioned knowledge PE
+            "knowledge_state": {},
+            # Difference-guided hierarchical structure
+            "topic_structure": {},
+            # 用于判断 PE 是否需要重新计算
+            "pe_query": "",
+            "pe_case_ids": []
+        },
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": []
+        }
+    }
+
+
+# ============================================================
+# Memory Update
+# ============================================================
+
+def update_issue_memory(memory, query_state):
+    mode = query_state.get("query_mode", "none")
+    query = query_state.get("query_text", "").strip()
+
+    if mode in ["rewrite", "refine"] and query:
+        old_query = memory["issue_state"]["current_issue"]
+        memory["issue_state"]["current_issue"] = query
+        if query != old_query:
+            memory["issue_state"]["query_history"].append(query)
+
+    # reuse 不修改 current_issue
+    return memory
+
+
+def update_evidence_memory(memory, trigger_state, evidence):
+    mode = trigger_state.get("evidence_mode", "no_evidence_needed")
+
+    if mode == "retrieve_new_evidence":
+        memory["evidence_state"]["active_cases"] = evidence or []
+
+    return memory
+
+
+def update_knowledge_memory(memory, knowledge_state):
+    memory["evidence_state"]["knowledge_state"] = knowledge_state
+    return memory
+
+
+def update_topic_structure_memory(memory, topic_structure):
+    memory["evidence_state"]["topic_structure"] = topic_structure
+    return memory
+
+
+def mark_pe_version(memory):
+    memory["evidence_state"]["pe_query"] = memory["issue_state"]["current_issue"]
+    memory["evidence_state"]["pe_case_ids"] = get_case_ids(memory["evidence_state"]["active_cases"])
+    return memory
+
+
+def update_interaction_memory(memory, policy_state):
+    label = policy_state.get("label", "")
+    memory["interaction_state"]["last_action"] = label
+    memory["interaction_state"]["action_history"].append(label)
+
+    if label in ["AskMissingSlot", "AskClarification"]:
+        memory["interaction_state"]["stage"] = "Clarification"
+    elif label in ["ExplainedResponse", "CaseRecommendation"]:
+        memory["interaction_state"]["stage"] = "Resolution"
+    elif label == "Handoff":
+        memory["interaction_state"]["stage"] = "End"
+
+    return memory
+
+
+def update_dialogue_memory(memory, user, response):
+    history = memory["dialog_state"]["compressed_history"]
+    history.append({"user": user, "assistant": response})
+    memory["dialog_state"]["compressed_history"] = history[-5:]
+    return memory
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def get_case_ids(cases):
+    return [x.get("case_id") for x in cases if isinstance(x, dict) and x.get("case_id")]
+
+
+def need_structure_update(memory):
+    """
+    PE 是 f(Query, Active Evidence)。
+
+    只有以下情况重新构建：
+    1. Query 与上次 PE 使用的 Query 不同；
+    2. Active Cases 与上次 PE 使用的 Cases 不同；
+    3. 当前没有已有 PE。
+
+    因此：
+    Query 没变 + Evidence 没变 -> 直接复用。
+    """
+    current_query = memory["issue_state"]["current_issue"]
+    current_case_ids = get_case_ids(memory["evidence_state"]["active_cases"])
+
+    old_query = memory["evidence_state"].get("pe_query", "")
+    old_case_ids = memory["evidence_state"].get("pe_case_ids", [])
+
+    if not memory["evidence_state"].get("knowledge_state"):
+        return True
+
+    if current_query != old_query:
+        return True
+
+    if current_case_ids != old_case_ids:
+        return True
+
+    return False
+
+
+# ============================================================
+# Input Builder
+# ============================================================
+
+def build_query_input(memory, user):
+    return {
+        "issue_state": memory["issue_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {"u": user}
+    }
+
+
+def build_trigger_input(memory):
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"],
+            "knowledge_state": memory["evidence_state"]["knowledge_state"],
+            "topic_structure": memory["evidence_state"]["topic_structure"]
+        },
+        "dialog_state": memory["dialog_state"]
+    }
+
+
+def build_knowledge_input(memory):
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "active_cases": memory["evidence_state"]["active_cases"]
+    }
+
+
+def build_judgement_input(memory, structure, frontier):
+    """
+    Judgement 必须判断：
+    Query 与整个 Evidence State 的关系。
+
+    active_cases:
+        原始事实依据
+    knowledge_state:
+        query-conditioned PE
+    current_structure:
+        当前层级结构
+    frontier:
+        当前待判断节点
+    """
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"],
+            "knowledge_state": memory["evidence_state"]["knowledge_state"],
+            "topic_structure": structure
+        },
+        "frontier": frontier
+    }
+
+
+def build_refinement_input(memory, structure, refine_nodes):
+    """
+    Refinement 同样保留 raw evidence。
+
+    Structure for navigation.
+    Raw evidence for grounding.
+    """
+    return {
+        "query_text": memory["issue_state"]["current_issue"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"],
+            "knowledge_state": memory["evidence_state"]["knowledge_state"],
+            "topic_structure": structure
+        },
+        "refine_nodes": refine_nodes
+    }
+
+
+def build_policy_input(memory, user):
+    """
+    IMPORTANT:
+    PE 不替代 active evidence。
+
+    Policy 判断的是：
+        Query + Dialogue + Entire Evidence State
+
+    Evidence State =
+        active_cases
+        + knowledge_state
+        + topic_structure
+    """
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"],
+            "knowledge_state": memory["evidence_state"]["knowledge_state"],
+            "topic_structure": memory["evidence_state"]["topic_structure"]
+        },
+        "interaction_state": memory["interaction_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {"u": user}
+    }
+
+
+def build_response_input(memory, user):
+    return {
+        "issue_state": memory["issue_state"],
+        "evidence_state": {
+            "active_cases": memory["evidence_state"]["active_cases"],
+            "knowledge_state": memory["evidence_state"]["knowledge_state"],
+            "topic_structure": memory["evidence_state"]["topic_structure"]
+        },
+        "interaction_state": memory["interaction_state"],
+        "dialog_state": memory["dialog_state"],
+        "current": {
+            "u": user,
+            "policy": memory["interaction_state"]["last_action"]
+        }
+    }
+
+
+# ============================================================
+# Topic Structure
+# ============================================================
+
+def init_topic_structure(knowledge_state):
+    anchor = knowledge_state.get("common_anchor", "")
+    cases = knowledge_state.get("cases", [])
+    case_ids = [x.get("case_id") for x in cases if x.get("case_id")]
+
+    return {
+        "node_id": "root",
+        "topic": anchor,
+        "case_ids": case_ids,
+        "children": [],
+        "status": "unresolved"
+    }
+
+
+def find_node_by_id(node, node_id):
+    if node.get("node_id") == node_id:
+        return node
+
+    for child in node.get("children", []):
+        result = find_node_by_id(child, node_id)
+        if result is not None:
+            return result
+
+    return None
+
+
+def make_frontier_item(node):
+    return {
+        "node_id": node.get("node_id", ""),
+        "topic": node.get("topic", ""),
+        "case_ids": node.get("case_ids", [])
+    }
+
+
+def normalize_case_ids(case_ids, allowed_case_ids):
+    if not isinstance(case_ids, list):
+        return []
+    allowed = set(allowed_case_ids)
+    return [x for x in case_ids if x in allowed]
+
+
+def apply_refinements(structure, refinements):
+    """
+    使用 node_id，而不是 topic 文本寻找 parent。
+    避免不同 branch 出现同名 topic 时挂错节点。
+
+    返回：
+        structure
+        new_frontier
+        created_count
+    """
+    new_frontier = []
+    created_count = 0
+
+    for refinement in refinements:
+        parent_node_id = refinement.get("parent_node_id", "")
+        parent = find_node_by_id(structure, parent_node_id)
+
+        if parent is None:
+            continue
+
+        children = refinement.get("children", [])
+        if not isinstance(children, list) or not children:
+            parent["status"] = "terminal"
+            continue
+
+        normalized_children = []
+
+        for idx, child in enumerate(children):
+            topic = child.get("topic", "").strip()
+            case_ids = normalize_case_ids(child.get("case_ids", []), parent.get("case_ids", []))
+
+            if not topic or not case_ids:
+                continue
+
+            child_node = {
+                "node_id": f"{parent_node_id}.{idx}",
+                "topic": topic,
+                "case_ids": case_ids,
+                "evidence": child.get("evidence", {}),
+                "children": [],
+                "status": "unresolved"
+            }
+
+            normalized_children.append(child_node)
+            new_frontier.append(make_frontier_item(child_node))
+            created_count += 1
+
+        if normalized_children:
+            parent["children"] = normalized_children
+            parent["status"] = "refined"
+        else:
+            parent["status"] = "terminal"
+
+    return structure, new_frontier, created_count
+
+
+# ============================================================
+# Judgement Validation
+# ============================================================
+
+def validate_judgement(result, frontier):
+    if not isinstance(result, dict):
+        return False
+
+    status = str(result.get("status", "")).strip().lower()
+    if status not in ["matched", "refine", "insufficient"]:
+        return False
+
+    matched_case_ids = result.get("matched_case_ids", [])
+    refine_node_ids = result.get("refine_node_ids", [])
+
+    if not isinstance(matched_case_ids, list) or not isinstance(refine_node_ids, list):
+        return False
+
+    valid_node_ids = {x.get("node_id") for x in frontier if x.get("node_id")}
+
+    if status == "matched":
+        if not matched_case_ids or refine_node_ids:
+            return False
+
+    elif status == "refine":
+        if matched_case_ids or not refine_node_ids:
+            return False
+        if any(node_id not in valid_node_ids for node_id in refine_node_ids):
+            return False
+
+    elif status == "insufficient":
+        if matched_case_ids or refine_node_ids:
+            return False
+
+    return True
+
+
+# ============================================================
+# Difference-Guided Adaptive Refinement
+# ============================================================
+
+def run_refinement_pe_batch(items, memories, judgement_prompt, refinement_prompt, max_depth=4):
+    active_items = []
+
+    for x in items:
+        memory = memories[x["dialog_id"]]
+        knowledge_state = memory["evidence_state"]["knowledge_state"]
+
+        if not knowledge_state:
+            x["topic_structure"] = {}
+            continue
+
+        structure = init_topic_structure(knowledge_state)
+
+        if not structure.get("topic"):
+            x["topic_structure"] = {}
+            continue
+
+        x["_structure"] = structure
+        x["_frontier"] = [make_frontier_item(structure)]
+        x["_judgement_history"] = []
+        x["_refinement_history"] = []
+        active_items.append(x)
+
+    for depth in range(max_depth + 1):
+        if not active_items:
+            break
+
+        # ====================================================
+        # 1. Judgement Batch
+        # ====================================================
+
+        print(f"[Refinement Depth {depth}] Judgement Batch: {len(active_items)}")
+
+        judgement_messages = []
+
+        for x in active_items:
+            memory = memories[x["dialog_id"]]
+            judgement_input = build_judgement_input(memory, x["_structure"], x["_frontier"])
+            judgement_messages.append(build_messages(judgement_prompt, judgement_input))
+
+        judgement_outputs = parallel_inference(judgement_messages)
+        need_refinement = []
+
+        for x, out in zip(active_items, judgement_outputs):
+            judgement = parse_llm_output(out)
+            structure = x["_structure"]
+
+            x["_judgement_history"].append({
+                "depth": depth,
+                "frontier": copy.deepcopy(x["_frontier"]),
+                "output": copy.deepcopy(judgement)
+            })
+
+            if not validate_judgement(judgement, x["_frontier"]):
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "invalid"
+                structure["stop_reason"] = "invalid_judgement"
+                structure["final_depth"] = depth
+                continue
+
+            status = str(judgement.get("status", "")).strip().lower()
+            matched_case_ids = judgement.get("matched_case_ids", [])
+            refine_node_ids = judgement.get("refine_node_ids", [])
+            reason = judgement.get("reason", "")
+
+            # --------------------------------------------
+            # matched
+            # --------------------------------------------
+
+            if status == "matched":
+                structure["decision_sufficient"] = True
+                structure["evidence_status"] = "matched"
+                structure["matched_case_ids"] = matched_case_ids
+                structure["judgement_reason"] = reason
+                structure["stop_reason"] = "matched"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # insufficient
+            # --------------------------------------------
+
+            if status == "insufficient":
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "insufficient"
+                structure["matched_case_ids"] = []
+                structure["judgement_reason"] = reason
+                structure["stop_reason"] = "insufficient_evidence"
+                structure["final_depth"] = depth
+                continue
+
+            # --------------------------------------------
+            # refine
+            # --------------------------------------------
+
+            if depth >= max_depth:
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "unresolved"
+                structure["matched_case_ids"] = []
+                structure["judgement_reason"] = reason
+                structure["stop_reason"] = "max_depth"
+                structure["final_depth"] = depth
+                continue
+
+            refine_nodes = []
+
+            for node_id in refine_node_ids:
+                node = find_node_by_id(structure, node_id)
+
+                if node is None:
+                    continue
+
+                if len(node.get("case_ids", [])) <= 1:
+                    node["status"] = "terminal"
+                    continue
+
+                refine_nodes.append(make_frontier_item(node))
+
+            if not refine_nodes:
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "insufficient"
+                structure["matched_case_ids"] = []
+                structure["judgement_reason"] = reason
+                structure["stop_reason"] = "no_refinable_branch"
+                structure["final_depth"] = depth
+                continue
+
+            x["_refine_nodes"] = refine_nodes
+            need_refinement.append(x)
+
+        if not need_refinement:
+            break
+
+        # ====================================================
+        # 2. Refinement Batch
+        # ====================================================
+
+        print(f"[Refinement Depth {depth}] Refinement Batch: {len(need_refinement)}")
+
+        refinement_messages = []
+
+        for x in need_refinement:
+            memory = memories[x["dialog_id"]]
+            refinement_input = build_refinement_input(memory, x["_structure"], x["_refine_nodes"])
+            refinement_messages.append(build_messages(refinement_prompt, refinement_input))
+
+        refinement_outputs = parallel_inference(refinement_messages)
+        next_active_items = []
+
+        for x, out in zip(need_refinement, refinement_outputs):
+            refinement_result = parse_llm_output(out)
+            structure = x["_structure"]
+
+            x["_refinement_history"].append({
+                "depth": depth,
+                "refine_nodes": copy.deepcopy(x["_refine_nodes"]),
+                "output": copy.deepcopy(refinement_result)
+            })
+
+            refinements = refinement_result.get("refinements", [])
+
+            if not isinstance(refinements, list) or not refinements:
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "insufficient"
+                structure["stop_reason"] = "no_valid_refinement"
+                structure["final_depth"] = depth
+                continue
+
+            structure, new_frontier, created_count = apply_refinements(structure, refinements)
+            x["_structure"] = structure
+
+            if created_count == 0 or not new_frontier:
+                structure["decision_sufficient"] = False
+                structure["evidence_status"] = "insufficient"
+                structure["stop_reason"] = "no_new_child"
+                structure["final_depth"] = depth + 1
+                continue
+
+            x["_frontier"] = new_frontier
+            next_active_items.append(x)
+
+        active_items = next_active_items
+
+    # ========================================================
+    # Finalize
+    # ========================================================
+
+    for x in items:
+        if "_structure" not in x:
+            continue
+
+        structure = x["_structure"]
+
+        if "evidence_status" not in structure:
+            structure["decision_sufficient"] = False
+            structure["evidence_status"] = "unresolved"
+            structure["stop_reason"] = "unfinished"
+
+        structure["judgement_history"] = x["_judgement_history"]
+        structure["refinement_history"] = x["_refinement_history"]
+
+        x["topic_structure"] = structure
+
+        dialog_id = x["dialog_id"]
+        memories[dialog_id] = update_topic_structure_memory(memories[dialog_id], structure)
+        memories[dialog_id] = mark_pe_version(memories[dialog_id])
+
+        x.pop("_structure", None)
+        x.pop("_frontier", None)
+        x.pop("_refine_nodes", None)
+        x.pop("_judgement_history", None)
+        x.pop("_refinement_history", None)
+
+
+# ============================================================
+# Main Batch Agent
+# ============================================================
+
+def run_memory_agent_batch(data, batch_size=8, max_refinement_depth=4):
+    query_prompt = prompt_read(Path("prompts/query.prompt"))
+    trigger_prompt = prompt_read(Path("prompts/trigger.prompt"))
+    knowledge_prompt = prompt_read(Path("prompts/knowledge.prompt"))
+    judgement_prompt = prompt_read(Path("prompts/judgement.prompt"))
+    refinement_prompt = prompt_read(Path("prompts/refinement.prompt"))
+    policy_prompt = prompt_read(Path("prompts/policy.prompt"))
+    response_prompt = prompt_read(Path("prompts/response.prompt"))
+
+    memories = {dialog_id: init_memory() for dialog_id in data}
+    dialogue_history = {dialog_id: "" for dialog_id in data}
+    results = {dialog_id: {"turns": []} for dialog_id in data}
+
+    max_turn = max(len(item["text"]) for item in data.values())
+
+    for t_id in range(max_turn):
+        print(f"\n========== TURN {t_id} ==========")
+
+        current_batch = []
+
+        # ====================================================
+        # Collect User Turns
+        # ====================================================
+
+        for dialog_id, item in data.items():
+            if t_id >= len(item["text"]):
+                continue
+
+            msg = item["text"][t_id]
+
+            if "用户" in msg:
+                dialogue_history[dialog_id] += f"用户: {msg['用户']}\n"
+            elif "客服" in msg:
+                dialogue_history[dialog_id] += f"客服: {msg['客服']}\n"
+
+            if "用户" not in msg:
+                continue
+
+            current_batch.append({
+                "dialog_id": dialog_id,
+                "user": msg["用户"],
+                "golden_response": item["text"][t_id + 1]["客服"] if t_id + 1 < len(item["text"]) and "客服" in item["text"][t_id + 1] else "",
+                "dialogue_history": dialogue_history[dialog_id]
+            })
+
+        if not current_batch:
+            continue
+
+        # ====================================================
+        # 1. Query
+        # ====================================================
+
+        print(f"[Turn {t_id}] Query Batch: {len(current_batch)}")
+
+        query_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+            query_messages.append(build_messages(query_prompt, build_query_input(memory, x["user"])))
+
+        query_outputs = parallel_inference(query_messages)
+
+        for x, out in zip(current_batch, query_outputs):
+            query_state = parse_llm_output(out)
+            x["query"] = query_state
+            memories[x["dialog_id"]] = update_issue_memory(memories[x["dialog_id"]], query_state)
+
+        # ====================================================
+        # 2. Trigger
+        # ====================================================
+
+        print(f"[Turn {t_id}] Trigger Batch")
+
+        trigger_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+            trigger_messages.append(build_messages(trigger_prompt, build_trigger_input(memory)))
+
+        trigger_outputs = parallel_inference(trigger_messages)
+
+        for x, out in zip(current_batch, trigger_outputs):
+            x["trigger"] = parse_llm_output(out)
+
+        # ====================================================
+        # 3. RAG
+        # ====================================================
+
+        print(f"[Turn {t_id}] RAG Batch")
+
+        rag_dialogs = []
+        rag_queries = []
+        rag_indices = []
+
+        for idx, x in enumerate(current_batch):
+            memory = memories[x["dialog_id"]]
+
+            if x["trigger"].get("evidence_mode") == "retrieve_new_evidence":
+                rag_dialogs.append(x["dialogue_history"])
+                rag_queries.append(memory["issue_state"]["current_issue"])
+                rag_indices.append(idx)
+            else:
+                x["evidence"] = copy.deepcopy(memory["evidence_state"]["active_cases"])
+
+        if rag_dialogs:
+            rag_outputs = batch_zefeng_rag(rag_dialogs, rag_queries)
+
+            for idx, evidence in zip(rag_indices, rag_outputs):
+                current_batch[idx]["evidence"] = evidence
+
+        for x in current_batch:
+            memories[x["dialog_id"]] = update_evidence_memory(
+                memories[x["dialog_id"]],
+                x["trigger"],
+                x.get("evidence", [])
+            )
+
+        # ====================================================
+        # 4. Determine PE Update
+        # ====================================================
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+            x["structure_update"] = need_structure_update(memory)
+
+        # ====================================================
+        # 5. Knowledge PE
+        # ====================================================
+
+        print(f"[Turn {t_id}] Knowledge PE Batch")
+
+        knowledge_messages = []
+        knowledge_items = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+
+            if not x["structure_update"]:
+                x["knowledge_state"] = copy.deepcopy(memory["evidence_state"]["knowledge_state"])
+                continue
+
+            if not memory["evidence_state"]["active_cases"]:
+                x["knowledge_state"] = {}
+                memory["evidence_state"]["knowledge_state"] = {}
+                memory["evidence_state"]["topic_structure"] = {}
+                continue
+
+            knowledge_messages.append(build_messages(knowledge_prompt, build_knowledge_input(memory)))
+            knowledge_items.append(x)
+
+        if knowledge_messages:
+            knowledge_outputs = parallel_inference(knowledge_messages)
+
+            for x, out in zip(knowledge_items, knowledge_outputs):
+                knowledge_state = parse_llm_output(out)
+                x["knowledge_state"] = knowledge_state
+                memories[x["dialog_id"]] = update_knowledge_memory(memories[x["dialog_id"]], knowledge_state)
+
+        # ====================================================
+        # 6. Difference-Guided Adaptive Refinement Batch
+        # ====================================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Topic Refinement Batch"
+       )
+
+        refinement_items = []
+
+        for x in current_batch:
+            memory = memories[
+                x["dialog_id"]
+            ]
+
+            if not x["structure_update"]:
+                x["topic_structure"] = copy.deepcopy(
+                    memory["evidence_state"]["topic_structure"]
+                )
+                continue
+
+            if not memory["evidence_state"]["knowledge_state"]:
+                x["topic_structure"] = {}
+                memory["evidence_state"]["topic_structure"] = {}
+                memories[x["dialog_id"]] = mark_pe_version(
+                    memory
+                )
+                continue
+
+            refinement_items.append(x)
+
+
+        if refinement_items:
+            run_refinement_pe_batch(
+                items=refinement_items,
+                memories=memories,
+                judgement_prompt=judgement_prompt,
+                refinement_prompt=refinement_prompt,
+                max_depth=max_refinement_depth
+            )
+        # ====================================================
+        # 7. Policy
+        # ====================================================
+
+        print(f"[Turn {t_id}] Policy Batch")
+
+        policy_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+            policy_messages.append(build_messages(policy_prompt, build_policy_input(memory, x["user"])))
+
+        policy_outputs = parallel_inference(policy_messages)
+
+        for x, out in zip(current_batch, policy_outputs):
+            policy_state = parse_llm_output(out)
+            x["policy"] = policy_state
+            memories[x["dialog_id"]] = update_interaction_memory(memories[x["dialog_id"]], policy_state)
+
+        # ====================================================
+        # 8. Response
+        # ====================================================
+
+        print(f"[Turn {t_id}] Response Batch")
+
+        response_messages = []
+
+        for x in current_batch:
+            memory = memories[x["dialog_id"]]
+            response_messages.append(build_messages(response_prompt, build_response_input(memory, x["user"])))
+
+        response_outputs = parallel_inference(response_messages)
+
+        for x, out in zip(current_batch, response_outputs):
+            x["response"] = parse_llm_output(out)
+
+            memories[x["dialog_id"]] = update_dialogue_memory(
+                memories[x["dialog_id"]],
+                x["user"],
+                x["golden_response"]
+            )
+
+            turn_result = {k: v for k, v in x.items() if k not in ["dialogue_history", "structure_update"]}
+            turn_result["turn_id"] = int(t_id / 2)
+            results[x["dialog_id"]]["turns"].append(turn_result)
+
+    # ========================================================
+    # Final Memory
+    # ========================================================
+
+    for dialog_id in data:
+        results[dialog_id]["final_memory"] = memories[dialog_id]
+
+    return results
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_path", required=True)
+    parser.add_argument("--output_path", required=True)
+    parser.add_argument("--max_dialogues", type=int, default=300)
+    parser.add_argument("--max_refinement_depth", type=int, default=4)
+    args = parser.parse_args()
+
+    with open(args.data_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data = dict(list(data.items())[:args.max_dialogues])
+
+    outputs = run_memory_agent_batch(
+        data,
+        max_refinement_depth=args.max_refinement_depth
+    )
+
+    write_json(args.output_path, outputs)
+    print(f"Saved {len(outputs)} dialogues to {args.output_path}")
+
+
+if __name__ == "__main__":
+    main()
