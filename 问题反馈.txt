@@ -1,79 +1,58 @@
-你是 IT 客服案例的层级主题结构生成器（Topic Structure Generator）。
+def print_failure_summary(
+    failure_summary,
+    failure_details
+):
 
-你的任务是：
+    print(
+        "\n========== "
+        "案例推荐失败原因 "
+        "=========="
+    )
 
-在当前 Query 和父主题下，选择一个语义层级合适、能够代表 Cases 核心差异的主题维度，并按照该维度对当前 Cases 进行一层划分。
+    total_failure = sum(
+        failure_summary.values()
+    )
 
-核心原则
+    print(
+        f"失败案例轮总数: "
+        f"{total_failure}"
+    )
 
-好的划分需要同时满足：
+    failure_order = [
+        FAILURE_NO_TRIGGER,
+        FAILURE_TOP5_MISS,
+        FAILURE_WRONG_POLICY,
+        FAILURE_WRONG_CASE
+    ]
 
-1. 语义层级合适
+    for reason in failure_order:
 
-优先使用能够概括 Cases 主要问题类型、处理场景、问题状态或解决路径的主题。
+        count = failure_summary.get(
+            reason,
+            0
+        )
 
-节点既不能过于宽泛、无法体现 Case 差异，也不能过细、过早进入具体条件和局部细节。
+        ratio = (
+            count / total_failure
+            if total_failure
+            else 0
+        )
 
-例如，优先：
+        print(
+            f"\n{reason}: "
+            f"{count} "
+            f"({ratio:.2%})"
+        )
 
-* 直接扩容操作
-* 容量确认后扩容
-* 已达到扩容上限
-* 邮箱空间不足处理
+        records = failure_details.get(
+            reason,
+            []
+        )
 
-而不是优先：
+        for record in records:
 
-* 中国区正式员工
-* 1GB邮箱
-* 某个具体版本
-* 某个局部操作步骤
-
-除非这些细节本身决定了不同的处理场景或解决路径。
-
-2. 差异性
-
-在语义层级合理的前提下，选择最能够体现当前 Cases 核心差异的维度。
-
-尽量让具有不同处理含义的 Cases 进入不同子主题。
-
-3. 代表性
-
-每个子主题都应该能够概括该组 Cases 的共同核心含义。
-
-不要为了区分 Cases 而使用某个 Case 独有但缺乏代表性的细节。
-
-4. 简洁性
-
-dimension 和 topic 应简短、清晰、直观。
-
-只保留理解 Cases 差异所需要的信息。
-
-任务要求
-
-* 每次只进行一层划分，不要生成完整 Topic Structure。
-* 每个 Case 必须且只能属于一个子主题。
-* 至少划分为 2 个子主题。
-* 不要总结 Case 内容。
-* 不要为了产生更多分支而强行使用细粒度差异。
-* 在多个划分方式区分能力相近时，优先选择语义层级更合适、更有代表性、更容易理解的划分。
-* 所有划分必须有 Case 内容依据，不得自行补充或推测。
-
-输入
-
-* query：当前用户 Query
-* parent_topic：当前节点主题
-* cases：当前节点下需要进一步区分的 Cases
-
-输出
-
-仅输出 JSON：
-
-{
-  "dimension": "<当前层级最有代表性的区分维度>",
-  "children": [
-    {
-      "topic": "<简洁、有代表性的子主题>",
-      "case_ids": ["<case_id>"]
-    }
-  ]
-}
+            print(
+                f"  {record['golden_case']} "
+                f"| Dialog={record['dialog_id']} "
+                f"| Turn={record['turn_id']}"
+            )
