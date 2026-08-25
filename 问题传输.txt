@@ -1,492 +1,173 @@
-import json
-import re
-import argparse
-from pathlib import Path
-
-
-# =========================
-# Utils
-# =========================
-
-KNOWLEDGE_POLICY = {
-    "ExplainedResponse",
-    "CaseRecommendation"
-}
-
-
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-
-def extract_case_ids(text):
-
-    if not text:
-        return []
-
-    return re.findall(
-        r"KT\d+",
-        text
-    )
-
-
-def get_pred_cases(policy):
-
-    cases = policy.get(
-        "case_id",
-        []
-    )
-
-    if isinstance(cases, str):
-        return [cases] if cases else []
-
-    return cases
-
-
-
-def rate(x):
-
-    return (
-        sum(x)/len(x)
-        if x else 0
-    )
-
-
-
-# =========================
-# Case Turn Evaluation
-# =========================
-
-def evaluate_case_turn(data):
-
-    total_case_turn = 0
-
-    # stage counters
-
-    trigger_hit = 0
-
-    top5_hit = 0
-    top3_hit = 0
-    top1_hit = 0
-
-    policy_hit = 0
-
-    selection_hit = 0
-
-
-    for dialog in data.values():
-
-        for turn in dialog["turns"]:
-
-
-            golden_cases = extract_case_ids(
-                turn.get(
-                    "golden_response",
-                    ""
-                )
-            )
-
-
-            # 只统计案例轮
-
-            if not golden_cases:
-                continue
-
-
-            total_case_turn += 1
-
-            golden_case = golden_cases[0]
-
-
-            trigger = turn["trigger"].get(
-                "trigger",
-                False
-            )
-
-
-            # =====================
-            # Trigger
-            # =====================
-
-            if not trigger:
-                continue
-
-
-            trigger_hit += 1
-
-
-            # =====================
-            # Retrieval
-            # =====================
-
-            retrieved = [
-                x.get("case_id","")
-                for x in turn.get(
-                    "evidence",
-                    []
-                )
-            ]
-
-
-            hit5 = golden_case in retrieved[:5]
-            hit3 = golden_case in retrieved[:3]
-            hit1 = golden_case in retrieved[:1]
-
-
-            if hit5:
-                top5_hit += 1
-
-            if hit3:
-                top3_hit += 1
-
-            if hit1:
-                top1_hit += 1
-
-
-
-            # 后续只建立在top5正确基础上
-
-            if not hit5:
-                continue
-
-
-            # =====================
-            # Policy
-            # =====================
-
-            label = turn["policy"].get(
-                "label",
-                ""
-            )
-
-
-            if label not in KNOWLEDGE_POLICY:
-                continue
-
-
-            policy_hit += 1
-
-
-
-            # =====================
-            # Case Selection
-            # =====================
-
-            pred_cases = get_pred_cases(
-                turn["policy"]
-            )
-
-
-            if golden_case in pred_cases:
-                selection_hit += 1
-
-
-
-    result = {
-
-        "案例轮数量":
-            total_case_turn,
-
-
-        "知识链路触发率":
-            trigger_hit / total_case_turn
-            if total_case_turn else 0,
-
-
-        "Top-5有效案例召回率":
-            top5_hit / trigger_hit
-            if trigger_hit else 0,
-
-
-        "Top-3有效案例召回率":
-            top3_hit / trigger_hit
-            if trigger_hit else 0,
-
-
-        "Top-1有效案例召回率":
-            top1_hit / trigger_hit
-            if trigger_hit else 0,
-
-
-        "知识型策略命中率":
-            policy_hit / top5_hit
-            if top5_hit else 0,
-
-
-        "案例选择准确率":
-            selection_hit / policy_hit
-            if policy_hit else 0,
-
-
-        "最终案例推荐准确率":
-            selection_hit / total_case_turn
-            if total_case_turn else 0
-    }
-
-
-    return result
-
-
-
-# =========================
-# All Turn Timing
-# =========================
-
-def evaluate_timing(data):
-
-    pred=[]
-    gold=[]
-
-
-    for dialog in data.values():
-
-        for turn in dialog["turns"]:
-
-
-            golden_case = (
-                len(
-                    extract_case_ids(
-                        turn.get(
-                            "golden_response",
-                            ""
-                        )
-                    )
-                ) > 0
-            )
-
-
-            policy_label = turn["policy"].get(
-                "label",
-                ""
-            )
-
-
-            predicted = (
-                policy_label
-                in KNOWLEDGE_POLICY
-            )
-
-
-            gold.append(
-                golden_case
-            )
-
-            pred.append(
-                predicted
-            )
-
-
-
-    tp=sum(
-        p and g
-        for p,g in zip(pred,gold)
-    )
-
-    fp=sum(
-        p and not g
-        for p,g in zip(pred,gold)
-    )
-
-    fn=sum(
-        (not p) and g
-        for p,g in zip(pred,gold)
-    )
-
-
-
-    precision = (
-        tp/(tp+fp)
-        if tp+fp else 0
-    )
-
-    recall = (
-        tp/(tp+fn)
-        if tp+fn else 0
-    )
-
-    f1 = (
-        2*precision*recall/(precision+recall)
-        if precision+recall else 0
-    )
-
-
-    return {
-
-        "推荐时机Precision":
-            precision,
-
-        "推荐时机Recall":
-            recall,
-
-        "推荐时机F1":
-            f1,
-
-
-        "过早推荐率":
-            fp/(tp+fp)
-            if tp+fp else 0,
-
-
-        "漏推荐率":
-            fn/(tp+fn)
-            if tp+fn else 0
-
-    }
-
-
-
-# =========================
-# Dialogue Level
-# =========================
-
-def evaluate_dialogue(data):
-
-    success=[]
-
-    golden_first=[]
-    pred_first=[]
-
-
-    for dialog in data.values():
-
-        golden_cases=set()
-        predicted_cases=set()
-
-        g_turn=None
-        p_turn=None
-
-
-        for turn in dialog["turns"]:
-
-
-            g_cases=extract_case_ids(
-                turn.get(
-                    "golden_response",
-                    ""
-                )
-            )
-
-
-            for c in g_cases:
-
-                golden_cases.add(c)
-
-                if g_turn is None:
-                    g_turn=turn["turn_id"]
-
-
-
-            p_cases=get_pred_cases(
-                turn["policy"]
-            )
-
-
-            for c in p_cases:
-
-                predicted_cases.add(c)
-
-                if p_turn is None:
-                    p_turn=turn["turn_id"]
-
-
-
-        success.append(
-            len(
-                golden_cases &
-                predicted_cases
-            ) > 0
-        )
-
-
-        if g_turn is not None:
-            golden_first.append(
-                g_turn
-            )
-
-        if p_turn is not None:
-            pred_first.append(
-                p_turn
-            )
-
-
-
-    return {
-
-        "对话成功率":
-            rate(success),
-
-        "Golden案例首次推荐平均轮数":
-            rate(golden_first),
-
-        "Predicted案例首次推荐平均轮数":
-            rate(pred_first)
-
-    }
-
-
-
-# =========================
-# Main
-# =========================
-
-def main():
-
-    parser=argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--input",
-        required=True
-    )
-
-    args=parser.parse_args()
-
-
-    data=load_json(
-        args.input
-    )
-
-    # data = dict(list(data.items())[:30])
-
-    print("\n========== 案例轮指标 ==========")
-
-    case_result=evaluate_case_turn(data)
-
-    for k,v in case_result.items():
-
-        if isinstance(v,float):
-            print(
-                f"{k}: {v:.4f}"
-            )
-        else:
-            print(
-                f"{k}: {v}"
-            )
-
-
-    print("\n========== 所有轮推荐时机 ==========")
-
-    timing=evaluate_timing(data)
-
-    for k,v in timing.items():
-
-        print(
-            f"{k}: {v:.4f}"
-        )
-
-
-    print("\n========== 对话级指标 ==========")
-
-    dialogue=evaluate_dialogue(data)
-
-    for k,v in dialogue.items():
-
-        print(
-            f"{k}: {v:.4f}"
-        )
-
-
-
-if __name__=="__main__":
-
-    main()
+      {
+        "turn_id": 1,
+        "dialog_id": "220601730",
+        "user": "因为员工为新员工，第一次登录，代修改他也没法修改。\n没发审批。",
+        "golden_response": "[案例链接: KT00071662]。\n这个是操作案例。",
+        "dialogue_history": "用户: 你好，请问有个链接代别人修改电话号码，不是本人审批的是哪个链接。\n客服: 稍等。\n用户: 因为员工为新员工，第一次登录，代修改他也没法修改。\n没发审批。\n",
+        "query": {
+          "query_mode": "refine",
+          "query_text": "非本人修改电话号码的审批链接，适用于新员工首次登录无法自行修改的情况",
+          "reason": "用户补充了新员工首次登录无法自行修改电话号码的限制条件"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 中提供的链接和流程不完全匹配用户需求，需重新检索更具体的审批链接"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00253420",
+            "title": "号码修改",
+            "keywords": [
+              "代他人修改",
+              "手机号",
+              "审批"
+            ],
+            "content": "找同事协助修改一下手机号即可https://his.huawei.com/me/#/ModifyOthers这个链接，代他人修改通讯录，提交完成手机端审批后等待24小时一个工作日同步即可"
+          },
+          {
+            "case_id": "KT00071662",
+            "title": "代别人修改通讯录",
+            "keywords": [
+              "代人修改",
+              "通讯录",
+              "审批"
+            ],
+            "content": "目前用户中心处于安全的考虑，修改“手机号”或“系统验证手机号”，取消“邮箱”接收验证码方式，增加使用iToken接收验证码，对于代人修改通讯录，增加了对登录人的身份验证；\n1.登录人既有“手机”又有“系统验证手机号”，身份验证弹框默认显示手机号验证，也可切换选择“iToken”验证\n2.登录人只有“手机”或“系统验证手机号”，身份验证弹框默认显示手机号验证，也可切换选择“iToken”验证\n3.登录人“手机”、“系统验证手机号”都没有，直接弹出提示信息：手机号无法使用，请同事“代为修改通讯录”或联系“IT热线”\n【对被修改人的修改】\n备注：由于被修改人无“手机”和“系统验证手机号”时，是免批的，有安全风险；安全组要求，增加审批环节\n1.被修改人无“手机”和“系统验证手机号”时，修改手机号，增加“数据主题审批”环节，\n选“是”，被修改人会收到W3待办，需要被修改人审批通过才生效。\n选“否”，直接主管会收到W3待办，需要直接主管审批通过才生效。\n2.若被修改人有“手机”或“系统验证手机号”，被修改人会收到W3待办，需被修改人审批同意才生效。\n3.秘书帮她的领导修改通讯录信息，免审批。\n4.华为总机帮用户修改通讯录，免审批。\n【对公共邮箱帐号的修改】\n1.若登录人是公共邮箱帐号的责任人，修改公共邮箱帐号的通讯录，免审批\n2.若登录人非公共邮箱帐号的责任人，修改公共邮箱帐号的通讯录，公共邮箱帐号的责任人会收到W3待办，需帐号责任人审批同意才生效\n【对被修改人“邮箱显示名”的修改】\n1.被修改人修改“邮箱显示名”，需被修改人审批同意才生效\n2.被修改人修改“邮箱显示名”，若界面修改，无法满足被修改人需求的时候，请联系华为总机 hFW0391 处理\n【对公共邮箱帐号“邮箱显示名”的修改】\n1.责任人登录，去修改公共邮箱帐号“邮箱显示名”，可按项目意愿修改，免审批\n2.非责任人登录，去修改公共邮箱帐号“邮箱显示名”，可按项目意愿修改，需公共邮箱帐号的责任人审批同意才生效\n【两欧地区人员通讯录修改】\n1.  华为总机可以修改两欧地区人员的通讯录，邮箱显示名等信息，免审批\n2.  自然人无权限修改两欧地区人员的通讯录\n1、登录：https://his.huawei.com/me/#/Person\n在用户中心，点击代人修改通讯录\n选择w3账号，输入待修改人的w3账号\n填好修改信息，点击提交"
+          },
+          {
+            "case_id": "KT00334029",
+            "title": "如何代人修改手机号和邮箱",
+            "keywords": [
+              "代人修改手机号",
+              "安全验证"
+            ],
+            "content": "用户的W3手机号无法自助修改，需同事代为修改的情况\n1.进入代修改链接https://his.huawei.com/me/#/ModifyOthers/Modify\n2.输入需修改的账号进入信息界面\n3.修改手机号后点击确认-提交\n4.进行安全验证后完成修改"
+          },
+          {
+            "case_id": "KT00290005",
+            "title": "新员工无手机号码如何添加手机号码",
+            "keywords": [
+              "新员工",
+              "添加手机号",
+              "代他人修改"
+            ],
+            "content": "一、问题现象\n问题总述：新员工无手机号码如何添加手机号码。\n报错信息和截图：\n二、原因分析\n原因总述：入职时未录入手机号码，无法双因子认证。\n三、解决方案\n步骤：在用户中心代他人修改通讯录入口添加手机号码，数据主体选择“否”，输入直接主管工号审批。\nLink：https://his.huawei.com/me/#/ModifyOthers"
+          },
+          {
+            "case_id": "KT00012171",
+            "title": "WeLink手机端如何修改电话号码",
+            "keywords": [
+              "WeLink",
+              "修改手机号"
+            ],
+            "content": "如何在手机端修改WeLink电话号码\n打开WeLink--点击左上角的头像--进入HR服务模块点击“我的信息”--点击“手机”--添加/编辑手机号码即可。\n修改后若显示还是旧号码尝试退出重新登录welink\n【温馨提示】修改后若显示还是旧号码，可尝试退出welink再重新登录。"
+          }
+        ],
+        "topic_structure": {
+          "query": "非本人修改电话号码的审批链接，适用于新员工首次登录无法自行修改的情况",
+          "topic": "非本人修改电话号码的审批链接，适用于新员工首次登录无法自行修改的情况",
+          "case_ids": [
+            "KT00253420",
+            "KT00071662",
+            "KT00334029",
+            "KT00290005",
+            "KT00012171"
+          ],
+          "leaf": false,
+          "children": [
+            {
+              "topic": "需要审批的代他人修改手机号场景",
+              "case_ids": [
+                "KT00071662",
+                "KT00290005"
+              ],
+              "leaf": false,
+              "children": [
+                {
+                  "topic": "新员工首次添加手机号需主管审批",
+                  "case_ids": [
+                    "KT00290005"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00290005"
+                },
+                {
+                  "topic": "非新员工代他人修改通讯录的审批流程",
+                  "case_ids": [
+                    "KT00071662"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00071662"
+                }
+              ],
+              "dimension": "是否为新员工首次添加手机号"
+            },
+            {
+              "topic": "无需审批或通过其他方式直接修改的场景",
+              "case_ids": [
+                "KT00253420",
+                "KT00334029",
+                "KT00012171"
+              ],
+              "leaf": false,
+              "children": [
+                {
+                  "topic": "需要通过审批链接代他人修改的场景",
+                  "case_ids": [
+                    "KT00253420",
+                    "KT00334029"
+                  ],
+                  "leaf": false,
+                  "children": [
+                    {
+                      "topic": "提交后需等待24小时同步",
+                      "case_ids": [
+                        "KT00253420"
+                      ],
+                      "leaf": true,
+                      "children": [],
+                      "case_id": "KT00253420"
+                    },
+                    {
+                      "topic": "修改后无需额外等待",
+                      "case_ids": [
+                        "KT00334029"
+                      ],
+                      "leaf": true,
+                      "children": [],
+                      "case_id": "KT00334029"
+                    }
+                  ],
+                  "dimension": "是否需要等待同步时间"
+                },
+                {
+                  "topic": "无需审批，直接在WeLink手机端自行修改的场景",
+                  "case_ids": [
+                    "KT00012171"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00012171"
+                }
+              ],
+              "dimension": "是否通过审批流程"
+            }
+          ],
+          "dimension": "是否需要审批"
+        },
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [
+            "KT00290005"
+          ],
+          "reason": "用户明确提到是新员工首次登录且无法自行修改，符合案例KT00290005的适用场景。"
+        },
+        "response": {
+          "response": "针对新员工首次登录无法自行修改电话号码的情况，您可以使用以下链接进行代他人修改：https://his.huawei.com/me/#/ModifyOthers。在操作时，请选择数据主体审批为“否”，并输入其直接主管的工号以完成审批流程。"
+        }
+      },
