@@ -1,86 +1,2040 @@
-## How to Use Topic Structure
+from __future__ import annotations
 
-topic_structure 是 active_cases 的判别性摘要，不替代完整 Case 信息。
+import argparse
+import copy
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-使用原则：
-1. 先利用 topic_structure 快速理解 Top-K Cases 的关键区别；
-2. 再结合 Query 和 active_cases 原文判断具体 Case 是否值得使用；
-3. Topic Structure 中存在多个候选分支，不代表必须 AskClarification 或 AskMissingSlot；
-4. 如果 Query 已明显对应某条 Topic Path，且对应 Case 原文能够支持处理，应直接考虑 CaseRecommendation 或 ExplainedResponse；
-5. 只有当不同 Topic Paths 对应不同处理动作，且当前 Query 确实缺少区分它们所必需的信息时，才进行询问。
-
-不要把 topic_structure 当作额外的不确定性来源。
-它的作用是帮助理解 Case 差异，而不是提高推荐门槛。
+from utils.scu_rag import batch_zefeng_rag
+from utils.qwen_api_multi import parallel_inference
 
 
+# ============================================================
+# Utils
+# ============================================================
+
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+
+    if not isinstance(text, str):
+        return {}
+
+    text = text.strip()
+
+    if not text:
+        return {}
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # 兼容 ```json ... ```
+    if "```json" in text:
+        try:
+            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    if "```" in text:
+        try:
+            text = text.split("```", 1)[1].split("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    return {}
 
 
+def parse_llm_output(output):
+    """
+    兼容 parallel_inference 返回：
+    {
+        "response": "..."
+    }
 
-## Core Constraints
+    response 内部可能又是 JSON string。
+    """
+    parsed = parse_json(output)
 
-1. Query-conditioned representation
-Topic Structure 不是对 Case 原文做完整分类，而是在当前 Query 条件下，为每个 Case 选择最有决策价值的主题路径。
-一个 Case 即使包含多个方面，也只能根据当前 Query 最相关、最能区别于其他 Case 的信息进入一个子节点。
+    if not parsed:
+        return {}
 
-2. Exclusive assignment
-同一父节点下，每个 Case 必须且只能属于一个 child：
-- sibling 的 case_ids 不得重叠；
-- 所有 children 的 case_ids 并集必须等于 parent.case_ids；
-- 不得遗漏任何 Case。
+    if "response" not in parsed:
+        return parsed
 
-3. Query-relevant assignment
-Case 应进入哪个 child，不能仅根据标题、主要内容或 Case 的一般主题判断。
-必须优先依据：
-- 当前 Query 明确询问的需求；
-- Case 中与该需求直接相关的内容；
-- 该内容相对于其他 Cases 的区别。
+    return parse_json(parsed["response"])
 
-例如：
-Query = “外网权限到期后如何重新申请”
-某 Case 同时包含“首次申请、到期重新申请、提前延期”，
-该 Case 应按照“到期重新申请”这一与 Query 最相关的 facet 进行划分，
-而不是按照 Case 的标题或整体主题划入“首次申请”。
 
-4. Diversity-guided dimension
-对于 case_ids 数量 > 1 的节点，选择一个且仅一个 discriminative_dimension。
-该维度必须同时满足：
-- 与当前 Query 相关；
-- 能最大程度区分当前节点中的 Cases；
-- 区分依据能够从 Case 原文中找到证据。
+def prompt_read(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}"
+        )
 
-不要选择虽然能够区分 Cases、但与当前 Query 决策无关的维度。
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
 
-5. Recursive refinement
-任何 case_ids 数量 > 1 的 child 都必须继续生成下一层 discriminative_dimension 和 children。
-只有 case_ids 数量 = 1 时才能成为 leaf。
 
-因此最终必须满足：
-每个输入 Case 都存在且仅存在一条从 root 到 leaf 的 Topic Path，
-并且每个 leaf 只对应一个 Case。
+def write_json(
+    path: str | Path,
+    data: Any
+) -> None:
 
-6. Common Anchor
-common_anchor 是 Query 与所有候选 Cases 能够共享的最具体父主题。
+    path = Path(path)
 
-它不要求等于 Query。
-如果 Query 比所有 Cases 的共同主题更具体，应向上寻找能够覆盖 Query 和全部 Cases 的最近共同父主题。
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-不要直接复制 Query 作为 common_anchor，除非 Query 本身确实能够覆盖全部 Cases。
+    path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
 
-## Generation Procedure
 
-Step 1. 找到 Query 与全部 Cases 的最近 Common Anchor。
+def build_messages(
+    system_prompt,
+    data
+):
+    return [
+        {
+            "role": "system",
+            "content": system_prompt
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                data,
+                ensure_ascii=False
+            )
+        }
+    ]
 
-Step 2. 对当前节点中的每个 Case，只提取与 Query 和当前节点相关的 discriminative facet。
 
-Step 3. 基于这些 facets 生成多个候选 discriminative dimensions。
+def get_case_id(case: Dict) -> str:
+    """
+    根据你的 RAG 数据格式取 case_id。
+    """
+    return str(
+        case.get("case_id", "")
+    ).strip()
 
-Step 4. 选择 Query relevance 高且 Case diversity 最大的一个 dimension。
 
-Step 5. 在该 dimension 下，每个 Case 只能进入一个最符合当前 Query 的 child。
+def case_map_from_cases(
+    cases: List[Dict]
+) -> Dict[str, Dict]:
 
-Step 6. 检查：
-- 是否遗漏 Case；
-- 是否重复分配 Case；
-- 是否存在 case_ids > 1 但没有继续拆分的节点。
+    result = {}
 
-Step 7. 对所有 case_ids > 1 的节点递归执行 Step 2–6，直到每个 leaf 只有一个 Case。
+    for case in cases:
+        case_id = get_case_id(case)
+
+        if case_id:
+            result[case_id] = case
+
+    return result
+
+
+# ============================================================
+# Memory
+# ============================================================
+
+def init_memory():
+
+    return {
+
+        "issue_state": {
+            "current_issue": "",
+            "query_history": []
+        },
+
+        "dialog_state": {
+            "compressed_history": []
+        },
+
+        "evidence_state": {
+            "active_cases": [],
+
+            # 新增：
+            # 仅作为 Policy 的辅助输入
+            "topic_structure": {}
+        },
+
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": []
+        }
+    }
+
+
+# ============================================================
+# Memory Update
+# ============================================================
+
+def update_issue_memory(
+    memory,
+    query_state
+):
+
+    mode = query_state.get(
+        "query_mode",
+        "none"
+    )
+
+    query = query_state.get(
+        "query_text",
+        ""
+    )
+
+    if mode == "rewrite":
+
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+    elif mode == "refine":
+
+        memory["issue_state"][
+            "current_issue"
+        ] = query
+
+        memory["issue_state"][
+            "query_history"
+        ].append(query)
+
+    elif mode == "reuse":
+        pass
+
+    elif mode == "none":
+        pass
+
+    return memory
+
+
+def update_evidence_memory(
+    memory,
+    trigger_state,
+    evidence,
+    topic_structure=None
+):
+
+    mode = trigger_state.get(
+        "evidence_mode",
+        "no_evidence_needed"
+    )
+
+    # 只有重新检索时才更新 evidence 和 structure
+    if mode == "retrieve_new_evidence":
+
+        memory["evidence_state"][
+            "active_cases"
+        ] = evidence
+
+        memory["evidence_state"][
+            "topic_structure"
+        ] = topic_structure or {}
+
+    # reuse / none：
+    # active_cases 和 topic_structure 都保持原样
+
+    return memory
+
+
+def update_interaction_memory(
+    memory,
+    policy_state
+):
+
+    label = policy_state.get(
+        "label",
+        ""
+    )
+
+    memory["interaction_state"][
+        "last_action"
+    ] = label
+
+    memory["interaction_state"][
+        "action_history"
+    ].append(label)
+
+    if label in [
+        "AskMissingSlot",
+        "AskClarification"
+    ]:
+
+        memory["interaction_state"][
+            "stage"
+        ] = "Clarification"
+
+    elif label in [
+        "ExplainedResponse",
+        "CaseRecommendation"
+    ]:
+
+        memory["interaction_state"][
+            "stage"
+        ] = "Resolution"
+
+    elif label == "Handoff":
+
+        memory["interaction_state"][
+            "stage"
+        ] = "End"
+
+    return memory
+
+
+def update_dialogue_memory(
+    memory,
+    user,
+    response
+):
+
+    history = memory[
+        "dialog_state"
+    ][
+        "compressed_history"
+    ]
+
+    history.append(
+        {
+            "user": user,
+            "assistant": response
+        }
+    )
+
+    memory[
+        "dialog_state"
+    ][
+        "compressed_history"
+    ] = history[-5:]
+
+    return memory
+
+
+# ============================================================
+# Input Builder
+# ============================================================
+
+def build_query_input(
+    memory,
+    user
+):
+
+    return {
+
+        "issue_state":
+            memory["issue_state"],
+
+        "dialog_state":
+            memory["dialog_state"],
+
+        "current": {
+            "u": user
+        }
+    }
+
+
+def build_trigger_input(
+    memory
+):
+    """
+    关键：
+    Trigger 完全保持原来的输入。
+
+    不允许 topic_structure 泄露到 Trigger。
+    """
+
+    return {
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state": {
+            "active_cases":
+                memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ]
+        },
+
+        "dialog_state":
+            memory["dialog_state"],
+    }
+
+
+def build_policy_input(
+    memory,
+    user
+):
+    """
+    只有 Policy 新增 topic_structure。
+    """
+
+    return {
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state": {
+
+            # 原始 case 完整保留
+            "active_cases":
+                memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ],
+
+            # 新增辅助信息
+            "topic_structure":
+                memory[
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+        },
+
+        "interaction_state":
+            memory[
+                "interaction_state"
+            ],
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ],
+
+        "current": {
+            "u": user
+        }
+    }
+
+
+def build_response_input(
+    memory,
+    user
+):
+    """
+    Response 也保持旧输入。
+    不允许看到 topic_structure。
+    """
+
+    return {
+
+        "issue_state":
+            memory["issue_state"],
+
+        "evidence_state": {
+            "active_cases":
+                memory[
+                    "evidence_state"
+                ][
+                    "active_cases"
+                ]
+        },
+
+        "interaction_state":
+            memory[
+                "interaction_state"
+            ],
+
+        "dialog_state":
+            memory[
+                "dialog_state"
+            ],
+
+        "current": {
+
+            "u": user,
+
+            "policy":
+                memory[
+                    "interaction_state"
+                ][
+                    "last_action"
+                ]
+        },
+    }
+
+
+# ============================================================
+# Topic Structure
+# ============================================================
+
+def build_topic_split_input(
+    query: str,
+    cases: List[Dict],
+    parent_topic: str,
+    depth: int
+):
+    """
+    每一次只做当前节点的一次划分。
+
+    不让模型一次生成完整树。
+    """
+
+    return {
+
+        "query": query,
+
+        "parent_topic": parent_topic,
+
+        "depth": depth,
+
+        "cases": cases
+    }
+
+
+def make_leaf(
+    case_id: str,
+    topic: Optional[str] = None
+):
+
+    return {
+
+        "topic": topic or case_id,
+
+        "case_ids": [
+            case_id
+        ],
+
+        "leaf": True,
+
+        "case_id": case_id,
+
+        "children": []
+    }
+
+
+def normalize_split(
+    split_result: Dict,
+    expected_case_ids: List[str]
+) -> Optional[Dict]:
+    """
+    检查模型生成的 partition 是否合法。
+
+    要求：
+    1. 至少分成两个 group
+    2. 每个 case 必须且只能出现一次
+    3. 不允许出现 parent 中不存在的 case
+    """
+
+    if not isinstance(
+        split_result,
+        dict
+    ):
+        return None
+
+    dimension = str(
+        split_result.get(
+            "dimension",
+            ""
+        )
+    ).strip()
+
+    children = split_result.get(
+        "children",
+        []
+    )
+
+    if not dimension:
+        return None
+
+    if not isinstance(
+        children,
+        list
+    ):
+        return None
+
+    normalized_children = []
+
+    observed = []
+
+    expected_set = set(
+        expected_case_ids
+    )
+
+    for child in children:
+
+        if not isinstance(
+            child,
+            dict
+        ):
+            continue
+
+        topic = str(
+            child.get(
+                "topic",
+                ""
+            )
+        ).strip()
+
+        case_ids = child.get(
+            "case_ids",
+            []
+        )
+
+        if not topic:
+            continue
+
+        if not isinstance(
+            case_ids,
+            list
+        ):
+            continue
+
+        clean_ids = []
+
+        for case_id in case_ids:
+
+            case_id = str(
+                case_id
+            ).strip()
+
+            if (
+                case_id
+                and
+                case_id in expected_set
+            ):
+                clean_ids.append(
+                    case_id
+                )
+
+        # 去重
+        clean_ids = list(
+            dict.fromkeys(
+                clean_ids
+            )
+        )
+
+        if not clean_ids:
+            continue
+
+        normalized_children.append(
+            {
+                "topic": topic,
+                "case_ids": clean_ids
+            }
+        )
+
+        observed.extend(
+            clean_ids
+        )
+
+    # 至少需要两个分支
+    if len(
+        normalized_children
+    ) < 2:
+        return None
+
+    # case 必须覆盖且只能出现一次
+    if sorted(observed) != sorted(
+        expected_case_ids
+    ):
+        return None
+
+    if len(observed) != len(
+        set(observed)
+    ):
+        return None
+
+    return {
+
+        "dimension": dimension,
+
+        "children":
+            normalized_children
+    }
+
+
+def generate_topic_structure(
+    query: str,
+    cases: List[Dict],
+    topic_prompt: str,
+    max_depth: int = 8,
+    max_retry: int = 2
+):
+    """
+    Query-conditioned hierarchical partition.
+
+    规则：
+
+    Query = root
+
+    当前节点 case 数量：
+        == 1 -> leaf
+        > 1  -> 找最有区分性的 dimension
+                 ↓
+               partition
+                 ↓
+            对多 case 子节点递归
+
+    理想停止条件：
+        每个 leaf 只有一个 case
+
+    max_depth 只是防止模型异常导致死循环，
+    不是理论上的停止条件。
+    """
+
+    if not cases:
+
+        return {
+            "query": query,
+            "topic": query,
+            "case_ids": [],
+            "leaf": True,
+            "children": []
+        }
+
+    case_map = case_map_from_cases(
+        cases
+    )
+
+    case_ids = list(
+        case_map.keys()
+    )
+
+    if not case_ids:
+
+        return {
+            "query": query,
+            "topic": query,
+            "case_ids": [],
+            "leaf": True,
+            "children": []
+        }
+
+    # root
+    root = {
+
+        "query": query,
+
+        "topic": query,
+
+        "case_ids": case_ids,
+
+        "leaf":
+            len(case_ids) == 1,
+
+        "children": []
+    }
+
+    if len(case_ids) == 1:
+
+        root[
+            "case_id"
+        ] = case_ids[0]
+
+        return root
+
+    # queue:
+    # (node_reference, case_ids, depth)
+    queue = [
+        (
+            root,
+            case_ids,
+            0
+        )
+    ]
+
+    while queue:
+
+        node, node_case_ids, depth = (
+            queue.pop(0)
+        )
+
+        # 正常停止
+        if len(
+            node_case_ids
+        ) == 1:
+
+            node["leaf"] = True
+            node["case_id"] = (
+                node_case_ids[0]
+            )
+            node["children"] = []
+
+            continue
+
+        # safety stop
+        if depth >= max_depth:
+
+            print(
+                "[TopicStructure Warning] "
+                f"max_depth reached: "
+                f"{node_case_ids}"
+            )
+
+            # fallback:
+            # 为避免死循环，直接展开成 case leaves
+            node["leaf"] = False
+
+            node["dimension"] = (
+                "case distinction"
+            )
+
+            node["children"] = [
+                make_leaf(case_id)
+                for case_id
+                in node_case_ids
+            ]
+
+            continue
+
+        node_cases = [
+            case_map[case_id]
+            for case_id
+            in node_case_ids
+        ]
+
+        split_input = (
+            build_topic_split_input(
+                query=query,
+                cases=node_cases,
+                parent_topic=node[
+                    "topic"
+                ],
+                depth=depth
+            )
+        )
+
+        valid_split = None
+
+        # 如果划分不合法，允许重新生成
+        for attempt in range(
+            max_retry + 1
+        ):
+
+            current_input = copy.deepcopy(
+                split_input
+            )
+
+            if attempt > 0:
+
+                current_input[
+                    "retry_instruction"
+                ] = (
+                    "Previous partition was invalid. "
+                    "Every input case_id must appear "
+                    "exactly once, and the cases must "
+                    "be divided into at least two "
+                    "meaningful groups."
+                )
+
+            messages = build_messages(
+                topic_prompt,
+                current_input
+            )
+
+            output = parallel_inference(
+                [messages]
+            )[0]
+
+            split_result = (
+                parse_llm_output(
+                    output
+                )
+            )
+
+            valid_split = (
+                normalize_split(
+                    split_result,
+                    node_case_ids
+                )
+            )
+
+            if valid_split:
+                break
+
+        if not valid_split:
+
+            print(
+                "[TopicStructure Warning] "
+                "failed to obtain valid split for "
+                f"{node_case_ids}"
+            )
+
+            # 防止整个程序崩溃
+            # fallback 为单 case leaves
+            node["leaf"] = False
+
+            node["dimension"] = (
+                "case distinction"
+            )
+
+            node["children"] = [
+                make_leaf(case_id)
+                for case_id
+                in node_case_ids
+            ]
+
+            continue
+
+        node["leaf"] = False
+
+        node["dimension"] = (
+            valid_split[
+                "dimension"
+            ]
+        )
+
+        node["children"] = []
+
+        for child_info in (
+            valid_split[
+                "children"
+            ]
+        ):
+
+            child_case_ids = (
+                child_info[
+                    "case_ids"
+                ]
+            )
+
+            child_node = {
+
+                "topic":
+                    child_info[
+                        "topic"
+                    ],
+
+                "case_ids":
+                    child_case_ids,
+
+                "leaf":
+                    len(
+                        child_case_ids
+                    ) == 1,
+
+                "children": []
+            }
+
+            if len(
+                child_case_ids
+            ) == 1:
+
+                child_node[
+                    "case_id"
+                ] = (
+                    child_case_ids[0]
+                )
+
+            else:
+
+                queue.append(
+                    (
+                        child_node,
+                        child_case_ids,
+                        depth + 1
+                    )
+                )
+
+            node[
+                "children"
+            ].append(
+                child_node
+            )
+
+    return root
+
+
+# ============================================================
+# Topic Structure Batch
+# ============================================================
+
+def generate_topic_structures_batch(
+    items: List[Dict],
+    topic_prompt: str
+):
+    """
+    当前先保证逻辑正确。
+
+    items:
+    [
+        {
+            "query": ...,
+            "cases": ...
+        }
+    ]
+
+    后续如果 Topic Structure 成为主要耗时，
+    再把每层 recursive node 做真正 parallel batch。
+    """
+
+    outputs = []
+
+    for idx, item in enumerate(
+        items
+    ):
+
+        query = item.get(
+            "query",
+            ""
+        )
+
+        cases = item.get(
+            "cases",
+            []
+        )
+
+        print(
+            f"[TopicStructure] "
+            f"{idx + 1}/{len(items)} "
+            f"query={query}, "
+            f"cases={len(cases)}"
+        )
+
+        structure = (
+            generate_topic_structure(
+                query=query,
+                cases=cases,
+                topic_prompt=topic_prompt
+            )
+        )
+
+        outputs.append(
+            structure
+        )
+
+    return outputs
+
+
+# ============================================================
+# Single Dialogue Running
+# ============================================================
+
+def run_memory_agent(
+    data
+):
+
+    query_prompt = prompt_read(
+        Path(
+            "prompts/query.prompt"
+        )
+    )
+
+    trigger_prompt = prompt_read(
+        Path(
+            "prompts/trigger.prompt"
+        )
+    )
+
+    topic_prompt = prompt_read(
+        Path(
+            "prompts/topic.prompt"
+        )
+    )
+
+    policy_prompt = prompt_read(
+        Path(
+            "prompts/policy.prompt"
+        )
+    )
+
+    response_prompt = prompt_read(
+        Path(
+            "prompts/response.prompt"
+        )
+    )
+
+    results = {}
+
+    for dialog_id, item in (
+        data.items()
+    ):
+
+        memory = init_memory()
+
+        turns = []
+
+        dialogue_history = ""
+
+        for t_id, msg in enumerate(
+            item["text"]
+        ):
+
+            if "用户" not in msg:
+
+                dialogue_history += (
+                    f"客服: "
+                    f"{msg['客服']}\n"
+                )
+
+                continue
+
+            user = msg["用户"]
+
+            dialogue_history += (
+                f"用户: {user}\n"
+            )
+
+            # ==============================================
+            # 1. Query
+            # ==============================================
+
+            query_input = (
+                build_query_input(
+                    memory,
+                    user
+                )
+            )
+
+            query_messages = (
+                build_messages(
+                    query_prompt,
+                    query_input
+                )
+            )
+
+            query_output = (
+                parallel_inference(
+                    [query_messages]
+                )[0]
+            )
+
+            query_state = (
+                parse_llm_output(
+                    query_output
+                )
+            )
+
+            memory = (
+                update_issue_memory(
+                    memory,
+                    query_state
+                )
+            )
+
+            # ==============================================
+            # 2. Trigger
+            # ==============================================
+
+            trigger_input = (
+                build_trigger_input(
+                    memory
+                )
+            )
+
+            trigger_messages = (
+                build_messages(
+                    trigger_prompt,
+                    trigger_input
+                )
+            )
+
+            trigger_output = (
+                parallel_inference(
+                    [trigger_messages]
+                )[0]
+            )
+
+            trigger_state = (
+                parse_llm_output(
+                    trigger_output
+                )
+            )
+
+            # ==============================================
+            # 3. Evidence + Topic Structure
+            # ==============================================
+
+            topic_structure = None
+
+            if (
+                trigger_state.get(
+                    "evidence_mode"
+                )
+                ==
+                "retrieve_new_evidence"
+            ):
+
+                query = (
+                    memory[
+                        "issue_state"
+                    ][
+                        "current_issue"
+                    ]
+                )
+
+                evidence = (
+                    batch_zefeng_rag(
+                        [
+                            dialogue_history
+                        ],
+                        [
+                            query
+                        ]
+                    )[0]
+                )
+
+                # 唯一新增步骤
+                topic_structure = (
+                    generate_topic_structure(
+                        query=query,
+                        cases=evidence,
+                        topic_prompt=topic_prompt
+                    )
+                )
+
+            else:
+
+                evidence = (
+                    memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+                )
+
+            memory = (
+                update_evidence_memory(
+                    memory,
+                    trigger_state,
+                    evidence,
+                    topic_structure
+                )
+            )
+
+            # ==============================================
+            # 4. Policy
+            # ==============================================
+
+            policy_input = (
+                build_policy_input(
+                    memory,
+                    user
+                )
+            )
+
+            policy_messages = (
+                build_messages(
+                    policy_prompt,
+                    policy_input
+                )
+            )
+
+            policy_output = (
+                parallel_inference(
+                    [policy_messages]
+                )[0]
+            )
+
+            policy_state = (
+                parse_llm_output(
+                    policy_output
+                )
+            )
+
+            memory = (
+                update_interaction_memory(
+                    memory,
+                    policy_state
+                )
+            )
+
+            # ==============================================
+            # 5. Response
+            # ==============================================
+
+            response_input = (
+                build_response_input(
+                    memory,
+                    user
+                )
+            )
+
+            response_messages = (
+                build_messages(
+                    response_prompt,
+                    response_input
+                )
+            )
+
+            response_output = (
+                parallel_inference(
+                    [response_messages]
+                )[0]
+            )
+
+            response = (
+                parse_llm_output(
+                    response_output
+                )
+            )
+
+            golden_response = ""
+
+            if (
+                t_id + 1
+                <
+                len(item["text"])
+            ):
+
+                golden_response = (
+                    item[
+                        "text"
+                    ][
+                        t_id + 1
+                    ].get(
+                        "客服",
+                        ""
+                    )
+                )
+
+            memory = (
+                update_dialogue_memory(
+                    memory,
+                    user,
+                    golden_response
+                )
+            )
+
+            turns.append(
+                {
+                    "turn_id":
+                        int(t_id / 2),
+
+                    "user":
+                        user,
+
+                    "query":
+                        query_state,
+
+                    "trigger":
+                        trigger_state,
+
+                    "evidence":
+                        evidence,
+
+                    # 保存下来方便分析
+                    "topic_structure":
+                        copy.deepcopy(
+                            memory[
+                                "evidence_state"
+                            ][
+                                "topic_structure"
+                            ]
+                        ),
+
+                    "policy":
+                        policy_state,
+
+                    "response":
+                        response,
+
+                    "golden_response":
+                        golden_response
+                }
+            )
+
+        results[dialog_id] = {
+
+            "turns": turns,
+
+            "final_memory":
+                memory
+        }
+
+    return results
+
+
+# ============================================================
+# Batch Running
+# ============================================================
+
+def run_memory_agent_batch(
+    data,
+    batch_size=8
+):
+
+    query_prompt = prompt_read(
+        Path(
+            "prompts/query.prompt"
+        )
+    )
+
+    trigger_prompt = prompt_read(
+        Path(
+            "prompts/trigger.prompt"
+        )
+    )
+
+    topic_prompt = prompt_read(
+        Path(
+            "prompts/topic.prompt"
+        )
+    )
+
+    policy_prompt = prompt_read(
+        Path(
+            "prompts/policy.prompt"
+        )
+    )
+
+    response_prompt = prompt_read(
+        Path(
+            "prompts/response.prompt"
+        )
+    )
+
+    memories = {
+        dialog_id:
+            init_memory()
+        for dialog_id in data
+    }
+
+    dialogue_history = {
+        dialog_id: ""
+        for dialog_id in data
+    }
+
+    results = {
+        dialog_id: {
+            "turns": []
+        }
+        for dialog_id in data
+    }
+
+    max_turn = max(
+        len(item["text"])
+        for item in data.values()
+    )
+
+    for t_id in range(
+        max_turn
+    ):
+
+        print(
+            f"\n========== "
+            f"TURN {t_id} "
+            f"=========="
+        )
+
+        current_batch = []
+
+        # ==============================================
+        # Current users
+        # ==============================================
+
+        for dialog_id, item in (
+            data.items()
+        ):
+
+            if (
+                t_id
+                >=
+                len(item["text"])
+            ):
+                continue
+
+            msg = item[
+                "text"
+            ][
+                t_id
+            ]
+
+            if "用户" in msg:
+
+                dialogue_history[
+                    dialog_id
+                ] += (
+                    f"用户: "
+                    f"{msg['用户']}\n"
+                )
+
+            elif "客服" in msg:
+
+                dialogue_history[
+                    dialog_id
+                ] += (
+                    f"客服: "
+                    f"{msg['客服']}\n"
+                )
+
+            if "用户" not in msg:
+                continue
+
+            golden_response = ""
+
+            if (
+                t_id + 1
+                <
+                len(item["text"])
+            ):
+
+                golden_response = (
+                    item[
+                        "text"
+                    ][
+                        t_id + 1
+                    ].get(
+                        "客服",
+                        ""
+                    )
+                )
+
+            current_batch.append(
+                {
+                    "dialog_id":
+                        dialog_id,
+
+                    "user":
+                        msg["用户"],
+
+                    "golden_response":
+                        golden_response,
+
+                    "dialogue_history":
+                        dialogue_history[
+                            dialog_id
+                        ]
+                }
+            )
+
+        if not current_batch:
+            continue
+
+        # ==============================================
+        # 1. Query Batch
+        # ==============================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Query Batch: "
+            f"{len(current_batch)}"
+        )
+
+        query_messages = []
+
+        for x in current_batch:
+
+            memory = memories[
+                x["dialog_id"]
+            ]
+
+            query_messages.append(
+                build_messages(
+                    query_prompt,
+                    build_query_input(
+                        memory,
+                        x["user"]
+                    )
+                )
+            )
+
+        query_outputs = (
+            parallel_inference(
+                query_messages
+            )
+        )
+
+        for x, out in zip(
+            current_batch,
+            query_outputs
+        ):
+
+            query_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "query"
+            ] = query_state
+
+            memories[
+                x["dialog_id"]
+            ] = update_issue_memory(
+                memories[
+                    x["dialog_id"]
+                ],
+                query_state
+            )
+
+        # ==============================================
+        # 2. Trigger Batch
+        # ==============================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Trigger Batch"
+        )
+
+        trigger_messages = []
+
+        for x in current_batch:
+
+            memory = memories[
+                x["dialog_id"]
+            ]
+
+            trigger_messages.append(
+                build_messages(
+                    trigger_prompt,
+                    build_trigger_input(
+                        memory
+                    )
+                )
+            )
+
+        trigger_outputs = (
+            parallel_inference(
+                trigger_messages
+            )
+        )
+
+        for x, out in zip(
+            current_batch,
+            trigger_outputs
+        ):
+
+            trigger_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "trigger"
+            ] = trigger_state
+
+        # ==============================================
+        # 3. RAG Batch
+        # ==============================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"RAG Batch"
+        )
+
+        rag_dialogs = []
+        rag_queries = []
+        rag_indices = []
+
+        for idx, x in enumerate(
+            current_batch
+        ):
+
+            if (
+                x["trigger"].get(
+                    "evidence_mode"
+                )
+                ==
+                "retrieve_new_evidence"
+            ):
+
+                memory = memories[
+                    x["dialog_id"]
+                ]
+
+                rag_dialogs.append(
+                    x[
+                        "dialogue_history"
+                    ]
+                )
+
+                rag_queries.append(
+                    memory[
+                        "issue_state"
+                    ][
+                        "current_issue"
+                    ]
+                )
+
+                rag_indices.append(
+                    idx
+                )
+
+            else:
+
+                x["evidence"] = (
+                    memories[
+                        x["dialog_id"]
+                    ][
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+                )
+
+                x[
+                    "topic_structure"
+                ] = copy.deepcopy(
+                    memories[
+                        x["dialog_id"]
+                    ][
+                        "evidence_state"
+                    ][
+                        "topic_structure"
+                    ]
+                )
+
+        if rag_dialogs:
+
+            rag_outputs = (
+                batch_zefeng_rag(
+                    rag_dialogs,
+                    rag_queries
+                )
+            )
+
+            for idx, evidence in zip(
+                rag_indices,
+                rag_outputs
+            ):
+
+                current_batch[
+                    idx
+                ][
+                    "evidence"
+                ] = evidence
+
+        # ==============================================
+        # 3.5 Topic Structure
+        # ==============================================
+
+        topic_items = []
+        topic_indices = []
+
+        for idx in rag_indices:
+
+            x = current_batch[idx]
+
+            memory = memories[
+                x["dialog_id"]
+            ]
+
+            query = (
+                memory[
+                    "issue_state"
+                ][
+                    "current_issue"
+                ]
+            )
+
+            topic_items.append(
+                {
+                    "query":
+                        query,
+
+                    "cases":
+                        x[
+                            "evidence"
+                        ]
+                }
+            )
+
+            topic_indices.append(
+                idx
+            )
+
+        if topic_items:
+
+            print(
+                f"[Turn {t_id}] "
+                f"Topic Structure: "
+                f"{len(topic_items)}"
+            )
+
+            structures = (
+                generate_topic_structures_batch(
+                    topic_items,
+                    topic_prompt
+                )
+            )
+
+            for idx, structure in zip(
+                topic_indices,
+                structures
+            ):
+
+                current_batch[
+                    idx
+                ][
+                    "topic_structure"
+                ] = structure
+
+        # ==============================================
+        # Update Evidence Memory
+        # ==============================================
+
+        for x in current_batch:
+
+            memories[
+                x["dialog_id"]
+            ] = update_evidence_memory(
+
+                memories[
+                    x["dialog_id"]
+                ],
+
+                x[
+                    "trigger"
+                ],
+
+                x[
+                    "evidence"
+                ],
+
+                x.get(
+                    "topic_structure"
+                )
+            )
+
+        # ==============================================
+        # 4. Policy Batch
+        # ==============================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Policy Batch"
+        )
+
+        policy_messages = []
+
+        for x in current_batch:
+
+            policy_messages.append(
+                build_messages(
+                    policy_prompt,
+                    build_policy_input(
+                        memories[
+                            x[
+                                "dialog_id"
+                            ]
+                        ],
+                        x["user"]
+                    )
+                )
+            )
+
+        policy_outputs = (
+            parallel_inference(
+                policy_messages
+            )
+        )
+
+        for x, out in zip(
+            current_batch,
+            policy_outputs
+        ):
+
+            policy_state = (
+                parse_llm_output(
+                    out
+                )
+            )
+
+            x[
+                "policy"
+            ] = policy_state
+
+            memories[
+                x["dialog_id"]
+            ] = update_interaction_memory(
+
+                memories[
+                    x["dialog_id"]
+                ],
+
+                policy_state
+            )
+
+        # ==============================================
+        # 5. Response Batch
+        # ==============================================
+
+        print(
+            f"[Turn {t_id}] "
+            f"Response Batch"
+        )
+
+        response_messages = []
+
+        for x in current_batch:
+
+            response_messages.append(
+                build_messages(
+                    response_prompt,
+                    build_response_input(
+                        memories[
+                            x[
+                                "dialog_id"
+                            ]
+                        ],
+                        x["user"]
+                    )
+                )
+            )
+
+        response_outputs = (
+            parallel_inference(
+                response_messages
+            )
+        )
+
+        for x, out in zip(
+            current_batch,
+            response_outputs
+        ):
+
+            x[
+                "response"
+            ] = parse_llm_output(
+                out
+            )
+
+            memories[
+                x["dialog_id"]
+            ] = update_dialogue_memory(
+
+                memories[
+                    x["dialog_id"]
+                ],
+
+                x["user"],
+
+                x[
+                    "golden_response"
+                ]
+            )
+
+            # 明确保存实际使用的 structure
+            x[
+                "topic_structure"
+            ] = copy.deepcopy(
+                memories[
+                    x["dialog_id"]
+                ][
+                    "evidence_state"
+                ][
+                    "topic_structure"
+                ]
+            )
+
+            results[
+                x["dialog_id"]
+            ][
+                "turns"
+            ].append(
+                {
+                    "turn_id":
+                        int(t_id / 2),
+
+                    **x
+                }
+            )
+
+    for dialog_id in data:
+
+        results[
+            dialog_id
+        ][
+            "final_memory"
+        ] = memories[
+            dialog_id
+        ]
+
+    return results
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--output_path",
+        required=True
+    )
+
+    parser.add_argument(
+        "--batch",
+        action="store_true"
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None
+    )
+
+    args = parser.parse_args()
+
+    with open(
+        args.data_path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        data = json.load(f)
+
+    if args.limit is not None:
+
+        data = dict(
+            list(
+                data.items()
+            )[
+                :args.limit
+            ]
+        )
+
+    if args.batch:
+
+        outputs = (
+            run_memory_agent_batch(
+                data
+            )
+        )
+
+    else:
+
+        outputs = (
+            run_memory_agent(
+                data
+            )
+        )
+
+    write_json(
+        args.output_path,
+        outputs
+    )
+
+    print(
+        f"Saved "
+        f"{len(outputs)} "
+        f"dialogues to "
+        f"{args.output_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
