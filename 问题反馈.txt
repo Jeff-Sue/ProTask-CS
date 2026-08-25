@@ -1,58 +1,611 @@
-def print_failure_summary(
-    failure_summary,
-    failure_details
-):
+import json
+import re
+import argparse
+from pathlib import Path
+from collections import Counter, defaultdict
 
-    print(
-        "\n========== "
-        "案例推荐失败原因 "
-        "=========="
-    )
 
-    total_failure = sum(
-        failure_summary.values()
-    )
+KNOWLEDGE_POLICY = {"ExplainedResponse", "CaseRecommendation"}
 
-    print(
-        f"失败案例轮总数: "
-        f"{total_failure}"
-    )
+FAILURE_NO_KNOWLEDGE = "没有可用知识"
+FAILURE_TOP5_MISS = "Top-5没有召回案例"
+FAILURE_WRONG_POLICY = "没有选择对策略"
+FAILURE_WRONG_CASE = "没有选择对案例"
+SUCCESS = "成功"
 
-    failure_order = [
-        FAILURE_NO_TRIGGER,
+
+# ============================================================
+# Utils
+# ============================================================
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def extract_case_ids(text):
+    if not text:
+        return []
+    return re.findall(r"KT\d+", text)
+
+
+def get_pred_cases(policy):
+    cases = policy.get("case_id", [])
+    if isinstance(cases, str):
+        return [cases] if cases else []
+    if not isinstance(cases, list):
+        return []
+    return [str(x) for x in cases if x]
+
+
+def get_retrieved_cases(turn):
+    return [x.get("case_id", "") for x in turn.get("evidence", []) if isinstance(x, dict) and x.get("case_id")]
+
+
+def get_trigger(turn):
+    trigger_state = turn.get("trigger", {})
+    if "trigger" in trigger_state:
+        return bool(trigger_state.get("trigger", False))
+    mode = trigger_state.get("evidence_mode", "")
+    return mode in {"retrieve_new_evidence", "reuse_evidence", "reuse"}
+
+
+def rate(values):
+    return sum(values) / len(values) if values else 0
+
+
+# ============================================================
+# Case Turn Diagnosis
+# ============================================================
+
+def diagnose_case_turn(turn):
+    golden_cases = extract_case_ids(turn.get("golden_response", ""))
+    if not golden_cases:
+        return None
+
+    golden_case = golden_cases[0]
+    trigger = get_trigger(turn)
+    retrieved = get_retrieved_cases(turn)
+    policy = turn.get("policy", {})
+    label = policy.get("label", "")
+    pred_cases = get_pred_cases(policy)
+
+    base = {
+        "golden_case": golden_case,
+        "trigger": trigger,
+        "retrieved_cases": retrieved,
+        "policy_label": label,
+        "pred_cases": pred_cases
+    }
+
+    # 1. 没有任何可用知识
+    if not retrieved:
+        return {
+            **base,
+            "success": False,
+            "status": FAILURE_NO_KNOWLEDGE,
+            "failure_reason": FAILURE_NO_KNOWLEDGE,
+            "top5_hit": False,
+            "top3_hit": False,
+            "top1_hit": False
+        }
+
+    hit5 = golden_case in retrieved[:5]
+    hit3 = golden_case in retrieved[:3]
+    hit1 = golden_case in retrieved[:1]
+
+    # 2. 有知识，但 Golden Case 未进入 Top-5
+    if not hit5:
+        return {
+            **base,
+            "success": False,
+            "status": FAILURE_TOP5_MISS,
+            "failure_reason": FAILURE_TOP5_MISS,
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1
+        }
+
+    # 3. Golden Case 已在 Top-5，但没有选择知识型策略
+    if label not in KNOWLEDGE_POLICY:
+        return {
+            **base,
+            "success": False,
+            "status": FAILURE_WRONG_POLICY,
+            "failure_reason": FAILURE_WRONG_POLICY,
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1
+        }
+
+    # 4. 策略正确，但没有选中 Golden Case
+    if golden_case not in pred_cases:
+        return {
+            **base,
+            "success": False,
+            "status": FAILURE_WRONG_CASE,
+            "failure_reason": FAILURE_WRONG_CASE,
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1
+        }
+
+    return {
+        **base,
+        "success": True,
+        "status": SUCCESS,
+        "failure_reason": None,
+        "top5_hit": hit5,
+        "top3_hit": hit3,
+        "top1_hit": hit1
+    }
+
+
+def build_case_turn_records(data):
+    records = {}
+
+    for dialog_id, dialog in data.items():
+        for turn in dialog.get("turns", []):
+            diagnosis = diagnose_case_turn(turn)
+            if diagnosis is None:
+                continue
+
+            turn_id = turn.get("turn_id")
+            golden_case = diagnosis["golden_case"]
+            key = (str(dialog_id), str(turn_id), golden_case)
+
+            records[key] = {
+                "dialog_id": dialog_id,
+                "turn_id": turn_id,
+                "user": turn.get("user", ""),
+                "golden_response": turn.get("golden_response", ""),
+                **diagnosis
+            }
+
+    return records
+
+
+# ============================================================
+# Case Turn Evaluation
+# ============================================================
+
+def evaluate_case_turn(data):
+    records = build_case_turn_records(data)
+
+    total_case_turn = len(records)
+    knowledge_available = 0
+    top5_hit = 0
+    top3_hit = 0
+    top1_hit = 0
+    policy_hit = 0
+    selection_hit = 0
+
+    failure_counter = Counter()
+    failure_details = defaultdict(list)
+
+    for record in records.values():
+        if record["retrieved_cases"]:
+            knowledge_available += 1
+
+        if record["top5_hit"]:
+            top5_hit += 1
+        if record["top3_hit"]:
+            top3_hit += 1
+        if record["top1_hit"]:
+            top1_hit += 1
+
+        if record["top5_hit"] and record["policy_label"] in KNOWLEDGE_POLICY:
+            policy_hit += 1
+
+        if record["success"]:
+            selection_hit += 1
+        else:
+            reason = record["failure_reason"]
+            failure_counter[reason] += 1
+            failure_details[reason].append(record)
+
+    result = {
+        "案例轮数量": total_case_turn,
+        "成功案例轮数量": selection_hit,
+        "失败案例轮数量": total_case_turn - selection_hit,
+        "知识可用率": knowledge_available / total_case_turn if total_case_turn else 0,
+        "Top-5有效案例召回率": top5_hit / knowledge_available if knowledge_available else 0,
+        "Top-3有效案例召回率": top3_hit / knowledge_available if knowledge_available else 0,
+        "Top-1有效案例召回率": top1_hit / knowledge_available if knowledge_available else 0,
+        "知识型策略命中率": policy_hit / top5_hit if top5_hit else 0,
+        "案例选择准确率": selection_hit / policy_hit if policy_hit else 0,
+        "最终案例推荐准确率": selection_hit / total_case_turn if total_case_turn else 0
+    }
+
+    failure_summary = {
+        FAILURE_NO_KNOWLEDGE: failure_counter[FAILURE_NO_KNOWLEDGE],
+        FAILURE_TOP5_MISS: failure_counter[FAILURE_TOP5_MISS],
+        FAILURE_WRONG_POLICY: failure_counter[FAILURE_WRONG_POLICY],
+        FAILURE_WRONG_CASE: failure_counter[FAILURE_WRONG_CASE]
+    }
+
+    return result, failure_summary, failure_details, records
+
+
+# ============================================================
+# Timing Evaluation
+# ============================================================
+
+def evaluate_timing(data):
+    pred, gold = [], []
+
+    for dialog in data.values():
+        for turn in dialog.get("turns", []):
+            golden_case = len(extract_case_ids(turn.get("golden_response", ""))) > 0
+            policy_label = turn.get("policy", {}).get("label", "")
+            predicted = policy_label in KNOWLEDGE_POLICY
+
+            gold.append(golden_case)
+            pred.append(predicted)
+
+    tp = sum(p and g for p, g in zip(pred, gold))
+    fp = sum(p and not g for p, g in zip(pred, gold))
+    fn = sum((not p) and g for p, g in zip(pred, gold))
+
+    precision = tp / (tp + fp) if tp + fp else 0
+    recall = tp / (tp + fn) if tp + fn else 0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
+
+    return {
+        "推荐时机Precision": precision,
+        "推荐时机Recall": recall,
+        "推荐时机F1": f1,
+        "过早推荐率": fp / (tp + fp) if tp + fp else 0,
+        "漏推荐率": fn / (tp + fn) if tp + fn else 0
+    }
+
+
+# ============================================================
+# Dialogue Level
+# ============================================================
+
+def evaluate_dialogue(data):
+    success = []
+    golden_first = []
+    pred_first = []
+
+    for dialog in data.values():
+        golden_cases = set()
+        predicted_cases = set()
+        g_turn = None
+        p_turn = None
+
+        for turn in dialog.get("turns", []):
+            g_cases = extract_case_ids(turn.get("golden_response", ""))
+
+            for case_id in g_cases:
+                golden_cases.add(case_id)
+                if g_turn is None:
+                    g_turn = turn.get("turn_id")
+
+            p_cases = get_pred_cases(turn.get("policy", {}))
+
+            for case_id in p_cases:
+                predicted_cases.add(case_id)
+                if p_turn is None:
+                    p_turn = turn.get("turn_id")
+
+        success.append(len(golden_cases & predicted_cases) > 0)
+
+        if g_turn is not None:
+            golden_first.append(g_turn)
+        if p_turn is not None:
+            pred_first.append(p_turn)
+
+    return {
+        "对话成功率": rate(success),
+        "Golden案例首次推荐平均轮数": rate(golden_first),
+        "Predicted案例首次推荐平均轮数": rate(pred_first)
+    }
+
+
+# ============================================================
+# Failure Summary
+# ============================================================
+
+def compact_failure_record(record):
+    return {
+        "case_id": record["golden_case"],
+        "dialog_id": record["dialog_id"],
+        "turn_id": record["turn_id"],
+        "user": record.get("user", ""),
+        "policy_label": record.get("policy_label", ""),
+        "pred_cases": record.get("pred_cases", []),
+        "retrieved_cases": record.get("retrieved_cases", [])
+    }
+
+
+def build_failure_case_summary(failure_details):
+    result = {}
+
+    for reason in [
+        FAILURE_NO_KNOWLEDGE,
         FAILURE_TOP5_MISS,
         FAILURE_WRONG_POLICY,
         FAILURE_WRONG_CASE
-    ]
+    ]:
+        result[reason] = [
+            compact_failure_record(record)
+            for record in failure_details.get(reason, [])
+        ]
 
-    for reason in failure_order:
+    return result
 
-        count = failure_summary.get(
-            reason,
-            0
+
+# ============================================================
+# Compare Two Results
+# ============================================================
+
+def compact_compare_record(record):
+    return {
+        "success": record["success"],
+        "status": record["status"],
+        "failure_reason": record["failure_reason"],
+        "trigger": record["trigger"],
+        "top5_hit": record["top5_hit"],
+        "retrieved_cases": record["retrieved_cases"],
+        "policy_label": record["policy_label"],
+        "pred_cases": record["pred_cases"]
+    }
+
+
+def compare_case_results(records1, records2):
+    all_keys = sorted(set(records1.keys()) | set(records2.keys()))
+    summary = Counter()
+    details = []
+
+    for key in all_keys:
+        r1 = records1.get(key)
+        r2 = records2.get(key)
+
+        if r1 is None:
+            summary["仅结果2存在"] += 1
+            details.append({
+                "comparison": "仅结果2存在",
+                "has_difference": True,
+                "dialog_id": r2["dialog_id"],
+                "turn_id": r2["turn_id"],
+                "golden_case": r2["golden_case"],
+                "result1": None,
+                "result2": compact_compare_record(r2)
+            })
+            continue
+
+        if r2 is None:
+            summary["仅结果1存在"] += 1
+            details.append({
+                "comparison": "仅结果1存在",
+                "has_difference": True,
+                "dialog_id": r1["dialog_id"],
+                "turn_id": r1["turn_id"],
+                "golden_case": r1["golden_case"],
+                "result1": compact_compare_record(r1),
+                "result2": None
+            })
+            continue
+
+        if r1["success"] and r2["success"]:
+            category = "都正确"
+        elif r1["success"] and not r2["success"]:
+            category = "结果1正确_结果2错误"
+        elif not r1["success"] and r2["success"]:
+            category = "结果1错误_结果2正确"
+        elif r1["failure_reason"] == r2["failure_reason"]:
+            category = "都错误_原因相同"
+        else:
+            category = "都错误_原因不同"
+
+        summary[category] += 1
+
+        has_difference = (
+            r1["success"] != r2["success"]
+            or r1["failure_reason"] != r2["failure_reason"]
+            or r1["policy_label"] != r2["policy_label"]
+            or r1["pred_cases"] != r2["pred_cases"]
+            or r1["retrieved_cases"] != r2["retrieved_cases"]
         )
 
-        ratio = (
-            count / total_failure
-            if total_failure
-            else 0
-        )
+        details.append({
+            "comparison": category,
+            "has_difference": has_difference,
+            "dialog_id": r1["dialog_id"],
+            "turn_id": r1["turn_id"],
+            "user": r1.get("user", ""),
+            "golden_case": r1["golden_case"],
+            "result1": compact_compare_record(r1),
+            "result2": compact_compare_record(r2)
+        })
 
-        print(
-            f"\n{reason}: "
-            f"{count} "
-            f"({ratio:.2%})"
-        )
+    return dict(summary), details
 
-        records = failure_details.get(
-            reason,
-            []
-        )
 
-        for record in records:
+# ============================================================
+# Print
+# ============================================================
 
+def print_metrics(title, result):
+    print(f"\n========== {title} ==========")
+
+    for key, value in result.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value}")
+
+
+def print_failure_summary(failure_summary, failure_details):
+    print("\n========== 案例推荐失败原因 ==========")
+
+    total_failure = sum(failure_summary.values())
+    print(f"失败案例轮总数: {total_failure}")
+
+    for reason in [
+        FAILURE_NO_KNOWLEDGE,
+        FAILURE_TOP5_MISS,
+        FAILURE_WRONG_POLICY,
+        FAILURE_WRONG_CASE
+    ]:
+        count = failure_summary.get(reason, 0)
+        ratio = count / total_failure if total_failure else 0
+
+        print(f"\n{reason}: {count} ({ratio:.2%})")
+
+        for record in failure_details.get(reason, []):
             print(
                 f"  {record['golden_case']} "
                 f"| Dialog={record['dialog_id']} "
-                f"| Turn={record['turn_id']}"
+                f"| Turn={record['turn_id']} "
+                f"| Policy={record['policy_label']} "
+                f"| Pred={record['pred_cases']}"
             )
+
+
+def print_compare_summary(summary):
+    print("\n========== 两个结果案例轮对比 ==========")
+
+    for key in [
+        "结果1正确_结果2错误",
+        "结果1错误_结果2正确",
+        "都正确",
+        "都错误_原因不同",
+        "都错误_原因相同",
+        "仅结果1存在",
+        "仅结果2存在"
+    ]:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+
+
+def print_difference_details(details):
+    print("\n========== 存在差异的案例轮 ==========")
+
+    diff_details = [x for x in details if x.get("has_difference", True)]
+    print(f"差异案例轮数量: {len(diff_details)}")
+
+    for item in diff_details:
+        print("\n--------------------------------")
+        print(f"Dialog: {item['dialog_id']}")
+        print(f"Turn: {item['turn_id']}")
+        print(f"Golden Case: {item['golden_case']}")
+
+        if item.get("user"):
+            print(f"User: {item['user']}")
+
+        print(f"比较结果: {item['comparison']}")
+
+        r1 = item.get("result1")
+        r2 = item.get("result2")
+
+        if r1:
+            print(f"Result 1: {r1['status']}")
+            print(f"  Policy: {r1['policy_label']}")
+            print(f"  Pred Case: {r1['pred_cases']}")
+            print(f"  Retrieved: {r1['retrieved_cases']}")
+
+        if r2:
+            print(f"Result 2: {r2['status']}")
+            print(f"  Policy: {r2['policy_label']}")
+            print(f"  Pred Case: {r2['pred_cases']}")
+            print(f"  Retrieved: {r2['retrieved_cases']}")
+
+
+# ============================================================
+# Single Result
+# ============================================================
+
+def evaluate_single_result(data, name):
+    case_result, failure_summary, failure_details, records = evaluate_case_turn(data)
+
+    print_metrics(f"{name} - 案例轮指标", case_result)
+    print_failure_summary(failure_summary, failure_details)
+
+    timing_result = evaluate_timing(data)
+    print_metrics(f"{name} - 所有轮推荐时机", timing_result)
+
+    dialogue_result = evaluate_dialogue(data)
+    print_metrics(f"{name} - 对话级指标", dialogue_result)
+
+    return {
+        "case_metrics": case_result,
+        "failure_summary": failure_summary,
+        "failure_cases": build_failure_case_summary(failure_details),
+        "failure_details": dict(failure_details),
+        "timing": timing_result,
+        "dialogue": dialogue_result,
+        "records": records
+    }
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--input1", required=True, help="第一个实验结果 JSON")
+    parser.add_argument("--input2", default=None, help="第二个实验结果 JSON")
+    parser.add_argument("--output", default=None, help="保存详细评估结果 JSON")
+
+    args = parser.parse_args()
+
+    data1 = load_json(args.input1)
+    result1 = evaluate_single_result(data1, "Result 1")
+
+    final_output = {
+        "result1": {
+            "case_metrics": result1["case_metrics"],
+            "failure_summary": result1["failure_summary"],
+            "failure_cases": result1["failure_cases"],
+            "timing": result1["timing"],
+            "dialogue": result1["dialogue"]
+        }
+    }
+
+    if args.input2:
+        data2 = load_json(args.input2)
+        result2 = evaluate_single_result(data2, "Result 2")
+
+        final_output["result2"] = {
+            "case_metrics": result2["case_metrics"],
+            "failure_summary": result2["failure_summary"],
+            "failure_cases": result2["failure_cases"],
+            "timing": result2["timing"],
+            "dialogue": result2["dialogue"]
+        }
+
+        compare_summary, compare_details = compare_case_results(
+            result1["records"],
+            result2["records"]
+        )
+
+        print_compare_summary(compare_summary)
+        print_difference_details(compare_details)
+
+        final_output["comparison"] = {
+            "summary": compare_summary,
+            "details": compare_details,
+            "different_cases": [
+                item for item in compare_details
+                if item.get("has_difference", True)
+            ]
+        }
+
+    if args.output:
+        write_json(args.output, final_output)
+        print(f"\n详细结果已保存到: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
