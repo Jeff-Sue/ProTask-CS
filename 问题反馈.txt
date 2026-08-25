@@ -1,565 +1,1500 @@
-def generate_topic_structures_batch(
-    items: List[Dict],
-    topic_prompt: str,
-    max_depth: int = 8,
-    max_retry: int = 2,
-):
-    """
-    真正的 batch 层级 Topic Structure 生成。
+import json
+import re
+import argparse
+from pathlib import Path
+from collections import Counter, defaultdict
 
-    items:
-    [
-        {
-            "query": "...",
-            "cases": [...]
-        },
-        ...
+
+# ============================================================
+# Config
+# ============================================================
+
+KNOWLEDGE_POLICY = {
+    "ExplainedResponse",
+    "CaseRecommendation"
+}
+
+FAILURE_NO_TRIGGER = "没有触发知识"
+FAILURE_TOP5_MISS = "Top-5没有召回案例"
+FAILURE_WRONG_POLICY = "没有选择对策略"
+FAILURE_WRONG_CASE = "没有选择对案例"
+
+SUCCESS = "成功"
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path, data):
+    path = Path(path)
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+
+def extract_case_ids(text):
+
+    if not text:
+        return []
+
+    return re.findall(
+        r"KT\d+",
+        text
+    )
+
+
+def get_pred_cases(policy):
+
+    cases = policy.get(
+        "case_id",
+        []
+    )
+
+    if isinstance(cases, str):
+        return [cases] if cases else []
+
+    if not isinstance(cases, list):
+        return []
+
+    return [
+        str(x)
+        for x in cases
+        if x
     ]
 
-    核心逻辑：
-    1. 每个 query 作为一棵树的 root
-    2. 当前所有待划分节点组成 frontier
-    3. frontier 中所有节点一次 batch inference
-    4. 每个节点完成一层划分
-    5. 子节点中 case 数 > 1 的进入 next_frontier
-    6. 重复直到所有叶节点只有一个 case
 
-    注意：
-    - 不改变单节点的输入格式
-    - 不改变划分逻辑
-    - 只是把多个独立节点并行执行
+def get_retrieved_cases(turn):
+
+    return [
+        x.get("case_id", "")
+        for x in turn.get(
+            "evidence",
+            []
+        )
+        if isinstance(x, dict)
+    ]
+
+
+def get_trigger(turn):
+    """
+    兼容两种可能的 Trigger 输出格式：
+
+    旧格式：
+    {
+        "trigger": true
+    }
+
+    新格式：
+    {
+        "evidence_mode": "retrieve_new_evidence"
+    }
     """
 
-    # ============================================================
-    # 1. 初始化 Trees / Case Maps / Frontier
-    # ============================================================
+    trigger_state = turn.get(
+        "trigger",
+        {}
+    )
 
-    trees = []
-    case_maps = []
+    # --------------------------------
+    # 旧格式
+    # --------------------------------
 
-    frontier = []
+    if "trigger" in trigger_state:
 
-    for tree_idx, item in enumerate(items):
+        return bool(
+            trigger_state.get(
+                "trigger",
+                False
+            )
+        )
 
-        query = item.get("query", "")
-        cases = item.get("cases", [])
+    # --------------------------------
+    # 新格式
+    # --------------------------------
 
-        case_map = case_map_from_cases(cases)
-        case_maps.append(case_map)
+    mode = trigger_state.get(
+        "evidence_mode",
+        ""
+    )
 
-        case_ids = list(case_map.keys())
+    return mode in {
+        "retrieve_new_evidence",
+        "reuse_evidence",
+        "reuse"
+    }
 
-        root = {
-            "query": query,
-            "topic": query,
-            "case_ids": case_ids,
-            "leaf": len(case_ids) <= 1,
-            "children": []
+
+def rate(x):
+
+    return (
+        sum(x) / len(x)
+        if x else 0
+    )
+
+
+# ============================================================
+# Case Turn Diagnosis
+# ============================================================
+
+def diagnose_case_turn(turn):
+    """
+    对单个案例轮进行完整诊断。
+
+    Failure priority:
+
+    1. 没有触发知识
+    2. Top-5没有召回案例
+    3. 没有选择对策略
+    4. 没有选择对案例
+    5. 成功
+
+    一个案例轮只会落入一个最终状态。
+    """
+
+    golden_cases = extract_case_ids(
+        turn.get(
+            "golden_response",
+            ""
+        )
+    )
+
+    # 不是案例轮
+    if not golden_cases:
+        return None
+
+    # 当前数据通常只有一个 golden case
+    golden_case = golden_cases[0]
+
+    trigger = get_trigger(
+        turn
+    )
+
+    retrieved = get_retrieved_cases(
+        turn
+    )
+
+    policy = turn.get(
+        "policy",
+        {}
+    )
+
+    label = policy.get(
+        "label",
+        ""
+    )
+
+    pred_cases = get_pred_cases(
+        policy
+    )
+
+    # ========================================================
+    # Stage 1: Trigger
+    # ========================================================
+
+    if not trigger:
+
+        status = FAILURE_NO_TRIGGER
+
+        return {
+            "success": False,
+            "status": status,
+            "failure_reason": status,
+
+            "golden_case": golden_case,
+
+            "trigger": trigger,
+
+            "retrieved_cases": retrieved,
+
+            "top5_hit": False,
+            "top3_hit": False,
+            "top1_hit": False,
+
+            "policy_label": label,
+            "pred_cases": pred_cases
         }
 
-        # 空 evidence
-        if len(case_ids) == 0:
-            trees.append(root)
-            continue
+    # ========================================================
+    # Stage 2: Retrieval
+    # ========================================================
 
-        # 只有一个 case，直接 leaf
-        if len(case_ids) == 1:
-            root["case_id"] = case_ids[0]
-            trees.append(root)
-            continue
+    hit5 = (
+        golden_case
+        in retrieved[:5]
+    )
 
-        trees.append(root)
+    hit3 = (
+        golden_case
+        in retrieved[:3]
+    )
 
-        # 多个 cases，加入当前待划分节点
-        frontier.append(
-            {
-                "tree_idx": tree_idx,
-                "node": root,
-                "case_ids": case_ids,
-                "depth": 0
-            }
-        )
+    hit1 = (
+        golden_case
+        in retrieved[:1]
+    )
 
-    # ============================================================
-    # 2. Frontier-based Recursive Batch
-    # ============================================================
+    if not hit5:
 
-    round_id = 0
+        status = FAILURE_TOP5_MISS
 
-    while frontier:
+        return {
+            "success": False,
+            "status": status,
+            "failure_reason": status,
 
-        print(
-            f"[TopicStructure] Round {round_id}: "
-            f"{len(frontier)} nodes"
-        )
+            "golden_case": golden_case,
 
-        # --------------------------------------------------------
-        # 2.1 处理达到 max_depth 的节点
-        # --------------------------------------------------------
+            "trigger": trigger,
 
-        active_frontier = []
+            "retrieved_cases": retrieved,
 
-        for task in frontier:
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1,
 
-            node = task["node"]
-            case_ids = task["case_ids"]
-            depth = task["depth"]
+            "policy_label": label,
+            "pred_cases": pred_cases
+        }
 
-            if depth >= max_depth:
+    # ========================================================
+    # Stage 3: Policy
+    # ========================================================
 
-                print(
-                    "[TopicStructure Warning] "
-                    f"max_depth reached: {case_ids}"
-                )
+    if label not in KNOWLEDGE_POLICY:
 
-                fallback_to_case_leaves(
-                    node,
-                    case_ids
-                )
+        status = FAILURE_WRONG_POLICY
 
-                continue
+        return {
+            "success": False,
+            "status": status,
+            "failure_reason": status,
 
-            active_frontier.append(task)
+            "golden_case": golden_case,
 
-        if not active_frontier:
-            break
+            "trigger": trigger,
 
-        # --------------------------------------------------------
-        # 2.2 第一次 Batch Split
-        # --------------------------------------------------------
+            "retrieved_cases": retrieved,
 
-        messages = []
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1,
 
-        for task in active_frontier:
+            "policy_label": label,
+            "pred_cases": pred_cases
+        }
 
-            tree_idx = task["tree_idx"]
-            node = task["node"]
-            case_ids = task["case_ids"]
-            depth = task["depth"]
+    # ========================================================
+    # Stage 4: Case Selection
+    # ========================================================
 
-            query = items[
-                tree_idx
-            ].get(
-                "query",
-                ""
-            )
+    if golden_case not in pred_cases:
 
-            case_map = case_maps[
-                tree_idx
-            ]
+        status = FAILURE_WRONG_CASE
 
-            node_cases = [
-                case_map[case_id]
-                for case_id in case_ids
-            ]
+        return {
+            "success": False,
+            "status": status,
+            "failure_reason": status,
 
-            split_input = (
-                build_topic_split_input(
-                    query=query,
-                    cases=node_cases,
-                    parent_topic=node["topic"],
-                    depth=depth
-                )
-            )
+            "golden_case": golden_case,
 
-            messages.append(
-                build_messages(
-                    topic_prompt,
-                    split_input
-                )
-            )
+            "trigger": trigger,
 
-        # 真正的一次 Batch
-        outputs = parallel_inference(
-            messages
-        )
+            "retrieved_cases": retrieved,
 
-        # --------------------------------------------------------
-        # 2.3 Parse + Validation
-        # --------------------------------------------------------
+            "top5_hit": hit5,
+            "top3_hit": hit3,
+            "top1_hit": hit1,
 
-        valid_results = {}
+            "policy_label": label,
+            "pred_cases": pred_cases
+        }
 
-        retry_tasks = []
+    # ========================================================
+    # Success
+    # ========================================================
 
-        for idx, (
-            task,
-            output
-        ) in enumerate(
-            zip(
-                active_frontier,
-                outputs
-            )
+    return {
+        "success": True,
+        "status": SUCCESS,
+        "failure_reason": None,
+
+        "golden_case": golden_case,
+
+        "trigger": trigger,
+
+        "retrieved_cases": retrieved,
+
+        "top5_hit": hit5,
+        "top3_hit": hit3,
+        "top1_hit": hit1,
+
+        "policy_label": label,
+        "pred_cases": pred_cases
+    }
+
+
+# ============================================================
+# Build Case Turn Records
+# ============================================================
+
+def build_case_turn_records(data):
+
+    records = {}
+
+    for dialog_id, dialog in data.items():
+
+        for turn in dialog.get(
+            "turns",
+            []
         ):
 
-            split_result = (
-                parse_llm_output(
-                    output
+            diagnosis = diagnose_case_turn(
+                turn
+            )
+
+            if diagnosis is None:
+                continue
+
+            turn_id = turn.get(
+                "turn_id"
+            )
+
+            golden_case = diagnosis[
+                "golden_case"
+            ]
+
+            # 用于两个实验结果精确对齐
+            key = (
+                str(dialog_id),
+                str(turn_id),
+                golden_case
+            )
+
+            records[key] = {
+                "dialog_id":
+                    dialog_id,
+
+                "turn_id":
+                    turn_id,
+
+                "user":
+                    turn.get(
+                        "user",
+                        ""
+                    ),
+
+                "golden_response":
+                    turn.get(
+                        "golden_response",
+                        ""
+                    ),
+
+                **diagnosis
+            }
+
+    return records
+
+
+# ============================================================
+# Case Turn Evaluation
+# ============================================================
+
+def evaluate_case_turn(data):
+
+    records = build_case_turn_records(
+        data
+    )
+
+    total_case_turn = len(
+        records
+    )
+
+    trigger_hit = 0
+
+    top5_hit = 0
+    top3_hit = 0
+    top1_hit = 0
+
+    policy_hit = 0
+    selection_hit = 0
+
+    failure_counter = Counter()
+
+    failure_details = defaultdict(
+        list
+    )
+
+    for record in records.values():
+
+        if record["trigger"]:
+            trigger_hit += 1
+
+        if record["top5_hit"]:
+            top5_hit += 1
+
+        if record["top3_hit"]:
+            top3_hit += 1
+
+        if record["top1_hit"]:
+            top1_hit += 1
+
+        if (
+            record["top5_hit"]
+            and
+            record["policy_label"]
+            in KNOWLEDGE_POLICY
+        ):
+            policy_hit += 1
+
+        if record["success"]:
+            selection_hit += 1
+
+        else:
+
+            reason = record[
+                "failure_reason"
+            ]
+
+            failure_counter[
+                reason
+            ] += 1
+
+            failure_details[
+                reason
+            ].append(
+                record
+            )
+
+    result = {
+
+        "案例轮数量":
+            total_case_turn,
+
+        "成功案例轮数量":
+            selection_hit,
+
+        "失败案例轮数量":
+            total_case_turn
+            - selection_hit,
+
+        "知识链路触发率":
+            trigger_hit / total_case_turn
+            if total_case_turn else 0,
+
+        "Top-5有效案例召回率":
+            top5_hit / trigger_hit
+            if trigger_hit else 0,
+
+        "Top-3有效案例召回率":
+            top3_hit / trigger_hit
+            if trigger_hit else 0,
+
+        "Top-1有效案例召回率":
+            top1_hit / trigger_hit
+            if trigger_hit else 0,
+
+        "知识型策略命中率":
+            policy_hit / top5_hit
+            if top5_hit else 0,
+
+        "案例选择准确率":
+            selection_hit / policy_hit
+            if policy_hit else 0,
+
+        "最终案例推荐准确率":
+            selection_hit / total_case_turn
+            if total_case_turn else 0
+    }
+
+    failure_summary = {
+
+        FAILURE_NO_TRIGGER:
+            failure_counter[
+                FAILURE_NO_TRIGGER
+            ],
+
+        FAILURE_TOP5_MISS:
+            failure_counter[
+                FAILURE_TOP5_MISS
+            ],
+
+        FAILURE_WRONG_POLICY:
+            failure_counter[
+                FAILURE_WRONG_POLICY
+            ],
+
+        FAILURE_WRONG_CASE:
+            failure_counter[
+                FAILURE_WRONG_CASE
+            ],
+    }
+
+    return (
+        result,
+        failure_summary,
+        failure_details,
+        records
+    )
+
+
+# ============================================================
+# All Turn Timing
+# ============================================================
+
+def evaluate_timing(data):
+
+    pred = []
+    gold = []
+
+    for dialog in data.values():
+
+        for turn in dialog.get(
+            "turns",
+            []
+        ):
+
+            golden_case = (
+                len(
+                    extract_case_ids(
+                        turn.get(
+                            "golden_response",
+                            ""
+                        )
+                    )
+                ) > 0
+            )
+
+            policy_label = (
+                turn.get(
+                    "policy",
+                    {}
+                ).get(
+                    "label",
+                    ""
                 )
             )
 
-            valid_split = (
-                normalize_split(
-                    split_result,
-                    task["case_ids"]
+            predicted = (
+                policy_label
+                in KNOWLEDGE_POLICY
+            )
+
+            gold.append(
+                golden_case
+            )
+
+            pred.append(
+                predicted
+            )
+
+    tp = sum(
+        p and g
+        for p, g
+        in zip(
+            pred,
+            gold
+        )
+    )
+
+    fp = sum(
+        p and not g
+        for p, g
+        in zip(
+            pred,
+            gold
+        )
+    )
+
+    fn = sum(
+        (not p) and g
+        for p, g
+        in zip(
+            pred,
+            gold
+        )
+    )
+
+    precision = (
+        tp / (tp + fp)
+        if tp + fp else 0
+    )
+
+    recall = (
+        tp / (tp + fn)
+        if tp + fn else 0
+    )
+
+    f1 = (
+        2 * precision * recall
+        /
+        (precision + recall)
+        if precision + recall
+        else 0
+    )
+
+    return {
+
+        "推荐时机Precision":
+            precision,
+
+        "推荐时机Recall":
+            recall,
+
+        "推荐时机F1":
+            f1,
+
+        "过早推荐率":
+            fp / (tp + fp)
+            if tp + fp else 0,
+
+        "漏推荐率":
+            fn / (tp + fn)
+            if tp + fn else 0
+    }
+
+
+# ============================================================
+# Dialogue Level
+# ============================================================
+
+def evaluate_dialogue(data):
+
+    success = []
+
+    golden_first = []
+    pred_first = []
+
+    for dialog in data.values():
+
+        golden_cases = set()
+        predicted_cases = set()
+
+        g_turn = None
+        p_turn = None
+
+        for turn in dialog.get(
+            "turns",
+            []
+        ):
+
+            g_cases = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
                 )
             )
 
-            if valid_split:
+            for case_id in g_cases:
 
-                valid_results[
-                    idx
-                ] = valid_split
+                golden_cases.add(
+                    case_id
+                )
+
+                if g_turn is None:
+                    g_turn = turn[
+                        "turn_id"
+                    ]
+
+            p_cases = get_pred_cases(
+                turn.get(
+                    "policy",
+                    {}
+                )
+            )
+
+            for case_id in p_cases:
+
+                predicted_cases.add(
+                    case_id
+                )
+
+                if p_turn is None:
+                    p_turn = turn[
+                        "turn_id"
+                    ]
+
+        success.append(
+            len(
+                golden_cases
+                &
+                predicted_cases
+            ) > 0
+        )
+
+        if g_turn is not None:
+            golden_first.append(
+                g_turn
+            )
+
+        if p_turn is not None:
+            pred_first.append(
+                p_turn
+            )
+
+    return {
+
+        "对话成功率":
+            rate(success),
+
+        "Golden案例首次推荐平均轮数":
+            rate(golden_first),
+
+        "Predicted案例首次推荐平均轮数":
+            rate(pred_first)
+    }
+
+
+# ============================================================
+# Compare Two Results
+# ============================================================
+
+def compare_case_results(
+    records1,
+    records2
+):
+    """
+    对案例轮进行逐项比较。
+
+    分类：
+
+    1. result1正确_result2错误
+    2. result1错误_result2正确
+    3. 都正确
+    4. 都错误_原因相同
+    5. 都错误_原因不同
+    """
+
+    all_keys = sorted(
+        set(records1.keys())
+        |
+        set(records2.keys())
+    )
+
+    summary = Counter()
+
+    details = []
+
+    for key in all_keys:
+
+        r1 = records1.get(
+            key
+        )
+
+        r2 = records2.get(
+            key
+        )
+
+        # 如果两个结果中的案例轮集合不一致
+        if r1 is None:
+
+            summary[
+                "仅结果2存在"
+            ] += 1
+
+            details.append(
+                {
+                    "comparison":
+                        "仅结果2存在",
+
+                    "dialog_id":
+                        r2["dialog_id"],
+
+                    "turn_id":
+                        r2["turn_id"],
+
+                    "golden_case":
+                        r2["golden_case"],
+
+                    "result1":
+                        None,
+
+                    "result2":
+                        compact_record(
+                            r2
+                        )
+                }
+            )
+
+            continue
+
+        if r2 is None:
+
+            summary[
+                "仅结果1存在"
+            ] += 1
+
+            details.append(
+                {
+                    "comparison":
+                        "仅结果1存在",
+
+                    "dialog_id":
+                        r1["dialog_id"],
+
+                    "turn_id":
+                        r1["turn_id"],
+
+                    "golden_case":
+                        r1["golden_case"],
+
+                    "result1":
+                        compact_record(
+                            r1
+                        ),
+
+                    "result2":
+                        None
+                }
+            )
+
+            continue
+
+        # ====================================================
+        # Correctness comparison
+        # ====================================================
+
+        if (
+            r1["success"]
+            and
+            r2["success"]
+        ):
+
+            category = "都正确"
+
+        elif (
+            r1["success"]
+            and
+            not r2["success"]
+        ):
+
+            category = (
+                "结果1正确_结果2错误"
+            )
+
+        elif (
+            not r1["success"]
+            and
+            r2["success"]
+        ):
+
+            category = (
+                "结果1错误_结果2正确"
+            )
+
+        else:
+
+            if (
+                r1["failure_reason"]
+                ==
+                r2["failure_reason"]
+            ):
+
+                category = (
+                    "都错误_原因相同"
+                )
 
             else:
 
-                retry_tasks.append(
-                    {
-                        "frontier_idx": idx,
-                        "task": task,
-                        "attempt": 1
-                    }
+                category = (
+                    "都错误_原因不同"
                 )
 
-        # ========================================================
-        # 2.4 Invalid Nodes Batch Retry
-        # ========================================================
+        summary[
+            category
+        ] += 1
 
-        while (
-            retry_tasks
-            and
-            retry_tasks[0]["attempt"]
-            <= max_retry
+        # ====================================================
+        # 是否有区别
+        # ====================================================
+
+        has_difference = (
+
+            r1["success"]
+            !=
+            r2["success"]
+
+            or
+
+            r1["failure_reason"]
+            !=
+            r2["failure_reason"]
+
+            or
+
+            r1["policy_label"]
+            !=
+            r2["policy_label"]
+
+            or
+
+            r1["pred_cases"]
+            !=
+            r2["pred_cases"]
+        )
+
+        details.append(
+            {
+                "comparison":
+                    category,
+
+                "has_difference":
+                    has_difference,
+
+                "dialog_id":
+                    r1[
+                        "dialog_id"
+                    ],
+
+                "turn_id":
+                    r1[
+                        "turn_id"
+                    ],
+
+                "user":
+                    r1.get(
+                        "user",
+                        ""
+                    ),
+
+                "golden_case":
+                    r1[
+                        "golden_case"
+                    ],
+
+                "result1":
+                    compact_record(
+                        r1
+                    ),
+
+                "result2":
+                    compact_record(
+                        r2
+                    )
+            }
+        )
+
+    return (
+        dict(summary),
+        details
+    )
+
+
+def compact_record(record):
+
+    return {
+
+        "success":
+            record[
+                "success"
+            ],
+
+        "status":
+            record[
+                "status"
+            ],
+
+        "failure_reason":
+            record[
+                "failure_reason"
+            ],
+
+        "trigger":
+            record[
+                "trigger"
+            ],
+
+        "top5_hit":
+            record[
+                "top5_hit"
+            ],
+
+        "retrieved_cases":
+            record[
+                "retrieved_cases"
+            ],
+
+        "policy_label":
+            record[
+                "policy_label"
+            ],
+
+        "pred_cases":
+            record[
+                "pred_cases"
+            ]
+    }
+
+
+# ============================================================
+# Print
+# ============================================================
+
+def print_metrics(
+    title,
+    result
+):
+
+    print(
+        f"\n========== "
+        f"{title} "
+        f"=========="
+    )
+
+    for k, v in result.items():
+
+        if isinstance(
+            v,
+            float
         ):
 
-            attempt = (
-                retry_tasks[0][
-                    "attempt"
-                ]
+            print(
+                f"{k}: {v:.4f}"
+            )
+
+        else:
+
+            print(
+                f"{k}: {v}"
+            )
+
+
+def print_failure_summary(
+    failure_summary
+):
+
+    print(
+        "\n========== "
+        "案例推荐失败原因 "
+        "=========="
+    )
+
+    total_failure = sum(
+        failure_summary.values()
+    )
+
+    print(
+        f"失败案例轮总数: "
+        f"{total_failure}"
+    )
+
+    for reason, count in (
+        failure_summary.items()
+    ):
+
+        ratio = (
+            count / total_failure
+            if total_failure
+            else 0
+        )
+
+        print(
+            f"{reason}: "
+            f"{count} "
+            f"({ratio:.2%})"
+        )
+
+
+def print_compare_summary(
+    summary
+):
+
+    print(
+        "\n========== "
+        "两个结果案例轮对比 "
+        "=========="
+    )
+
+    preferred_order = [
+        "结果1正确_结果2错误",
+        "结果1错误_结果2正确",
+        "都正确",
+        "都错误_原因不同",
+        "都错误_原因相同",
+        "仅结果1存在",
+        "仅结果2存在"
+    ]
+
+    for key in preferred_order:
+
+        if key in summary:
+
+            print(
+                f"{key}: "
+                f"{summary[key]}"
+            )
+
+
+def print_difference_details(
+    details
+):
+
+    print(
+        "\n========== "
+        "存在差异的案例轮 "
+        "=========="
+    )
+
+    diff_details = [
+        x
+        for x in details
+        if x.get(
+            "has_difference",
+            True
+        )
+    ]
+
+    print(
+        f"差异案例轮数量: "
+        f"{len(diff_details)}"
+    )
+
+    for item in diff_details:
+
+        print(
+            "\n"
+            "--------------------------------"
+        )
+
+        print(
+            f"Dialog: "
+            f"{item['dialog_id']}"
+        )
+
+        print(
+            f"Turn: "
+            f"{item['turn_id']}"
+        )
+
+        print(
+            f"Golden Case: "
+            f"{item['golden_case']}"
+        )
+
+        if item.get("user"):
+
+            print(
+                f"User: "
+                f"{item['user']}"
+            )
+
+        print(
+            f"比较结果: "
+            f"{item['comparison']}"
+        )
+
+        r1 = item.get(
+            "result1"
+        )
+
+        r2 = item.get(
+            "result2"
+        )
+
+        if r1:
+
+            print(
+                "Result 1: "
+                f"{r1['status']}"
             )
 
             print(
-                f"[TopicStructure] Retry {attempt}: "
-                f"{len(retry_tasks)} nodes"
+                f"  Policy: "
+                f"{r1['policy_label']}"
             )
 
-            retry_messages = []
-
-            for retry_item in retry_tasks:
-
-                task = retry_item[
-                    "task"
-                ]
-
-                tree_idx = task[
-                    "tree_idx"
-                ]
-
-                node = task[
-                    "node"
-                ]
-
-                case_ids = task[
-                    "case_ids"
-                ]
-
-                depth = task[
-                    "depth"
-                ]
-
-                query = items[
-                    tree_idx
-                ].get(
-                    "query",
-                    ""
-                )
-
-                case_map = (
-                    case_maps[
-                        tree_idx
-                    ]
-                )
-
-                node_cases = [
-                    case_map[
-                        case_id
-                    ]
-                    for case_id
-                    in case_ids
-                ]
-
-                split_input = (
-                    build_topic_split_input(
-                        query=query,
-                        cases=node_cases,
-                        parent_topic=node[
-                            "topic"
-                        ],
-                        depth=depth
-                    )
-                )
-
-                split_input[
-                    "retry_instruction"
-                ] = (
-                    "上一次划分结果不合法。"
-                    "请重新划分，并严格保证："
-                    "每个输入 case_id 必须且只能出现一次；"
-                    "至少划分为两个有意义的子主题；"
-                    "不得遗漏或重复任何 case_id。"
-                )
-
-                retry_messages.append(
-                    build_messages(
-                        topic_prompt,
-                        split_input
-                    )
-                )
-
-            retry_outputs = (
-                parallel_inference(
-                    retry_messages
-                )
+            print(
+                f"  Pred Case: "
+                f"{r1['pred_cases']}"
             )
 
-            next_retry_tasks = []
-
-            for retry_item, output in zip(
-                retry_tasks,
-                retry_outputs
-            ):
-
-                frontier_idx = (
-                    retry_item[
-                        "frontier_idx"
-                    ]
-                )
-
-                task = (
-                    retry_item[
-                        "task"
-                    ]
-                )
-
-                split_result = (
-                    parse_llm_output(
-                        output
-                    )
-                )
-
-                valid_split = (
-                    normalize_split(
-                        split_result,
-                        task[
-                            "case_ids"
-                        ]
-                    )
-                )
-
-                if valid_split:
-
-                    valid_results[
-                        frontier_idx
-                    ] = valid_split
-
-                else:
-
-                    next_attempt = (
-                        retry_item[
-                            "attempt"
-                        ]
-                        + 1
-                    )
-
-                    if (
-                        next_attempt
-                        <=
-                        max_retry
-                    ):
-
-                        next_retry_tasks.append(
-                            {
-                                "frontier_idx":
-                                    frontier_idx,
-
-                                "task":
-                                    task,
-
-                                "attempt":
-                                    next_attempt
-                            }
-                        )
-
-            retry_tasks = (
-                next_retry_tasks
+            print(
+                f"  Retrieved: "
+                f"{r1['retrieved_cases']}"
             )
 
-        # ========================================================
-        # 2.5 Apply Results + Build Next Frontier
-        # ========================================================
+        if r2:
 
-        next_frontier = []
-
-        for idx, task in enumerate(
-            active_frontier
-        ):
-
-            node = task["node"]
-            case_ids = task[
-                "case_ids"
-            ]
-            depth = task[
-                "depth"
-            ]
-            tree_idx = task[
-                "tree_idx"
-            ]
-
-            valid_split = (
-                valid_results.get(
-                    idx
-                )
+            print(
+                "Result 2: "
+                f"{r2['status']}"
             )
 
-            # ----------------------------------------------------
-            # 最终仍失败：fallback
-            # ----------------------------------------------------
-
-            if not valid_split:
-
-                print(
-                    "[TopicStructure Warning] "
-                    "failed split after retries: "
-                    f"{case_ids}"
-                )
-
-                fallback_to_case_leaves(
-                    node,
-                    case_ids
-                )
-
-                continue
-
-            # ----------------------------------------------------
-            # 正常写入当前节点
-            # ----------------------------------------------------
-
-            node["leaf"] = False
-
-            node["dimension"] = (
-                valid_split[
-                    "dimension"
-                ]
+            print(
+                f"  Policy: "
+                f"{r2['policy_label']}"
             )
 
-            node["children"] = []
+            print(
+                f"  Pred Case: "
+                f"{r2['pred_cases']}"
+            )
 
-            for child_info in (
-                valid_split[
-                    "children"
-                ]
-            ):
-
-                child_case_ids = (
-                    child_info[
-                        "case_ids"
-                    ]
-                )
-
-                child_node = {
-                    "topic":
-                        child_info[
-                            "topic"
-                        ],
-
-                    "case_ids":
-                        child_case_ids,
-
-                    "leaf":
-                        len(
-                            child_case_ids
-                        ) == 1,
-
-                    "children": []
-                }
-
-                node[
-                    "children"
-                ].append(
-                    child_node
-                )
-
-                # ------------------------------------------------
-                # Case 数 = 1：叶节点
-                # ------------------------------------------------
-
-                if (
-                    len(
-                        child_case_ids
-                    )
-                    == 1
-                ):
-
-                    child_node[
-                        "case_id"
-                    ] = (
-                        child_case_ids[
-                            0
-                        ]
-                    )
-
-                    continue
-
-                # ------------------------------------------------
-                # Case 数 > 1：进入下一轮 frontier
-                # ------------------------------------------------
-
-                next_frontier.append(
-                    {
-                        "tree_idx":
-                            tree_idx,
-
-                        "node":
-                            child_node,
-
-                        "case_ids":
-                            child_case_ids,
-
-                        "depth":
-                            depth + 1
-                    }
-                )
-
-        frontier = (
-            next_frontier
-        )
-
-        round_id += 1
-
-    return trees
+            print(
+                f"  Retrieved: "
+                f"{r2['retrieved_cases']}"
+            )
 
 
-def fallback_to_case_leaves(
-    node: Dict,
-    case_ids: List[str]
+# ============================================================
+# Single Result Evaluation
+# ============================================================
+
+def evaluate_single_result(
+    data,
+    name
 ):
-    """
-    当某个节点多次无法获得合法 partition，
-    或达到 max_depth 时，避免程序卡死。
 
-    直接将剩余 cases 展开成独立叶节点。
-    """
+    (
+        case_result,
+        failure_summary,
+        failure_details,
+        records
 
-    node["leaf"] = False
-
-    node["dimension"] = (
-        "案例差异"
+    ) = evaluate_case_turn(
+        data
     )
 
-    node["children"] = [
-        make_leaf(
-            case_id
+    print_metrics(
+        f"{name} - 案例轮指标",
+        case_result
+    )
+
+    print_failure_summary(
+        failure_summary
+    )
+
+    timing = evaluate_timing(
+        data
+    )
+
+    print_metrics(
+        f"{name} - 所有轮推荐时机",
+        timing
+    )
+
+    dialogue = evaluate_dialogue(
+        data
+    )
+
+    print_metrics(
+        f"{name} - 对话级指标",
+        dialogue
+    )
+
+    return {
+        "case_metrics":
+            case_result,
+
+        "failure_summary":
+            failure_summary,
+
+        "failure_details":
+            dict(
+                failure_details
+            ),
+
+        "timing":
+            timing,
+
+        "dialogue":
+            dialogue,
+
+        "records":
+            records
+    }
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input1",
+        required=True,
+        help="第一个实验结果"
+    )
+
+    parser.add_argument(
+        "--input2",
+        default=None,
+        help="第二个实验结果，可选"
+    )
+
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="保存详细诊断 JSON"
+    )
+
+    args = parser.parse_args()
+
+    # ========================================================
+    # Result 1
+    # ========================================================
+
+    data1 = load_json(
+        args.input1
+    )
+
+    result1 = evaluate_single_result(
+        data1,
+        "Result 1"
+    )
+
+    final_output = {
+        "result1": {
+            "case_metrics":
+                result1[
+                    "case_metrics"
+                ],
+
+            "failure_summary":
+                result1[
+                    "failure_summary"
+                ],
+
+            "failure_details":
+                result1[
+                    "failure_details"
+                ],
+
+            "timing":
+                result1[
+                    "timing"
+                ],
+
+            "dialogue":
+                result1[
+                    "dialogue"
+                ]
+        }
+    }
+
+    # ========================================================
+    # Result 2 + Compare
+    # ========================================================
+
+    if args.input2:
+
+        data2 = load_json(
+            args.input2
         )
-        for case_id
-        in case_ids
-    ]
+
+        result2 = evaluate_single_result(
+            data2,
+            "Result 2"
+        )
+
+        final_output[
+            "result2"
+        ] = {
+            "case_metrics":
+                result2[
+                    "case_metrics"
+                ],
+
+            "failure_summary":
+                result2[
+                    "failure_summary"
+                ],
+
+            "failure_details":
+                result2[
+                    "failure_details"
+                ],
+
+            "timing":
+                result2[
+                    "timing"
+                ],
+
+            "dialogue":
+                result2[
+                    "dialogue"
+                ]
+        }
+
+        (
+            compare_summary,
+            compare_details
+        ) = compare_case_results(
+
+            result1[
+                "records"
+            ],
+
+            result2[
+                "records"
+            ]
+        )
+
+        print_compare_summary(
+            compare_summary
+        )
+
+        print_difference_details(
+            compare_details
+        )
+
+        final_output[
+            "comparison"
+        ] = {
+
+            "summary":
+                compare_summary,
+
+            "details":
+                compare_details,
+
+            "different_cases": [
+                x
+                for x
+                in compare_details
+                if x.get(
+                    "has_difference",
+                    True
+                )
+            ]
+        }
+
+    # ========================================================
+    # Save
+    # ========================================================
+
+    if args.output:
+
+        write_json(
+            args.output,
+            final_output
+        )
+
+        print(
+            f"\n详细结果已保存到: "
+            f"{args.output}"
+        )
+
+
+if __name__ == "__main__":
+    main()
