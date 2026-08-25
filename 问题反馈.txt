@@ -1,78 +1,78 @@
-没有选择对策略: 31 (16.49%)
-  KT00370519 | Dialog=220597650 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00151023 | Dialog=220598242 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00142314 | Dialog=220601341 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00001640 | Dialog=220602107 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00002809 | Dialog=220602842 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00002092 | Dialog=220605645 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00000787 | Dialog=220605890 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00001167 | Dialog=220612403 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00002092 | Dialog=220615688 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00191104 | Dialog=220615885 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000842 | Dialog=220625044 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00089795 | Dialog=220630264 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00053834 | Dialog=220633039 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00007639 | Dialog=220636055 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00013935 | Dialog=220636335 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00137566 | Dialog=220636339 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000375 | Dialog=220637011 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00001167 | Dialog=220637958 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00143475 | Dialog=220639459 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000027 | Dialog=220639610 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00133848 | Dialog=220640134 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00199014 | Dialog=220640218 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00000090 | Dialog=220641014 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00000375 | Dialog=220642608 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00370459 | Dialog=220643949 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00053256 | Dialog=220644547 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00384194 | Dialog=220645111 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00000090 | Dialog=220648082 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00005356 | Dialog=220649361 | Turn=1 | Policy=AskClarification | Pred=[]
+dialogue_ids = [
+    "220597650",
+    "220598242",
+    "220601341",
+    "220602107",
+    "220602842",
+    "220605645",
+    "220605890",
+    "220612403",
+    "220615688",
+    "220615885",
+    "220625044",
+    "220630264",
+    "220633039",
+    "220636055",
+    "220636335",
+    "220636339",
+    "220637011",
+    "220637958",
+    "220639459",
+    "220639610",
+    "220640134",
+    "220640218",
+    "220641014",
+    "220642608",
+    "220643949",
+    "220644547",
+    "220645111",
+    "220645891",
+    "220645891",
+    "220648082",
+    "220649361",
 
-没有选择对案例: 44 (23.40%)
-  KT00071662 | Dialog=220601730 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00290005']
-  KT00004457 | Dialog=220602287 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00006733']
-  KT00000200 | Dialog=220602429 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000935']
-  KT00002636 | Dialog=220603340 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00344536', 'KT00360945']
-  KT00317770 | Dialog=220607028 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00226785', 'KT00066712']
-  KT00000200 | Dialog=220609552 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00007124', 'KT00000600', 'KT00004220']
-  KT00385432 | Dialog=220611532 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00050865', 'KT00002353']
-  KT00356341 | Dialog=220611592 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000086']
-  KT00191104 | Dialog=220614139 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00042679']
-  KT00191104 | Dialog=220614653 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00002092']
-  KT00000375 | Dialog=220615344 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00343514', 'KT00007023']
-  KT00001086 | Dialog=220615759 | Turn=4 | Policy=CaseRecommendation | Pred=['KT00000745']
-  KT00046803 | Dialog=220616297 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00380077']
-  KT00059944 | Dialog=220616752 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00279868']
-  KT00031746 | Dialog=220617973 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00046179']
-  KT00030301 | Dialog=220619915 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00042696']
-  KT00134247 | Dialog=220620373 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00241185']
-  KT00136967 | Dialog=220622297 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000632']
-  KT00270912 | Dialog=220627809 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00176496', 'KT00000358']
-  KT00024589 | Dialog=220630264 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00290844', 'KT00073402']
-  KT00003012 | Dialog=220630299 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000375']
-  KT00000795 | Dialog=220631189 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00002362']
-  KT00000375 | Dialog=220631384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002110', 'KT00359824']
-  KT00230643 | Dialog=220632199 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00144584']
-  KT00270912 | Dialog=220632271 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00191614']
-  KT00000821 | Dialog=220633700 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000090']
-  KT00097524 | Dialog=220635086 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00364184', 'KT00011622']
-  KT00013935 | Dialog=220635601 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00136094']
-  KT00381469 | Dialog=220637384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481', 'KT00264451', 'KT00007944', 'KT00336893']
-  KT00000200 | Dialog=220637922 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000600', 'KT00007124']
-  KT00241855 | Dialog=220637958 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00412269']
-  KT00000842 | Dialog=220639336 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00007377', 'KT00002815']
-  KT00205143 | Dialog=220639419 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00089795']
-  KT00296401 | Dialog=220639453 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00363881']
-  KT00296401 | Dialog=220639985 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700', 'KT00364052']
-  KT00298129 | Dialog=220641370 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00220421', 'KT00001173']
-  KT00270912 | Dialog=220642075 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00191614']
-  KT00296401 | Dialog=220643327 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700']
-  KT00240991 | Dialog=220644717 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00185993']
-  KT00191104 | Dialog=220645941 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00002092']
-  KT00296401 | Dialog=220646505 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700']
-  KT00334367 | Dialog=220647162 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481']
-  KT00247420 | Dialog=220649660 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00235521']
-  KT00000608 | Dialog=220649743 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000963', 'KT00251877']
+    "220601730",
+    "220602287",
+    "220602429",
+    "220603340",
+    "220607028",
+    "220609552",
+    "220611532",
+    "220611592",
+    "220614139",
+    "220614653",
+    "220615344",
+    "220615759",
+    "220616297",
+    "220616752",
+    "220617973",
+    "220619915",
+    "220620373",
+    "220622297",
+    "220627809",
+    "220630264",
+    "220630299",
+    "220631189",
+    "220631384",
+    "220632199",
+    "220632271",
+    "220633700",
+    "220635086",
+    "220635601",
+    "220637384",
+    "220637922",
+    "220637958",
+    "220639336",
+    "220639419",
+    "220639453",
+    "220639985",
+    "220641370",
+    "220642075",
+    "220643327",
+    "220644717",
+    "220645941",
+    "220646505",
+    "220647162",
+    "220649660",
+    "220649743"
+]
