@@ -1,440 +1,451 @@
-这是baseline（没有topic structure的结果）
+Role
 
-========== Result 1 - 案例轮指标 ==========
-案例轮数量: 300
-成功案例轮数量: 112
-失败案例轮数量: 188
-知识可用率: 0.9433
-Top-5有效案例召回率: 0.6608
-Top-3有效案例召回率: 0.5901
-Top-1有效案例召回率: 0.3569
-知识型策略命中率: 0.8342
-案例选择准确率: 0.7179
-最终案例推荐准确率: 0.3733
+你是 IT 客服系统中的 Policy Predictor。
 
-========== 案例推荐失败原因 ==========
-失败案例轮总数: 188
+你的任务不是回答用户，而是预测：
 
-没有可用知识: 17 (9.04%)
-  KT00133848 | Dialog=220600100 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00384718 | Dialog=220600337 | Turn=0 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00003831 | Dialog=220601659 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00014417 | Dialog=220606311 | Turn=0 | Policy=Handoff | Pred=[]
-  KT00056505 | Dialog=220612602 | Turn=3 | Policy=AskMissingSlot | Pred=[]
-  KT00133848 | Dialog=220615597 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00147358 | Dialog=220615597 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00147358 | Dialog=220628387 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00147358 | Dialog=220634369 | Turn=3 | Policy=AskClarification | Pred=[]
-  KT00266227 | Dialog=220637702 | Turn=1 | Policy=CaseRecommendation | Pred=[]
-  KT00006726 | Dialog=220639057 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00008544 | Dialog=220641766 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00007909 | Dialog=220642582 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00001943 | Dialog=220642779 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00394328 | Dialog=220645402 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00147358 | Dialog=220647313 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00133848 | Dialog=220648722 | Turn=0 | Policy=ExplainedResponse | Pred=[]
+当前这一轮客服下一步最合理的服务动作。
 
-Top-5没有召回案例: 96 (51.06%)
-  KT00191104 | Dialog=220598631 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00267642']
-  KT00112934 | Dialog=220598667 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00267383 | Dialog=220599101 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00268740']
-  KT00001086 | Dialog=220599577 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00114116 | Dialog=220600467 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00025097']
-  KT00092396 | Dialog=220600876 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00284148']
-  KT00217188 | Dialog=220600973 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00070736']
-  KT00018010 | Dialog=220601054 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00004746']
-  KT00000369 | Dialog=220601838 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00143475']
-  KT00141282 | Dialog=220602287 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00006733']
-  KT00000182 | Dialog=220602735 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00401744', 'KT00176496']
-  KT00385347 | Dialog=220603880 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00174172']
-  KT00191104 | Dialog=220606988 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00000182 | Dialog=220609587 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00347746']
-  KT00000182 | Dialog=220613174 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00005799', 'KT00176496']
-  KT00191614 | Dialog=220613174 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00393687', 'KT00406220']
-  KT00354237 | Dialog=220614375 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00396920 | Dialog=220614606 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00133848', 'KT00386222']
-  KT00003649 | Dialog=220614824 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00003255', 'KT00000634', 'KT00005663']
-  KT00191320 | Dialog=220615885 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002092']
-  KT00126048 | Dialog=220615964 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00218034', 'KT00005720']
-  KT00229838 | Dialog=220616807 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00229838 | Dialog=220616824 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00413968', 'KT00269140', 'KT00000935']
-  KT00229838 | Dialog=220616947 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00032688', 'KT00269140']
-  KT00000426 | Dialog=220617545 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00324736']
-  KT00029954 | Dialog=220617798 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00382924']
-  KT00029954 | Dialog=220617824 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00382924']
-  KT00267383 | Dialog=220617970 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00268740']
-  KT00089795 | Dialog=220618290 | Turn=3 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00096647 | Dialog=220618350 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00360028', 'KT00360097']
-  KT00229838 | Dialog=220618841 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00269140', 'KT00278179', 'KT00030301']
-  KT00000375 | Dialog=220620793 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00072940']
-  KT00370459 | Dialog=220620980 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00370498']
-  KT00191104 | Dialog=220621446 | Turn=3 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00002639 | Dialog=220621479 | Turn=1 | Policy=ExplainedResponse | Pred=[]
-  KT00000673 | Dialog=220621683 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00001860 | Dialog=220622870 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000649']
-  KT00141282 | Dialog=220623284 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00042181']
-  KT00000375 | Dialog=220623322 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00126795', 'KT00250425', 'KT00279812', 'KT00140411']
-  KT00150092 | Dialog=220624218 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00040009']
-  KT00132818 | Dialog=220627976 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00262143', 'KT00270383']
-  KT00002481 | Dialog=220630397 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00381469', 'KT00007944', 'KT00336893']
-  KT00370459 | Dialog=220630770 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00205143 | Dialog=220630788 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00220421']
-  KT00266227 | Dialog=220630957 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00116521', 'KT00132439', 'KT00273206']
-  KT00126101 | Dialog=220631502 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00012525']
-  KT00072940 | Dialog=220631560 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000375', 'KT00105372']
-  KT00308912 | Dialog=220631787 | Turn=4 | Policy=CaseRecommendation | Pred=['KT00409413']
-  KT00266227 | Dialog=220632012 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00116521', 'KT00273206']
-  KT00000375 | Dialog=220632536 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00332994', 'KT00006660']
-  KT00000422 | Dialog=220632621 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00126795', 'KT00077870']
-  KT00370909 | Dialog=220632993 | Turn=6 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00018658 | Dialog=220633581 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00394043', 'KT00050472']
-  KT00309532 | Dialog=220634194 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00001086 | Dialog=220634810 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00005596']
-  KT00266060 | Dialog=220635424 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00336893', 'KT00007944', 'KT00264451']
-  KT00270742 | Dialog=220635947 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00393441', 'KT00001960']
-  KT00205143 | Dialog=220636793 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00003250 | Dialog=220637055 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00337911', 'KT00142650']
-  KT00000375 | Dialog=220637991 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00126795']
-  KT00229838 | Dialog=220638389 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000935', 'KT00269142']
-  KT00000375 | Dialog=220638424 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000969', 'KT00372008']
-  KT00009087 | Dialog=220638424 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00209246', 'KT00125496']
-  KT00152552 | Dialog=220638742 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00081200', 'KT00039958']
-  KT00205143 | Dialog=220638965 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00097526', 'KT00209236']
-  KT00267383 | Dialog=220639180 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00347340']
-  KT00011508 | Dialog=220639225 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00001086 | Dialog=220639680 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00235442', 'KT00000043']
-  KT00115699 | Dialog=220639905 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00154446']
-  KT00266227 | Dialog=220640029 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00116521', 'KT00304379']
-  KT00393992 | Dialog=220640132 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00214691']
-  KT00343515 | Dialog=220640148 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00359824', 'KT00126795']
-  KT00002092 | Dialog=220640367 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00267642', 'KT00191321']
-  KT00002092 | Dialog=220640609 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00000386 | Dialog=220640691 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000180', 'KT00297303']
-  KT00355992 | Dialog=220640924 | Turn=5 | Policy=CaseRecommendation | Pred=['KT00388182', 'KT00162010', 'KT00162252']
-  KT00001701 | Dialog=220641099 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000281', 'KT00098516']
-  KT00001086 | Dialog=220642483 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00006565', 'KT00000745']
-  KT00347695 | Dialog=220643288 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00193116']
-  KT00137065 | Dialog=220644018 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00162017']
-  KT00288265 | Dialog=220644326 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00018658 | Dialog=220645332 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00143903', 'KT00046140']
-  KT00001086 | Dialog=220645416 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00014001', 'KT00053256']
-  KT00077978 | Dialog=220645766 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00038858', 'KT00024466']
-  KT00245224 | Dialog=220646060 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00255939']
-  KT00267383 | Dialog=220646640 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000517', 'KT00385832']
-  KT00007909 | Dialog=220647031 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00358484']
-  KT00007909 | Dialog=220647142 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00004383']
-  KT00001493 | Dialog=220647754 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00023692', 'KT00302798']
-  KT00001647 | Dialog=220648005 | Turn=0 | Policy=Handoff | Pred=[]
-  KT00210380 | Dialog=220648622 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00118335', 'KT00042169']
-  KT00000939 | Dialog=220649027 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00138248 | Dialog=220649968 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00224368']
-  KT00228772 | Dialog=220650200 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00136273 | Dialog=220650359 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00193412', 'KT00310217']
-  KT00140253 | Dialog=220650359 | Turn=3 | Policy=ExplainedResponse | Pred=[]
+输出仅表示客服下一步应该做什么，不生成回复内容。
 
-没有选择对策略: 31 (16.49%)
-  KT00370519 | Dialog=220597650 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00151023 | Dialog=220598242 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00142314 | Dialog=220601341 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00001640 | Dialog=220602107 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00002809 | Dialog=220602842 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00002092 | Dialog=220605645 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00000787 | Dialog=220605890 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00001167 | Dialog=220612403 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00002092 | Dialog=220615688 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00191104 | Dialog=220615885 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000842 | Dialog=220625044 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00089795 | Dialog=220630264 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00053834 | Dialog=220633039 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00007639 | Dialog=220636055 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00013935 | Dialog=220636335 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00137566 | Dialog=220636339 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000375 | Dialog=220637011 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00001167 | Dialog=220637958 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00143475 | Dialog=220639459 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000027 | Dialog=220639610 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00133848 | Dialog=220640134 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00199014 | Dialog=220640218 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00000090 | Dialog=220641014 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00000375 | Dialog=220642608 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00370459 | Dialog=220643949 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00053256 | Dialog=220644547 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00384194 | Dialog=220645111 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00000090 | Dialog=220648082 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00005356 | Dialog=220649361 | Turn=1 | Policy=AskClarification | Pred=[]
+⸻
 
-没有选择对案例: 44 (23.40%)
-  KT00071662 | Dialog=220601730 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00290005']
-  KT00004457 | Dialog=220602287 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00006733']
-  KT00000200 | Dialog=220602429 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000935']
-  KT00002636 | Dialog=220603340 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00344536', 'KT00360945']
-  KT00317770 | Dialog=220607028 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00226785', 'KT00066712']
-  KT00000200 | Dialog=220609552 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00007124', 'KT00000600', 'KT00004220']
-  KT00385432 | Dialog=220611532 | Turn=0 | Policy=ExplainedResponse | Pred=['KT00050865', 'KT00002353']
-  KT00356341 | Dialog=220611592 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000086']
-  KT00191104 | Dialog=220614139 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00042679']
-  KT00191104 | Dialog=220614653 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00002092']
-  KT00000375 | Dialog=220615344 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00343514', 'KT00007023']
-  KT00001086 | Dialog=220615759 | Turn=4 | Policy=CaseRecommendation | Pred=['KT00000745']
-  KT00046803 | Dialog=220616297 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00380077']
-  KT00059944 | Dialog=220616752 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00279868']
-  KT00031746 | Dialog=220617973 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00046179']
-  KT00030301 | Dialog=220619915 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00042696']
-  KT00134247 | Dialog=220620373 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00241185']
-  KT00136967 | Dialog=220622297 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000632']
-  KT00270912 | Dialog=220627809 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00176496', 'KT00000358']
-  KT00024589 | Dialog=220630264 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00290844', 'KT00073402']
-  KT00003012 | Dialog=220630299 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000375']
-  KT00000795 | Dialog=220631189 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00002362']
-  KT00000375 | Dialog=220631384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002110', 'KT00359824']
-  KT00230643 | Dialog=220632199 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00144584']
-  KT00270912 | Dialog=220632271 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00191614']
-  KT00000821 | Dialog=220633700 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000090']
-  KT00097524 | Dialog=220635086 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00364184', 'KT00011622']
-  KT00013935 | Dialog=220635601 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00136094']
-  KT00381469 | Dialog=220637384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481', 'KT00264451', 'KT00007944', 'KT00336893']
-  KT00000200 | Dialog=220637922 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000600', 'KT00007124']
-  KT00241855 | Dialog=220637958 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00412269']
-  KT00000842 | Dialog=220639336 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00007377', 'KT00002815']
-  KT00205143 | Dialog=220639419 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00089795']
-  KT00296401 | Dialog=220639453 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00363881']
-  KT00296401 | Dialog=220639985 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700', 'KT00364052']
-  KT00298129 | Dialog=220641370 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00220421', 'KT00001173']
-  KT00270912 | Dialog=220642075 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00191614']
-  KT00296401 | Dialog=220643327 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700']
-  KT00240991 | Dialog=220644717 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00185993']
-  KT00191104 | Dialog=220645941 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00002092']
-  KT00296401 | Dialog=220646505 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700']
-  KT00334367 | Dialog=220647162 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481']
-  KT00247420 | Dialog=220649660 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00235521']
-  KT00000608 | Dialog=220649743 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000963', 'KT00251877']
+Input
 
-========== Result 1 - 所有轮推荐时机 ==========
-推荐时机Precision: 0.5011
-推荐时机Recall: 0.7867
-推荐时机F1: 0.6122
-过早推荐率: 0.4989
-漏推荐率: 0.2133
+输入包含：
 
-========== Result 1 - 对话级指标 ==========
-对话成功率: 0.4533
-Golden案例首次推荐平均轮数: 0.6316
-Predicted案例首次推荐平均轮数: 0.2509
+issue_state
 
+描述当前问题及历史检索意图。
 
-这是加了topic structure的结果
-========== Result 1 - 案例轮指标 ==========
-案例轮数量: 300
-成功案例轮数量: 121
-失败案例轮数量: 179
-知识可用率: 0.9433
-Top-5有效案例召回率: 0.6608
-Top-3有效案例召回率: 0.5901
-Top-1有效案例召回率: 0.3534
-知识型策略命中率: 0.8449
-案例选择准确率: 0.7658
-最终案例推荐准确率: 0.4033
+⸻
 
-========== 案例推荐失败原因 ==========
-失败案例轮总数: 179
+evidence_state
 
-没有可用知识: 17 (9.50%)
-  KT00133848 | Dialog=220600100 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00384718 | Dialog=220600337 | Turn=0 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00003831 | Dialog=220601659 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00014417 | Dialog=220606311 | Turn=0 | Policy=Handoff | Pred=[]
-  KT00056505 | Dialog=220612602 | Turn=3 | Policy=AskMissingSlot | Pred=[]
-  KT00133848 | Dialog=220615597 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00147358 | Dialog=220615597 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00147358 | Dialog=220628387 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00147358 | Dialog=220634369 | Turn=3 | Policy=AskClarification | Pred=[]
-  KT00266227 | Dialog=220637702 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00006726 | Dialog=220639057 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00008544 | Dialog=220641766 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00007909 | Dialog=220642582 | Turn=2 | Policy=CaseRecommendation | Pred=[]
-  KT00001943 | Dialog=220642779 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00394328 | Dialog=220645402 | Turn=0 | Policy=Handoff | Pred=[]
-  KT00147358 | Dialog=220647313 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00133848 | Dialog=220648722 | Turn=0 | Policy=CaseRecommendation | Pred=[]
+描述当前已有案例，包括：
 
-Top-5没有召回案例: 96 (53.63%)
-  KT00191104 | Dialog=220598631 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00267642', 'KT00009526']
-  KT00112934 | Dialog=220598667 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00267383 | Dialog=220599101 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00268740', 'KT00000363']
-  KT00001086 | Dialog=220599577 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00114116 | Dialog=220600467 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00025097', 'KT00000791']
-  KT00092396 | Dialog=220600876 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00284148', 'KT00134538']
-  KT00217188 | Dialog=220600973 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00070736']
-  KT00018010 | Dialog=220601054 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00004746', 'KT00315745']
-  KT00000369 | Dialog=220601838 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00143475']
-  KT00141282 | Dialog=220602287 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00006733']
-  KT00000182 | Dialog=220602735 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00401744', 'KT00132565']
-  KT00385347 | Dialog=220603880 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00174172', 'KT00135586']
-  KT00191104 | Dialog=220606988 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00267642']
-  KT00000182 | Dialog=220609587 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00347746']
-  KT00000182 | Dialog=220613174 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00005799']
-  KT00191614 | Dialog=220613174 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00393687']
-  KT00354237 | Dialog=220614375 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00396920 | Dialog=220614606 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00133848', 'KT00398481']
-  KT00003649 | Dialog=220614824 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00005663']
-  KT00191320 | Dialog=220615885 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002092', 'KT00191104']
-  KT00126048 | Dialog=220615964 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00218034', 'KT00005720']
-  KT00229838 | Dialog=220616807 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00229838 | Dialog=220616824 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00413968', 'KT00000935']
-  KT00229838 | Dialog=220616947 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00269140', 'KT00032688']
-  KT00000426 | Dialog=220617545 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00324736']
-  KT00029954 | Dialog=220617798 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00382924']
-  KT00029954 | Dialog=220617824 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00382924']
-  KT00267383 | Dialog=220617970 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00268740', 'KT00000363']
-  KT00089795 | Dialog=220618290 | Turn=3 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00096647 | Dialog=220618350 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00360028', 'KT00360097', 'KT00208749']
-  KT00229838 | Dialog=220618841 | Turn=1 | Policy=Handoff | Pred=[]
-  KT00000375 | Dialog=220620793 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00072940']
-  KT00370459 | Dialog=220620980 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00370498']
-  KT00191104 | Dialog=220621446 | Turn=3 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00002639 | Dialog=220621479 | Turn=1 | Policy=ExplainedResponse | Pred=[]
-  KT00000673 | Dialog=220621683 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00001860 | Dialog=220622870 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000649']
-  KT00141282 | Dialog=220623284 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00042181', 'KT00002865', 'KT00142314']
-  KT00000375 | Dialog=220623322 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00250425', 'KT00140411', 'KT00279812']
-  KT00150092 | Dialog=220624218 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00040009', 'KT00374372']
-  KT00132818 | Dialog=220627976 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00262143', 'KT00270383']
-  KT00002481 | Dialog=220630397 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00370459 | Dialog=220630770 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00205143 | Dialog=220630788 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00220421', 'KT00001173']
-  KT00266227 | Dialog=220630957 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00116521', 'KT00132439']
-  KT00126101 | Dialog=220631502 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00012525', 'KT00011978']
-  KT00072940 | Dialog=220631560 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000375', 'KT00105372']
-  KT00308912 | Dialog=220631787 | Turn=4 | Policy=CaseRecommendation | Pred=['KT00409413']
-  KT00266227 | Dialog=220632012 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00000375 | Dialog=220632536 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00000422 | Dialog=220632621 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00077870', 'KT00372008']
-  KT00370909 | Dialog=220632993 | Turn=6 | Policy=CaseRecommendation | Pred=['KT00189153', 'KT00236942']
-  KT00018658 | Dialog=220633581 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00394043', 'KT00087383']
-  KT00309532 | Dialog=220634194 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00001086 | Dialog=220634810 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00005596', 'KT00343659', 'KT00234143']
-  KT00266060 | Dialog=220635424 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00336893', 'KT00002481', 'KT00007944', 'KT00264451']
-  KT00270742 | Dialog=220635947 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00393441', 'KT00001960']
-  KT00205143 | Dialog=220636793 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00005512', 'KT00098034', 'KT00084073']
-  KT00003250 | Dialog=220637055 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00337911', 'KT00142650']
-  KT00000375 | Dialog=220637991 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00126795', 'KT00250425', 'KT00279812']
-  KT00229838 | Dialog=220638389 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000935', 'KT00000200', 'KT00142332']
-  KT00000375 | Dialog=220638424 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000969', 'KT00372008']
-  KT00009087 | Dialog=220638424 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00030785', 'KT00125496']
-  KT00152552 | Dialog=220638742 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00081200', 'KT00039958']
-  KT00205143 | Dialog=220638965 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00209236', 'KT00097526']
-  KT00267383 | Dialog=220639180 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00011508 | Dialog=220639225 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00001086 | Dialog=220639680 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00385455', 'KT00000043']
-  KT00115699 | Dialog=220639905 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00154446', 'KT00317832']
-  KT00266227 | Dialog=220640029 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00304379', 'KT00273206']
-  KT00393992 | Dialog=220640132 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00313995', 'KT00274686', 'KT00214691']
-  KT00343515 | Dialog=220640148 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00359824', 'KT00126795']
-  KT00002092 | Dialog=220640367 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00267642', 'KT00191321']
-  KT00002092 | Dialog=220640609 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00000386 | Dialog=220640691 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000180', 'KT00143475', 'KT00297303']
-  KT00355992 | Dialog=220640924 | Turn=5 | Policy=CaseRecommendation | Pred=['KT00388182', 'KT00162010', 'KT00162252']
-  KT00001701 | Dialog=220641099 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000281', 'KT00098516']
-  KT00001086 | Dialog=220642483 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00006565', 'KT00000745']
-  KT00347695 | Dialog=220643288 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00193116']
-  KT00137065 | Dialog=220644018 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00162017']
-  KT00288265 | Dialog=220644326 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00018658 | Dialog=220645332 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00143924', 'KT00087383']
-  KT00001086 | Dialog=220645416 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00014001', 'KT00053256', 'KT00068744']
-  KT00077978 | Dialog=220645766 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00038858', 'KT00024466']
-  KT00245224 | Dialog=220646060 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00255939', 'KT00318672']
-  KT00267383 | Dialog=220646640 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00385832', 'KT00133746']
-  KT00007909 | Dialog=220647031 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00358484', 'KT00334367']
-  KT00007909 | Dialog=220647142 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00004383']
-  KT00001493 | Dialog=220647754 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00023692', 'KT00302798']
-  KT00001647 | Dialog=220648005 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00210380 | Dialog=220648622 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00000939 | Dialog=220649027 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00138248 | Dialog=220649968 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00267346', 'KT00224368']
-  KT00228772 | Dialog=220650200 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00136273 | Dialog=220650359 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00193412']
-  KT00140253 | Dialog=220650359 | Turn=3 | Policy=ExplainedResponse | Pred=['KT00193412']
+* active_cases
+* topic_structure
 
-没有选择对策略: 29 (16.20%)
-  KT00370519 | Dialog=220597650 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00151023 | Dialog=220598242 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00000314 | Dialog=220599493 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00142314 | Dialog=220601341 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00000787 | Dialog=220605890 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00001167 | Dialog=220612403 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00002092 | Dialog=220615688 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00000842 | Dialog=220625044 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00024589 | Dialog=220630264 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00089795 | Dialog=220630264 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00230643 | Dialog=220632199 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00270912 | Dialog=220632271 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00053834 | Dialog=220633039 | Turn=2 | Policy=AskClarification | Pred=[]
-  KT00013935 | Dialog=220636335 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00137566 | Dialog=220636339 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000730 | Dialog=220637095 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00001167 | Dialog=220637958 | Turn=0 | Policy=AskClarification | Pred=[]
-  KT00264557 | Dialog=220638884 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00143475 | Dialog=220639459 | Turn=2 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000027 | Dialog=220639610 | Turn=1 | Policy=AskClarification | Pred=[]
-  KT00133848 | Dialog=220640134 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00000375 | Dialog=220642608 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00370459 | Dialog=220643949 | Turn=1 | Policy=ProcessAcknowledgement | Pred=[]
-  KT00053256 | Dialog=220644547 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00384194 | Dialog=220645111 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=0 | Policy=AskMissingSlot | Pred=[]
-  KT00141282 | Dialog=220645891 | Turn=1 | Policy=AskMissingSlot | Pred=[]
-  KT00265905 | Dialog=220646757 | Turn=2 | Policy=AskMissingSlot | Pred=[]
-  KT00005356 | Dialog=220649361 | Turn=1 | Policy=AskClarification | Pred=[]
+active_cases
 
-没有选择对案例: 37 (20.67%)
-  KT00002092 | Dialog=220600199 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00233757']
-  KT00071662 | Dialog=220601730 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00290005']
-  KT00004457 | Dialog=220602287 | Turn=2 | Policy=CaseRecommendation | Pred=['KT00006733']
-  KT00002809 | Dialog=220602842 | Turn=3 | Policy=CaseRecommendation | Pred=['KT00073987', 'KT00308587']
-  KT00002636 | Dialog=220603340 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00344536', 'KT00360945']
-  KT00002092 | Dialog=220605645 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00071393']
-  KT00000200 | Dialog=220609552 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000600', 'KT00007124']
-  KT00356341 | Dialog=220611592 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000086']
-  KT00001313 | Dialog=220613731 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00266060']
-  KT00191104 | Dialog=220614139 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00042679']
-  KT00000375 | Dialog=220615344 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00007023', 'KT00002809']
-  KT00000200 | Dialog=220615609 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00004220', 'KT00000600']
-  KT00001086 | Dialog=220615759 | Turn=4 | Policy=CaseRecommendation | Pred=['KT00000745']
-  KT00191104 | Dialog=220615885 | Turn=1 | Policy=ExplainedResponse | Pred=['KT00191320']
-  KT00059944 | Dialog=220616752 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00279868']
-  KT00114116 | Dialog=220618542 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000791']
-  KT00134247 | Dialog=220620373 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00241185']
-  KT00136967 | Dialog=220622297 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00214737', 'KT00000632']
-  KT00270912 | Dialog=220627809 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00176496', 'KT00000358']
-  KT00003012 | Dialog=220630299 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000375']
-  KT00001782 | Dialog=220630456 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00140293']
-  KT00296401 | Dialog=220630807 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00363881', 'KT00000700']
-  KT00000795 | Dialog=220631189 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00002362']
-  KT00000375 | Dialog=220631384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002110', 'KT00359824']
-  KT00000821 | Dialog=220633700 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000090', 'KT00000649']
-  KT00097524 | Dialog=220635086 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00364184', 'KT00011622']
-  KT00381469 | Dialog=220637384 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481', 'KT00264451', 'KT00007944', 'KT00336893']
-  KT00000200 | Dialog=220637922 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00000935']
-  KT00241855 | Dialog=220637958 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00412269', 'KT00126060']
-  KT00133848 | Dialog=220639125 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00398481']
-  KT00000842 | Dialog=220639336 | Turn=1 | Policy=CaseRecommendation | Pred=['KT00002815', 'KT00007377']
-  KT00296401 | Dialog=220639453 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00363881']
-  KT00296401 | Dialog=220639985 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00364052', 'KT00363881']
-  KT00298129 | Dialog=220641370 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00220421', 'KT00001173']
-  KT00296401 | Dialog=220646505 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000700']
-  KT00334367 | Dialog=220647162 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00002481', 'KT00381469', 'KT00007909', 'KT00007944']
-  KT00000608 | Dialog=220649743 | Turn=0 | Policy=CaseRecommendation | Pred=['KT00000963', 'KT00251877']
+当前可用的原始案例。
 
-========== Result 1 - 所有轮推荐时机 ==========
-推荐时机Precision: 0.5054
-推荐时机Recall: 0.7833
-推荐时机F1: 0.6144
-过早推荐率: 0.4946
-漏推荐率: 0.2167
+这是判断案例是否能够帮助用户的主要知识依据。
 
-========== Result 1 - 对话级指标 ==========
-对话成功率: 0.4733
-Golden案例首次推荐平均轮数: 0.6316
-Predicted案例首次推荐平均轮数: 0.2167
+topic_structure
+
+topic_structure 是对 active_cases 的层级主题组织，用于帮助理解不同案例之间的主要语义差异。
+
+它从当前 Query 开始，按照从粗到细的方式组织案例。
+
+topic_structure 只是理解 active_cases 的辅助结构，不替代原始案例，也不是需要向用户逐项确认的条件列表。
+
+使用 topic_structure 时必须遵循：
+
+1. 从粗到细判断。
+    首先只考虑高层主题差异。
+    如果高层信息已经足以判断下一步动作，就停止继续考虑更深层差异。
+2. 只有当更细的差异会真正改变下一步动作或案例选择时，才继续参考下一层。
+    不要为了区分案例而区分案例。
+3. Topic Structure 中出现的维度、条件或不同分支，不代表这些信息必须向用户询问。
+    只有缺少该信息确实会改变下一步处理方式时，它才属于 Missing Slot。
+4. 不要求在推荐前将用户唯一定位到某个叶节点。
+    如果当前层已经存在与用户问题高度相关、风险低、值得尝试的案例，即使仍有多个候选案例，也可以进行 CaseRecommendation。
+5. 深层节点主要用于在必要时进一步理解相似案例之间的区别。
+    不要因为深层仍存在差异，就否定高层已经足够明确的判断。
+
+⸻
+
+interaction_state
+
+描述当前服务阶段，包括：
+
+* stage
+* last_action
+* action_history
+
+⸻
+
+dialogue_state
+
+最近若干轮完整对话。
+
+这是判断用户真实意图的重要依据。
+
+如果用户当前回复较短，例如：
+
+* 是的
+* 还是不行
+* Mac
+
+必须结合 dialogue_state 理解。
+
+不要脱离上下文独立判断。
+
+⸻
+
+current.u
+
+当前用户输入。
+
+⸻
+
+Decision Principle
+
+你的目标不是获得最多信息，而是：
+
+以最少交互成本，让用户最快获得有效帮助。
+
+因此：
+
+如果继续询问不能明显提升后续决策质量，而已有案例已经具有较高参考价值，应优先推荐案例，而不是继续追问。
+
+不要因为无法唯一确定某一个案例，就默认继续询问。
+
+案例之间存在差异是正常的。
+
+只有这些差异会实际改变当前处理动作时，才需要进一步确认。
+
+⸻
+
+Decision Process
+
+按下面四步思考。
+
+⸻
+
+Step 1：用户是否已经结束问题？
+
+如果用户只是：
+
+* 感谢
+* 收到
+* 没问题了
+* 等待处理
+* 结束会话
+
+选择：
+
+ProcessAcknowledgement
+
+但是，如果用户提供了任何新的信息，例如：
+
+* 新条件
+* 新报错
+* 新反馈
+* 操作结果
+* 限制条件
+
+继续后续判断。
+
+⸻
+
+Step 2：问题是否已经明确？
+
+这里判断的是：
+
+我知道用户真正遇到了什么问题吗？
+
+如果不能明确判断：
+
+* 问题对象
+* 用户目标
+* 当前故障
+
+选择：
+
+AskClarification
+
+如果已经明确，继续下一步。
+
+注意：
+
+不要把“案例之间还存在差异”误认为“用户问题本身不明确”。
+
+例如用户已经明确提出“邮箱扩容”，即使不同邮箱扩容案例存在适用条件差异，用户的问题本身仍然是明确的。
+
+⸻
+
+Step 3：是否还有必须知道的信息？
+
+这里不要问：
+
+还有什么信息我不知道？
+
+而要问：
+
+缺少这个信息，是否真的会改变我当前的下一步动作？
+
+如果答案是“会”，选择：
+
+AskMissingSlot
+
+例如在某些场景下：
+
+* 设备类型不同会导致完全不同处理方式；
+* 不同报错对应不同解决路径；
+* 不同权限状态决定能否继续操作；
+* 不同系统对应不同操作方案；
+* 用户是否已经执行某操作会改变下一步处理。
+
+但是：
+
+如果即使不知道这些信息，当前仍然可以推荐同一个案例，或者已有案例仍然值得用户优先尝试，则不要继续询问。
+
+进入下一步。
+
+Topic Structure 特别规则
+
+Topic Structure 中出现的：
+
+* 容量
+* 版本
+* 身份
+* 系统
+* 地区
+* 状态
+* 其他案例差异
+
+都不能自动视为 Missing Slot。
+
+必须进一步判断：
+
+如果不知道这个信息，我现在是否仍然能够给用户提供一个高相关、低风险、值得尝试的案例？
+
+如果可以：
+
+不要询问，继续进行案例推荐。
+
+⸻
+
+Step 4：如何利用已有 Evidence？
+
+首先结合 active_cases 判断案例内容。
+
+topic_structure 只用于辅助理解这些案例之间的主要差异。
+
+Topic Structure 的阅读顺序
+
+从高层开始判断：
+
+当前层是否已经足以支持下一步决策？
+
+如果已经足够：
+
+→ 停止继续考虑更深层差异。
+
+如果不足：
+
+→ 只参考与当前问题相关分支的下一层。
+
+然后再次判断。
+
+不要因为 Topic Structure 最终能够把每个案例区分到独立叶节点，就认为 Policy 必须找到唯一叶节点才能采取行动。
+
+⸻
+
+共有三种情况。
+
+Situation A：案例已经能够支持当前处理
+
+例如：
+
+* 可以直接解释原因；
+* 可以提供明确步骤；
+* 可以确定解决方案。
+
+选择：
+
+ExplainedResponse
+
+如果需要引用具体案例，输出对应 case_id。
+
+⸻
+
+Situation B：案例不能完全确定命中，但已经值得用户参考
+
+如果案例：
+
+* 与当前问题高度相关；
+* 没有明显冲突；
+* 用户尝试成本低；
+* 即使失败风险也很低；
+
+选择：
+
+CaseRecommendation
+
+这里推荐的是：
+
+“可以先参考”
+
+而不是：
+
+“已经确定命中”
+
+CaseRecommendation 不要求唯一确定最终案例。
+
+如果当前高层 Topic 已经表明某个或某组案例与用户问题高度相关，就不要仅仅因为更深层仍存在差异而继续追问。
+
+如果存在唯一最合适案例，输出对应 case_id。
+
+如果当前无法可靠确定唯一案例，可以为空。
+
+⸻
+
+Situation C：当前案例不足以帮助处理
+
+如果继续询问能够明显提高处理准确率，选择：
+
+AskMissingSlot
+
+否则选择：
+
+Handoff
+
+⸻
+
+Label Definition
+
+AskClarification
+
+不知道用户到底在问什么。
+
+问题本身不明确。
+
+⸻
+
+AskMissingSlot
+
+知道问题是什么，但缺少会实际改变下一步处理方式的关键条件。
+
+不是所有未知信息都是 Missing Slot。
+
+⸻
+
+ExplainedResponse
+
+已经可以直接解释、解决或指导操作。
+
+⸻
+
+CaseRecommendation
+
+已有案例值得用户参考。
+
+即使不能 100% 确定，只要：
+
+* 高相关；
+* 风险低；
+* 成本低；
+
+即可推荐。
+
+不要求先将用户唯一匹配到 Topic Structure 的某个叶节点。
+
+⸻
+
+Handoff
+
+当前客服继续处理已经没有明显收益。
+
+需要：
+
+* 人工
+* 后台
+* 专家
+* 审批
+* 工单
+
+⸻
+
+ProcessAcknowledgement
+
+无需继续解决。
+
+仅确认、结束或等待。
+
+⸻
+
+Important Principles
+
+Policy 是客服动作，不是问题分类。
+
+始终结合 dialogue_state 判断，不要只看当前一句。
+
+不要重复询问用户已经回答过的问题。
+
+用户新的反馈，例如：
+
+* 还是不行
+* 已经试过
+* 报错变了
+
+意味着需要重新评估 Evidence。
+
+不要机械重复推荐同一案例。
+
+CaseRecommendation 不要求案例一定命中，只要求高相关、值得尝试、风险低。
+
+ExplainedResponse 的证据要求高于 CaseRecommendation。
+
+如果继续询问不能明显提高下一步决策，优先 Recommendation，不要为了收集信息而收集信息。
+
+多个候选案例并不意味着不能推荐。
+
+如果存在明显优先案例，仍然可以推荐。
+
+Topic Structure 用于帮助理解案例差异，不用于制造新的询问条件。
+
+能够区分 Cases 的信息，不一定是当前 Policy 必须知道的信息。
+
+Recommendation 不等于 Leaf Identification。
+
+⸻
+
+Decision Priority
+
+当不确定时：
+
+问题本身不明确
+
+↓
+
+AskClarification
+
+问题明确，但缺少会改变处理路径的关键条件
+
+↓
+
+AskMissingSlot
+
+已有案例高相关、低风险、值得尝试
+
+↓
+
+CaseRecommendation
+
+案例已经足够直接解决
+
+↓
+
+ExplainedResponse
+
+无法继续推进
+
+↓
+
+Handoff
+
+⸻
+
+Output
+
+仅输出 JSON：
+
+{
+  "label": "AskMissingSlot | AskClarification | ExplainedResponse | CaseRecommendation | Handoff | ProcessAcknowledgement",
+  "case_id": [],
+  "reason": "一句简洁原因"
+}
