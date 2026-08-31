@@ -1,24 +1,13 @@
-Traceback (most recent call last):
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/runpy.py", line 196, in _run_module_as_main
-    return _run_code(code, main_globals, None,
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/runpy.py", line 86, in _run_code
-    exec(code, run_globals)
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/v2.3/run.py", line 2256, in <module>
-    main()
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/v2.3/run.py", line 2229, in main
-    run_memory_agent_batch(
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/v2.3/run.py", line 1911, in run_memory_agent_batch
-    batch_zefeng_rag(
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/v2.3/utils/scu_rag.py", line 109, in batch_zefeng_rag
-    results[idx] = future.result()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/concurrent/futures/_base.py", line 451, in result
-    return self.__get_result()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
-    raise self._exception
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/concurrent/futures/thread.py", line 58, in run
-    result = self.fn(*self.args, **self.kwargs)
-  File "/mnt/nas1/users/CuhkszTeam/RUNTIME/Baselines/静态多轮PE_Memory/v2.3/utils/scu_rag.py", line 58, in zefeng_rag
-    response.raise_for_status()
-  File "/home/aarc/CuhkszTeam/nas1/miniconda3/envs/jiahui/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
-    raise HTTPError(http_error_msg, response=self)
-requests.exceptions.HTTPError: 422 Client Error: Unprocessable Entity for url: http://localhost:8088/process
+def validate_rag_query(query):
+    if isinstance(query, dict):
+        query = query.get("query_text", "")
+
+    if query is None:
+        raise ValueError("RAG query is None")
+
+    query = str(query).strip()
+
+    if not query:
+        raise ValueError("RAG query is empty")
+
+    return query
