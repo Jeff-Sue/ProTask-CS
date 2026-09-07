@@ -1,2271 +1,921 @@
-from __future__ import annotations
-
-import argparse
-import copy
-import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from utils.scu_rag import batch_zefeng_rag
-from utils.qwen_api_multi import parallel_inference
-
-
-# ============================================================
-# Utils
-# ============================================================
-def validate_rag_query(query):
-    if isinstance(query, dict):
-        query = query.get("query_text", "")
-
-    if query is None:
-        raise ValueError("RAG query is None")
-
-    query = str(query).strip()
-
-    if not query:
-        raise ValueError("RAG query is empty")
-
-    return query
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-
-    if not isinstance(text, str):
-        return {}
-
-    text = text.strip()
-
-    if not text:
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    # 兼容 ```json ... ```
-    if "```json" in text:
-        try:
-            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
-
-    if "```" in text:
-        try:
-            text = text.split("```", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
-
-    return {}
-
-
-def parse_llm_output(output):
-    """
-    兼容 parallel_inference 返回：
-    {
-        "response": "..."
-    }
-
-    response 内部可能又是 JSON string。
-    """
-    parsed = parse_json(output)
-
-    if not parsed:
-        return {}
-
-    if "response" not in parsed:
-        return parsed
-
-    return parse_json(parsed["response"])
-
-
-def prompt_read(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Prompt file not found: {path}"
-        )
-
-    return path.read_text(
-        encoding="utf-8"
-    ).strip()
-
-
-def write_json(
-    path: str | Path,
-    data: Any
-) -> None:
-
-    path = Path(path)
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    path.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ),
-        encoding="utf-8"
-    )
-
-
-def build_messages(
-    system_prompt,
-    data
-):
-    return [
-        {
-            "role": "system",
-            "content": system_prompt
+  "220607028": {
+    "turns": [
+      {
+        "turn_id": 0,
+        "dialog_id": "220607028",
+        "user": "我考过了 HCIE 的正式在哪里查看。",
+        "golden_response": "您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "HCIE 考试通过后如何查看正式成绩",
+          "reason": "用户提出了一个新的 IT 相关问题，需要重新生成查询"
         },
-        {
-            "role": "user",
-            "content": json.dumps(
-                data,
-                ensure_ascii=False
-            )
-        }
-    ]
-
-
-def get_case_id(case: Dict) -> str:
-    """
-    根据你的 RAG 数据格式取 case_id。
-    """
-    return str(
-        case.get("case_id", "")
-    ).strip()
-
-
-def case_map_from_cases(
-    cases: List[Dict]
-) -> Dict[str, Dict]:
-
-    result = {}
-
-    for case in cases:
-        case_id = get_case_id(case)
-
-        if case_id:
-            result[case_id] = case
-
-    return result
-
-
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-
-    return {
-
-        "issue_state": {
-            "current_issue": "",
-            "query_history": []
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "not_needed",
+          "case_id": "",
+          "reason": "当前没有可用的 active_cases，需要重新检索案例"
         },
-
-        "dialog_state": {
-            "compressed_history": []
-        },
-
-        "evidence_state": {
-            "active_cases": [],
-
-            # 新增：
-            # 仅作为 Policy 的辅助输入
-            "topic_structure": {}
-        },
-
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": []
-        }
-    }
-
-
-# ============================================================
-# Memory Update
-# ============================================================
-
-def update_issue_memory(
-    memory,
-    query_state
-):
-
-    mode = query_state.get(
-        "query_mode",
-        "none"
-    )
-
-    query = query_state.get(
-        "query_text",
-        ""
-    )
-
-    if mode == "rewrite":
-
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-    elif mode == "refine":
-
-        memory["issue_state"][
-            "current_issue"
-        ] = query
-
-        memory["issue_state"][
-            "query_history"
-        ].append(query)
-
-    elif mode == "reuse":
-        pass
-
-    elif mode == "none":
-        pass
-
-    return memory
-
-
-def update_evidence_memory(
-    memory,
-    trigger_state,
-    evidence,
-    topic_structure=None
-):
-
-    mode = trigger_state.get(
-        "evidence_mode",
-        "no_evidence_needed"
-    )
-
-    # 只有重新检索时才更新 evidence 和 structure
-    if mode == "retrieve_new_evidence":
-
-        memory["evidence_state"][
-            "active_cases"
-        ] = evidence
-
-        memory["evidence_state"][
-            "topic_structure"
-        ] = topic_structure or {}
-
-    # reuse / none：
-    # active_cases 和 topic_structure 都保持原样
-
-    return memory
-
-
-def update_interaction_memory(
-    memory,
-    policy_state
-):
-
-    label = policy_state.get(
-        "label",
-        ""
-    )
-
-    memory["interaction_state"][
-        "last_action"
-    ] = label
-
-    memory["interaction_state"][
-        "action_history"
-    ].append(label)
-
-    if label in [
-        "AskMissingSlot",
-        "AskClarification"
-    ]:
-
-        memory["interaction_state"][
-            "stage"
-        ] = "Clarification"
-
-    elif label in [
-        "ExplainedResponse",
-        "CaseRecommendation"
-    ]:
-
-        memory["interaction_state"][
-            "stage"
-        ] = "Resolution"
-
-    elif label == "Handoff":
-
-        memory["interaction_state"][
-            "stage"
-        ] = "End"
-
-    return memory
-
-
-def update_dialogue_memory(
-    memory,
-    user,
-    response
-):
-
-    history = memory[
-        "dialog_state"
-    ][
-        "compressed_history"
-    ]
-
-    history.append(
-        {
-            "user": user,
-            "assistant": response
-        }
-    )
-
-    memory[
-        "dialog_state"
-    ][
-        "compressed_history"
-    ] = history[-5:]
-
-    return memory
-
-
-# ============================================================
-# Input Builder
-# ============================================================
-
-def build_query_input(
-    memory,
-    user
-):
-
-    return {
-
-        "issue_state":
-            memory["issue_state"],
-
-        "dialog_state":
-            memory["dialog_state"],
-
-        "current": {
-            "u": user
-        }
-    }
-
-
-def build_trigger_input(
-    memory
-):
-    """
-    关键：
-    Trigger 完全保持原来的输入。
-
-    不允许 topic_structure 泄露到 Trigger。
-    """
-
-    return {
-
-        "issue_state":
-            memory["issue_state"],
-
-        "evidence_state": {
-            "active_cases":
-                memory[
-                    "evidence_state"
-                ][
-                    "active_cases"
-                ]
-        },
-
-        "dialog_state":
-            memory["dialog_state"],
-    }
-
-
-def build_policy_input(
-    memory,
-    user
-):
-    """
-    只有 Policy 新增 topic_structure。
-    """
-
-    return {
-
-        "issue_state":
-            memory["issue_state"],
-
-        "evidence_state": {
-
-            # 原始 case 完整保留
-            "active_cases":
-                memory[
-                    "evidence_state"
-                ][
-                    "active_cases"
-                ],
-
-            # 新增辅助信息
-            "topic_structure":
-                memory[
-                    "evidence_state"
-                ][
-                    "topic_structure"
-                ]
-        },
-
-        "interaction_state":
-            memory[
-                "interaction_state"
+        "evidence": [
+          {
+            "case_id": "KT00122980",
+            "title": "考试成绩查询链接",
+            "keywords": [
+              "HCIE成绩查询",
+              "考试结果通知"
             ],
-
-        "dialog_state":
-            memory[
-                "dialog_state"
+            "content": "HCIE认证考试成绩的咨询：考试结束后5个工作日内会通过Certification@huawei.com邮箱通知您考试成绩，请耐心等待。官网介绍请点击：华为认证进阶路径。"
+          },
+          {
+            "case_id": "KT00071844",
+            "title": "已完成证书规则/考试已经通过，查不到证书",
+            "keywords": [
+              "证书查询",
+              "iLearning平台"
             ],
-
-        "current": {
-            "u": user
-        }
-    }
-
-
-def build_response_input(
-    memory,
-    user
-):
-    """
-    Response 也保持旧输入。
-    不允许看到 topic_structure。
-    """
-
-    return {
-
-        "issue_state":
-            memory["issue_state"],
-
-        "evidence_state": {
-            "active_cases":
-                memory[
-                    "evidence_state"
-                ][
-                    "active_cases"
-                ]
-        },
-
-        "interaction_state":
-            memory[
-                "interaction_state"
+            "content": "一、问题现象：\n已经完成证书规则/通过考试，但是未找到证书。\n二、解决方案：\n证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n如果还是无法查询到证书，请联系证书管理员/考试页面的考试管理员咨询。"
+          },
+          {
+            "case_id": "KT00078394",
+            "title": "考试后，多久可以查到证书",
+            "keywords": [
+              "证书查询",
+              "1个工作日"
             ],
-
-        "dialog_state":
-            memory[
-                "dialog_state"
+            "content": "账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书\n我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert"
+          },
+          {
+            "case_id": "KT00226785",
+            "title": "【iLearning】学员如何查看获得的证书",
+            "keywords": [
+              "iLearning",
+              "证书下载"
             ],
-
-        "current": {
-
-            "u": user,
-
-            "policy":
-                memory[
-                    "interaction_state"
-                ][
-                    "last_action"
-                ]
-        },
-    }
-
-
-# ============================================================
-# Topic Structure
-# ============================================================
-
-def build_topic_split_input(
-    query: str,
-    cases: List[Dict],
-    parent_topic: str,
-    depth: int
-):
-    """
-    每一次只做当前节点的一次划分。
-
-    不让模型一次生成完整树。
-    """
-
-    return {
-
-        "query": query,
-
-        "parent_topic": parent_topic,
-
-        "depth": depth,
-
-        "cases": cases
-    }
-
-
-def make_leaf(
-    case_id: str,
-    topic: Optional[str] = None
-):
-
-    return {
-
-        "topic": topic or case_id,
-
-        "case_ids": [
-            case_id
+            "content": "问题描述：\n学员如何查看获得的证书信息，如何下载？\n解决方案：\n证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n请注意：ileaning个人中心证书查看只支持学员使用w3账号参加的，且链接带有：https://ilearning.huawei.com/的考试之后生成的证书信息，如考生使用了外网账号考试，请联系对应的平台协助咨询。"
+          },
+          {
+            "case_id": "KT00097768",
+            "title": "我要怎么查看自己的考试记录",
+            "keywords": [
+              "考试记录",
+              "查询"
+            ],
+            "content": "一、问题现象：\n考试的记录如何查询\n二、解决方案：\n步骤1（或：方法1、场景1）：步骤1标题\n点击个人中心>>工作台>>考试记录 即可查看自己所有的考试记录"
+          }
         ],
-
-        "leaf": True,
-
-        "case_id": case_id,
-
-        "children": []
-    }
-
-
-def normalize_split(
-    split_result: Dict,
-    expected_case_ids: List[str]
-) -> Optional[Dict]:
-    """
-    检查模型生成的 partition 是否合法。
-
-    要求：
-    1. 至少分成两个 group
-    2. 每个 case 必须且只能出现一次
-    3. 不允许出现 parent 中不存在的 case
-    """
-
-    if not isinstance(
-        split_result,
-        dict
-    ):
-        return None
-
-    dimension = str(
-        split_result.get(
-            "dimension",
-            ""
-        )
-    ).strip()
-
-    children = split_result.get(
-        "children",
-        []
-    )
-
-    if not dimension:
-        return None
-
-    if not isinstance(
-        children,
-        list
-    ):
-        return None
-
-    normalized_children = []
-
-    observed = []
-
-    expected_set = set(
-        expected_case_ids
-    )
-
-    for child in children:
-
-        if not isinstance(
-            child,
-            dict
-        ):
-            continue
-
-        topic = str(
-            child.get(
-                "topic",
-                ""
-            )
-        ).strip()
-
-        case_ids = child.get(
-            "case_ids",
-            []
-        )
-
-        if not topic:
-            continue
-
-        if not isinstance(
-            case_ids,
-            list
-        ):
-            continue
-
-        clean_ids = []
-
-        for case_id in case_ids:
-
-            case_id = str(
-                case_id
-            ).strip()
-
-            if (
-                case_id
-                and
-                case_id in expected_set
-            ):
-                clean_ids.append(
-                    case_id
-                )
-
-        # 去重
-        clean_ids = list(
-            dict.fromkeys(
-                clean_ids
-            )
-        )
-
-        if not clean_ids:
-            continue
-
-        normalized_children.append(
-            {
-                "topic": topic,
-                "case_ids": clean_ids
-            }
-        )
-
-        observed.extend(
-            clean_ids
-        )
-
-    # 至少需要两个分支
-    if len(
-        normalized_children
-    ) < 2:
-        return None
-
-    # case 必须覆盖且只能出现一次
-    if sorted(observed) != sorted(
-        expected_case_ids
-    ):
-        return None
-
-    if len(observed) != len(
-        set(observed)
-    ):
-        return None
-
-    return {
-
-        "dimension": dimension,
-
-        "children":
-            normalized_children
-    }
-
-# ============================================================
-# Topic Structure Batch
-# ============================================================
-
-def generate_topic_structures_batch(
-    items: List[Dict],
-    topic_prompt: str,
-    max_depth: int = 8,
-    max_retry: int = 2,
-):
-    """
-    真正的 batch 层级 Topic Structure 生成。
-
-    items:
-    [
-        {
-            "query": "...",
-            "cases": [...]
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [
+            "KT00122980",
+            "KT00071844",
+            "KT00226785"
+          ],
+          "reason": "用户询问HCIE考试通过后如何查看正式成绩，已有多个相关案例提供邮箱通知、iLearning平台证书查询等解决方案，建议优先参考这些高相关性且操作成本低的案例。"
         },
-        ...
-    ]
-
-    核心逻辑：
-    1. 每个 query 作为一棵树的 root
-    2. 当前所有待划分节点组成 frontier
-    3. frontier 中所有节点一次 batch inference
-    4. 每个节点完成一层划分
-    5. 子节点中 case 数 > 1 的进入 next_frontier
-    6. 重复直到所有叶节点只有一个 case
-
-    注意：
-    - 不改变单节点的输入格式
-    - 不改变划分逻辑
-    - 只是把多个独立节点并行执行
-    """
-
-    # ============================================================
-    # 1. 初始化 Trees / Case Maps / Frontier
-    # ============================================================
-
-    trees = []
-    case_maps = []
-
-    frontier = []
-
-    for tree_idx, item in enumerate(items):
-
-        query = item.get("query", "")
-        cases = item.get("cases", [])
-
-        case_map = case_map_from_cases(cases)
-        case_maps.append(case_map)
-
-        case_ids = list(case_map.keys())
-
-        root = {
-            "query": query,
-            "topic": query,
-            "case_ids": case_ids,
-            "leaf": len(case_ids) <= 1,
-            "children": []
+        "response": {
+          "response": "关于HCIE考试通过后查看正式成绩，以下是相关案例供您参考：\n\n1. **考试成绩查询链接（KT00122980）**：考试结束后5个工作日内会通过Certification@huawei.com邮箱通知您考试成绩，请耐心等待。官网介绍请点击：华为认证进阶路径。\n\n2. **已完成证书规则/考试已经通过，查不到证书（KT00071844）**：证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate。证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n\n3. **考试后，多久可以查到证书（KT00078394）**：账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书。我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert。\n\n4. **【iLearning】学员如何查看获得的证书（KT00226785）**：证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate。\n\n5. **我要怎么查看自己的考试记录（KT00097768）**：点击个人中心>>工作台>>考试记录 即可查看自己所有的考试记录。\n\n建议您先检查邮箱是否收到成绩通知，并登录iLearning平台或W3平台查看证书信息。"
         }
-
-        # 空 evidence
-        if len(case_ids) == 0:
-            trees.append(root)
-            continue
-
-        # 只有一个 case，直接 leaf
-        if len(case_ids) == 1:
-            root["case_id"] = case_ids[0]
-            trees.append(root)
-            continue
-
-        trees.append(root)
-
-        # 多个 cases，加入当前待划分节点
-        frontier.append(
-            {
-                "tree_idx": tree_idx,
-                "node": root,
-                "case_ids": case_ids,
-                "depth": 0
-            }
-        )
-
-    # ============================================================
-    # 2. Frontier-based Recursive Batch
-    # ============================================================
-
-    round_id = 0
-
-    while frontier:
-
-        print(
-            f"[TopicStructure] Round {round_id}: "
-            f"{len(frontier)} nodes"
-        )
-
-        # --------------------------------------------------------
-        # 2.1 处理达到 max_depth 的节点
-        # --------------------------------------------------------
-
-        active_frontier = []
-
-        for task in frontier:
-
-            node = task["node"]
-            case_ids = task["case_ids"]
-            depth = task["depth"]
-
-            if depth >= max_depth:
-
-                print(
-                    "[TopicStructure Warning] "
-                    f"max_depth reached: {case_ids}"
-                )
-
-                fallback_to_case_leaves(
-                    node,
-                    case_ids
-                )
-
-                continue
-
-            active_frontier.append(task)
-
-        if not active_frontier:
-            break
-
-        # --------------------------------------------------------
-        # 2.2 第一次 Batch Split
-        # --------------------------------------------------------
-
-        messages = []
-
-        for task in active_frontier:
-
-            tree_idx = task["tree_idx"]
-            node = task["node"]
-            case_ids = task["case_ids"]
-            depth = task["depth"]
-
-            query = items[
-                tree_idx
-            ].get(
-                "query",
-                ""
-            )
-
-            case_map = case_maps[
-                tree_idx
-            ]
-
-            node_cases = [
-                case_map[case_id]
-                for case_id in case_ids
-            ]
-
-            split_input = (
-                build_topic_split_input(
-                    query=query,
-                    cases=node_cases,
-                    parent_topic=node["topic"],
-                    depth=depth
-                )
-            )
-
-            messages.append(
-                build_messages(
-                    topic_prompt,
-                    split_input
-                )
-            )
-
-        # 真正的一次 Batch
-        outputs = parallel_inference(
-            messages
-        )
-
-        # --------------------------------------------------------
-        # 2.3 Parse + Validation
-        # --------------------------------------------------------
-
-        valid_results = {}
-
-        retry_tasks = []
-
-        for idx, (
-            task,
-            output
-        ) in enumerate(
-            zip(
-                active_frontier,
-                outputs
-            )
-        ):
-
-            split_result = (
-                parse_llm_output(
-                    output
-                )
-            )
-
-            valid_split = (
-                normalize_split(
-                    split_result,
-                    task["case_ids"]
-                )
-            )
-
-            if valid_split:
-
-                valid_results[
-                    idx
-                ] = valid_split
-
-            else:
-
-                retry_tasks.append(
-                    {
-                        "frontier_idx": idx,
-                        "task": task,
-                        "attempt": 1
-                    }
-                )
-
-        # ========================================================
-        # 2.4 Invalid Nodes Batch Retry
-        # ========================================================
-
-        while (
-            retry_tasks
-            and
-            retry_tasks[0]["attempt"]
-            <= max_retry
-        ):
-
-            attempt = (
-                retry_tasks[0][
-                    "attempt"
-                ]
-            )
-
-            print(
-                f"[TopicStructure] Retry {attempt}: "
-                f"{len(retry_tasks)} nodes"
-            )
-
-            retry_messages = []
-
-            for retry_item in retry_tasks:
-
-                task = retry_item[
-                    "task"
-                ]
-
-                tree_idx = task[
-                    "tree_idx"
-                ]
-
-                node = task[
-                    "node"
-                ]
-
-                case_ids = task[
-                    "case_ids"
-                ]
-
-                depth = task[
-                    "depth"
-                ]
-
-                query = items[
-                    tree_idx
-                ].get(
-                    "query",
-                    ""
-                )
-
-                case_map = (
-                    case_maps[
-                        tree_idx
-                    ]
-                )
-
-                node_cases = [
-                    case_map[
-                        case_id
-                    ]
-                    for case_id
-                    in case_ids
-                ]
-
-                split_input = (
-                    build_topic_split_input(
-                        query=query,
-                        cases=node_cases,
-                        parent_topic=node[
-                            "topic"
-                        ],
-                        depth=depth
-                    )
-                )
-
-                split_input[
-                    "retry_instruction"
-                ] = (
-                    "上一次划分结果不合法。"
-                    "请重新划分，并严格保证："
-                    "每个输入 case_id 必须且只能出现一次；"
-                    "至少划分为两个有意义的子主题；"
-                    "不得遗漏或重复任何 case_id。"
-                )
-
-                retry_messages.append(
-                    build_messages(
-                        topic_prompt,
-                        split_input
-                    )
-                )
-
-            retry_outputs = (
-                parallel_inference(
-                    retry_messages
-                )
-            )
-
-            next_retry_tasks = []
-
-            for retry_item, output in zip(
-                retry_tasks,
-                retry_outputs
-            ):
-
-                frontier_idx = (
-                    retry_item[
-                        "frontier_idx"
-                    ]
-                )
-
-                task = (
-                    retry_item[
-                        "task"
-                    ]
-                )
-
-                split_result = (
-                    parse_llm_output(
-                        output
-                    )
-                )
-
-                valid_split = (
-                    normalize_split(
-                        split_result,
-                        task[
-                            "case_ids"
-                        ]
-                    )
-                )
-
-                if valid_split:
-
-                    valid_results[
-                        frontier_idx
-                    ] = valid_split
-
-                else:
-
-                    next_attempt = (
-                        retry_item[
-                            "attempt"
-                        ]
-                        + 1
-                    )
-
-                    if (
-                        next_attempt
-                        <=
-                        max_retry
-                    ):
-
-                        next_retry_tasks.append(
-                            {
-                                "frontier_idx":
-                                    frontier_idx,
-
-                                "task":
-                                    task,
-
-                                "attempt":
-                                    next_attempt
-                            }
-                        )
-
-            retry_tasks = (
-                next_retry_tasks
-            )
-
-        # ========================================================
-        # 2.5 Apply Results + Build Next Frontier
-        # ========================================================
-
-        next_frontier = []
-
-        for idx, task in enumerate(
-            active_frontier
-        ):
-
-            node = task["node"]
-            case_ids = task[
-                "case_ids"
-            ]
-            depth = task[
-                "depth"
-            ]
-            tree_idx = task[
-                "tree_idx"
-            ]
-
-            valid_split = (
-                valid_results.get(
-                    idx
-                )
-            )
-
-            # ----------------------------------------------------
-            # 最终仍失败：fallback
-            # ----------------------------------------------------
-
-            if not valid_split:
-
-                print(
-                    "[TopicStructure Warning] "
-                    "failed split after retries: "
-                    f"{case_ids}"
-                )
-
-                fallback_to_case_leaves(
-                    node,
-                    case_ids
-                )
-
-                continue
-
-            # ----------------------------------------------------
-            # 正常写入当前节点
-            # ----------------------------------------------------
-
-            node["leaf"] = False
-
-            node["dimension"] = (
-                valid_split[
-                    "dimension"
-                ]
-            )
-
-            node["children"] = []
-
-            for child_info in (
-                valid_split[
-                    "children"
-                ]
-            ):
-
-                child_case_ids = (
-                    child_info[
-                        "case_ids"
-                    ]
-                )
-
-                child_node = {
-                    "topic":
-                        child_info[
-                            "topic"
-                        ],
-
-                    "case_ids":
-                        child_case_ids,
-
-                    "leaf":
-                        len(
-                            child_case_ids
-                        ) == 1,
-
-                    "children": []
-                }
-
-                node[
-                    "children"
-                ].append(
-                    child_node
-                )
-
-                # ------------------------------------------------
-                # Case 数 = 1：叶节点
-                # ------------------------------------------------
-
-                if (
-                    len(
-                        child_case_ids
-                    )
-                    == 1
-                ):
-
-                    child_node[
-                        "case_id"
-                    ] = (
-                        child_case_ids[
-                            0
-                        ]
-                    )
-
-                    continue
-
-                # ------------------------------------------------
-                # Case 数 > 1：进入下一轮 frontier
-                # ------------------------------------------------
-
-                next_frontier.append(
-                    {
-                        "tree_idx":
-                            tree_idx,
-
-                        "node":
-                            child_node,
-
-                        "case_ids":
-                            child_case_ids,
-
-                        "depth":
-                            depth + 1
-                    }
-                )
-
-        frontier = (
-            next_frontier
-        )
-
-        round_id += 1
-
-    return trees
-
-
-def fallback_to_case_leaves(
-    node: Dict,
-    case_ids: List[str]
-):
-    """
-    当某个节点多次无法获得合法 partition，
-    或达到 max_depth 时，避免程序卡死。
-
-    直接将剩余 cases 展开成独立叶节点。
-    """
-
-    node["leaf"] = False
-
-    node["dimension"] = (
-        "案例差异"
-    )
-
-    node["children"] = [
-        make_leaf(
-            case_id
-        )
-        for case_id
-        in case_ids
-    ]
-
-# ============================================================
-# Single Dialogue Running
-# ============================================================
-
-def run_memory_agent(
-    data
-):
-
-    query_prompt = prompt_read(
-        Path(
-            "prompts/query.prompt"
-        )
-    )
-
-    trigger_prompt = prompt_read(
-        Path(
-            "prompts/trigger.prompt"
-        )
-    )
-
-    topic_prompt = prompt_read(
-        Path(
-            "prompts/topic.prompt"
-        )
-    )
-
-    policy_prompt = prompt_read(
-        Path(
-            "prompts/policy_v2.prompt"
-        )
-    )
-
-    response_prompt = prompt_read(
-        Path(
-            "prompts/response.prompt"
-        )
-    )
-
-    results = {}
-
-    for dialog_id, item in (
-        data.items()
-    ):
-
-        memory = init_memory()
-
-        turns = []
-
-        dialogue_history = ""
-
-        for t_id, msg in enumerate(
-            item["text"]
-        ):
-
-            if "用户" not in msg:
-
-                dialogue_history += (
-                    f"客服: "
-                    f"{msg['客服']}\n"
-                )
-
-                continue
-
-            user = msg["用户"]
-
-            dialogue_history += (
-                f"用户: {user}\n"
-            )
-
-            # ==============================================
-            # 1. Query
-            # ==============================================
-
-            query_input = (
-                build_query_input(
-                    memory,
-                    user
-                )
-            )
-
-            query_messages = (
-                build_messages(
-                    query_prompt,
-                    query_input
-                )
-            )
-
-            query_output = (
-                parallel_inference(
-                    [query_messages]
-                )[0]
-            )
-
-            query_state = (
-                parse_llm_output(
-                    query_output
-                )
-            )
-
-            memory = (
-                update_issue_memory(
-                    memory,
-                    query_state
-                )
-            )
-
-            # ==============================================
-            # 2. Trigger
-            # ==============================================
-
-            trigger_input = (
-                build_trigger_input(
-                    memory
-                )
-            )
-
-            trigger_messages = (
-                build_messages(
-                    trigger_prompt,
-                    trigger_input
-                )
-            )
-
-            trigger_output = (
-                parallel_inference(
-                    [trigger_messages]
-                )[0]
-            )
-
-            trigger_state = (
-                parse_llm_output(
-                    trigger_output
-                )
-            )
-
-            # ==============================================
-            # 3. Evidence + Topic Structure
-            # ==============================================
-
-            topic_structure = None
-
-            if (
-                trigger_state.get(
-                    "evidence_mode"
-                )
-                ==
-                "retrieve_new_evidence"
-            ):
-
-                query = (
-                    memory[
-                        "issue_state"
-                    ][
-                        "current_issue"
-                    ]
-                )
-
-                evidence = (
-                    batch_zefeng_rag(
-                        [
-                            dialogue_history
-                        ],
-                        [
-                            query
-                        ]
-                    )[0]
-                )
-
-                # 唯一新增步骤
-                topic_structure = (
-                    generate_topic_structure(
-                        query=query,
-                        cases=evidence,
-                        topic_prompt=topic_prompt
-                    )
-                )
-
-            else:
-
-                evidence = (
-                    memory[
-                        "evidence_state"
-                    ][
-                        "active_cases"
-                    ]
-                )
-
-            memory = (
-                update_evidence_memory(
-                    memory,
-                    trigger_state,
-                    evidence,
-                    topic_structure
-                )
-            )
-
-            # ==============================================
-            # 4. Policy
-            # ==============================================
-
-            policy_input = (
-                build_policy_input(
-                    memory,
-                    user
-                )
-            )
-
-            policy_messages = (
-                build_messages(
-                    policy_prompt,
-                    policy_input
-                )
-            )
-
-            policy_output = (
-                parallel_inference(
-                    [policy_messages]
-                )[0]
-            )
-
-            policy_state = (
-                parse_llm_output(
-                    policy_output
-                )
-            )
-
-            memory = (
-                update_interaction_memory(
-                    memory,
-                    policy_state
-                )
-            )
-
-            # ==============================================
-            # 5. Response
-            # ==============================================
-
-            response_input = (
-                build_response_input(
-                    memory,
-                    user
-                )
-            )
-
-            response_messages = (
-                build_messages(
-                    response_prompt,
-                    response_input
-                )
-            )
-
-            response_output = (
-                parallel_inference(
-                    [response_messages]
-                )[0]
-            )
-
-            response = (
-                parse_llm_output(
-                    response_output
-                )
-            )
-
-            golden_response = ""
-
-            if (
-                t_id + 1
-                <
-                len(item["text"])
-            ):
-
-                golden_response = (
-                    item[
-                        "text"
-                    ][
-                        t_id + 1
-                    ].get(
-                        "客服",
-                        ""
-                    )
-                )
-
-            memory = (
-                update_dialogue_memory(
-                    memory,
-                    user,
-                    golden_response
-                )
-            )
-
-            turns.append(
-                {
-                    "turn_id":
-                        int(t_id / 2),
-
-                    "user":
-                        user,
-
-                    "query":
-                        query_state,
-
-                    "trigger":
-                        trigger_state,
-
-                    "evidence":
-                        evidence,
-
-                    # 保存下来方便分析
-                    "topic_structure":
-                        copy.deepcopy(
-                            memory[
-                                "evidence_state"
-                            ][
-                                "topic_structure"
-                            ]
-                        ),
-
-                    "policy":
-                        policy_state,
-
-                    "response":
-                        response,
-
-                    "golden_response":
-                        golden_response
-                }
-            )
-
-        results[dialog_id] = {
-
-            "turns": turns,
-
-            "final_memory":
-                memory
+      },
+      {
+        "turn_id": 1,
+        "dialog_id": "220607028",
+        "user": "我的HCIE考试证书在哪查看 有啥链接吗？",
+        "golden_response": "[案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n客服: 您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？\n用户: 我的HCIE考试证书在哪查看 有啥链接吗？\n",
+        "query": {
+          "query_mode": "refine",
+          "query_text": "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "reason": "用户补充了关于证书查看和链接的具体需求"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 提供了证书查询和成绩通知的通用信息，但未明确说明 HCIE 正式成绩与证书的具体查看方式，需进一步检索更匹配的案例。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00226785",
+            "title": "【iLearning】学员如何查看获得的证书",
+            "keywords": [
+              "iLearning",
+              "证书下载"
+            ],
+            "content": "问题描述：\n学员如何查看获得的证书信息，如何下载？\n解决方案：\n证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n请注意：ileaning个人中心证书查看只支持学员使用w3账号参加的，且链接带有：https://ilearning.huawei.com/的考试之后生成的证书信息，如考生使用了外网账号考试，请联系对应的平台协助咨询。"
+          },
+          {
+            "case_id": "KT00078394",
+            "title": "考试后，多久可以查到证书",
+            "keywords": [
+              "考试后",
+              "证书查询"
+            ],
+            "content": "账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书\n我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert"
+          },
+          {
+            "case_id": "KT00317770",
+            "title": "证书查看/导出证书、工程师绑定证书说明",
+            "keywords": [
+              "证书查看",
+              "工程师绑定"
+            ],
+            "content": "一、问题现象：\n用户希望了解证书如何绑定到伙伴，工程师绑定伙伴后证书多久能生效，工程师证书的应用方向（专业化等级，CSP等级，销售身份能力认证等）\n二、解决方案：\n场景1：工程师绑定伙伴\n伙伴工程师如何关联证书？使用个人账号登录华为企业业务官网：https://e.huawei.com/cn/->我的空间->我的售后服务 ->关联我的培训、考试和证书，填写申请证书时的关联邮箱，提交，等待系统发送邮件给关联邮箱，点击链接激活\n场景2：数据刷新说明\n1.工程师证书关联/获得后至少需要1天才能展示到页面和参与专业化等级/CSP等级/身份能力达标计算，请务必提前关联证书。\n2.证书明细页面展示的新集成证书，可能需要第二天才参与专业化/能力达标结果计算；如需这部分证书申请认证，请在第二天操作。\n3.证书展示范围：有效证书。运营商证书/失效过期证书不在伙伴360/伙伴能力地图页面展示\n4.申请证书的账号与关联组织的账号需严格一致\n5.证书明细的国家来源于工程师关联伙伴选择的国家信息（UIPM系统）。\n6.证书明细的邮箱来源于证书的邮箱，改工程师的邮箱是不会影响证书的邮箱，如果需要更改证书的邮箱，请联系证书系统人员。\n场景3：在哪里查看证书 下载/导出 伙伴证书明细\n1.查看单伙伴证书，通过伙伴360（内部）和伙伴能力地图（伙伴侧）查看\n2.查看/导出最新中国伙伴证书统计\n查看/导出最新海外伙伴证书统计\n3.查看历史中国伙伴证书统计\n查看历史海外伙伴证书统计\n4. 伙伴能力地图里，导出的人员证书《MemberCertifyDetail》/ 证书明细  这个表格里，能显示出人员姓名吗？\n姓名涉及个人隐私，系统不支持显示人员姓名。\n5.工程师去哪里个人查看和下载证书\n访问：华为人才在线-证书查看使用考试账号登录即可查询和下载。如有疑问，可联系华为人才在线页面客服咨询。\n场景4：中国区要求工程师证书实名制\n中国区政策要求，未完成实名认证工程师的售前售后证书不能计入有效证书参与专业化能力等级/身份认证能力达标计算。\n如何完成实名认证：由证书持有人用 证书明细中对应的官网账号 登录https://e.huawei.com/cn/talent/#/personal/myinfo进行实行认证，认证过程中有疑问，可以咨询talent页面的客服。实名认证完成后，伙伴360页面会在1天后刷新数据。\n如何查看工程师是否实名制：通过伙伴360/伙伴能力地图查看证书明细“是否实名”列。\n场景5：证书转移\nhttps://e.huawei.com/cn/talent/#/personal/mycert如何做证书转移：使用新账号登录华为人才在线平台我的证书处，点击 关联我的证书 按钮，然后对应的提示完成操作和验证，届时你可以解除证书与旧账号的绑定，关联到新的账户。\n场景6：证书重认证\nHCIA HCIP HCIE证书重认证请参考：\nhttps://e.huawei.com/cn/talent/#/cert/re-certification\n场景7：HCIE换绑公司需要间隔1年\nHCIE证书关联上一家公司的时间与关联下一家公司的时间需间隔一年；如果对此政策有疑问请与代表处服务经理或接口人联系。\n场景8：证书考试\n1.参加HCSP笔试（新通道）考试前，是否需要先获取对应方向HCSA证书？\n>>> 不需要。所有产品新通道HCSP认证笔试可以直接参加，通过考试即可获得HCSP证书，不要求必须先通过HCSA认证。\n2.旧证书认证截止时间是23年12月31日，那么旧证书面试提交截止时间点是什么？\n>>> 所有旧证书（含HCSP、HCSE）面试申请截止时间是23年12月5日。\n3.证书到期续认证说明\n>>>当前HCSP续认证/重认证是直接面试即可！面试通过的如果原HCSP证书未过期的就在原证书上进行延期，如果原 HCSP证书已过期的会下发新的HCSP证书。HCSA的证书不会随之变化延期的，如果要对HCSA证书进行续认证，和首次 HCSA认证一样，到VUE考生中心报考笔试！"
+          },
+          {
+            "case_id": "KT00071844",
+            "title": "已完成证书规则/考试已经通过，查不到证书",
+            "keywords": [
+              "证书查询",
+              "iLearning平台"
+            ],
+            "content": "一、问题现象：\n已经完成证书规则/通过考试，但是未找到证书。\n二、解决方案：\n证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n如果还是无法查询到证书，请联系证书管理员/考试页面的考试管理员咨询。"
+          },
+          {
+            "case_id": "KT00066712",
+            "title": "参加完华为认证考试后，我可以去哪里下载个人证书？",
+            "keywords": [
+              "华为电子证书",
+              "下载"
+            ],
+            "content": "一、问题现象：\n参加完认证考试后，我可以去哪里下载证书？\n二、解决方案：\n通过华为认证的考生，如需下载华为电子证书，可在完成相关考试的三个工作日后访问：华为电子证书下载（https://e.huawei.com/cn/talent/#/personal/mycert）。！"
+          }
+        ],
+        "policy": {
+          "label": "ExplainedResponse",
+          "case_id": [
+            "KT00226785",
+            "KT00066712"
+          ],
+          "reason": "用户明确询问HCIE证书查看方式和链接，已有案例提供具体操作路径和链接，可以直接引用解决。"
+        },
+        "response": {
+          "response": "您可以通过以下链接查看和下载您的HCIE考试证书：\n1. 华为电子证书下载页面：https://e.huawei.com/cn/talent/#/personal/mycert\n2. iLearning平台个人中心证书查询：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n\n请注意，证书一般在考试通过后1小时内生成。如果无法查询到，请联系相关考试管理员协助处理。"
         }
-
-    return results
-
-
-# ============================================================
-# Batch Running
-# ============================================================
-
-def run_memory_agent_batch(
-    data,
-    batch_size=8
-):
-
-    query_prompt = prompt_read(
-        Path(
-            "prompts/query.prompt"
-        )
-    )
-
-    trigger_prompt = prompt_read(
-        Path(
-            "prompts/trigger.prompt"
-        )
-    )
-
-    topic_prompt = prompt_read(
-        Path(
-            "prompts/topic.prompt"
-        )
-    )
-
-    policy_prompt = prompt_read(
-        Path(
-            "prompts/policy.prompt"
-        )
-    )
-
-    response_prompt = prompt_read(
-        Path(
-            "prompts/response.prompt"
-        )
-    )
-
-    memories = {
-        dialog_id:
-            init_memory()
-        for dialog_id in data
-    }
-
-    dialogue_history = {
-        dialog_id: ""
-        for dialog_id in data
-    }
-
-    results = {
-        dialog_id: {
-            "turns": []
+      },
+      {
+        "turn_id": 2,
+        "dialog_id": "220607028",
+        "user": "我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。",
+        "golden_response": "好的。\n您好，请问还有其它可以帮到您的吗？",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n客服: 您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？\n用户: 我的HCIE考试证书在哪查看 有啥链接吗？\n客服: [案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！\n用户: 我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。\n",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "飞书显示无法连接的解决方法",
+          "reason": "用户提出新的问题，与之前的 HCIE 成绩和证书无关。"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 均与证书下载相关，无法支持解决“飞书显示无法连接”的问题。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00249639",
+            "title": "【ilearning】ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新",
+            "keywords": [
+              "HCIE证书",
+              "有效期更新"
+            ],
+            "content": "问题描述：ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新\n解决方案：此类证书均不是在ilearning平台考试获得的，ilearning显示的是历史数据，从2022年后ilearning就不再更新外训证书。\n目前查看证书均以【华为人才在线平台】为准，认证证书业务证书查看网址：https://e.huawei.com/cn/talent/#/personal/mycert，若有疑问可咨询【华为人才在线平台】。"
+          },
+          {
+            "case_id": "KT00176549",
+            "title": "HCIA考试通过，但无法关联上证书",
+            "keywords": [
+              "HCIA证书",
+              "无法关联"
+            ],
+            "content": "解决方案：\n您好，请您提供Uniportal账号，并以附件形式提供考试成绩报告单扫描件，或成绩报告单上的考生号、成绩注册号、考试日期、考试科目等信息，\n通过以下链接提交问题单，链接：https://e.huawei.com/cn/talent/#/issue/add我们将为您进一步处理，谢谢"
+          },
+          {
+            "case_id": "KT00090338",
+            "title": "如何获取CSP证书纸质文件?",
+            "keywords": [
+              "CSP证书",
+              "纸质版"
+            ],
+            "content": "CSP三钻、四钻、五钻有纸质证书，如果有需要，可以向fwrz@huawei.com提交纸质证书申请，在每个月前两周内将纸质证书下发到当地代表处，可联系当地服务经理获取。如果没有当地服务经理的联系方式，可以咨询渠道经理或者发邮件咨询fwrz@huawei.com。\n认证级CSP只有电子证书。同时可自己在https://partner.huawei.com上自行下载电子版证书。下载方法如下：ePartner-->认证与能力-->认证成员查询\n备注：华为提供的纸质证书与将电子证书直接打印出来没有区别，如果需要将证书放大、镶边、挂墙上等处理，请自行根据电子证书做相应处理，华为侧不提供。"
+          },
+          {
+            "case_id": "KT00232812",
+            "title": "【iLearning】考试证书如何设置",
+            "keywords": [
+              "iLearning",
+              "证书设置"
+            ],
+            "content": "问题描述：\n考试如何设置证书。\n考试如何设置证书。\n解决方案：\n1、创建证书\n证书名称：将在学员收到的证书页面中显示（iLearning-学习中心-我的证书页面）\n所属部门：发放证书的部门\n证书有效期（月）：分为永久和自定义月份，永久有效：证书不会过期；自定义月份：自学员拿到证书后的多少月后失效\n允许续期：在自定义证书的有效期后可设置证书是否允许续期，若允许续期，学员可在证书在有效期内，按照证书的发放条件再次获得，获得后会按照获得日期再次延长证书的有效期\n需申请：开启后用户可收到需申请状态的证书，但需点击申请才可以下载证书附件\n获得证书提醒：打开获得证书提醒，可通过应用号及站内消息给用户发送获得证书的提醒\n2、配置证书规则\n证书发放要求：即证书发放的规则，是满足任一规则还是满足所有规则，进行证书的发放。具体来说，如果一个证书配置了多个规则，这些规则之间的是【或】或者【且】的关系。\n考试规则：即针对考试设定的证书发放规则\n考试评判方式：默认为考试通过状态。\n考试结果有效期：作为证书发放要求的判断依据的考试，考试时间距离当前时间的跨度期限 （例如：考试结果有效期为1年，则1年之前的考试不可作为发证依据）\n添加资源：点击【+添加资源】的按钮，即可弹出选择资源的弹窗，输入资源编码或者名称即可。同一个规则下可以选择多个资源，且每个资源需设置是否必须完成。\n添加完资源后，需要选择是“必修”还是“选修”\n必修：获得此证书必学的课程或考试，且须达到通过标准\n选修：学员根据规则要求，可选择性学习的课程或考试\n3、配置证书模板\n平台标准模板：平台提供了5种标准证书模块，可直接选用\n自定义证书模板：在可拖动元素到证书模板中选择相关的参数：【学员账号】【学员姓名】【获得日期】【到期日期】【证书名称】【学员证书编码】，并可更改字体、颜色、大小、位置；可在参数前增加自定义的文本对参数进行说明，还可在证书任一地方参加文本，可更改文本的字体、颜色、大小、位置；可上传图片做为证书的logo，或签发人的签名；点击预览查看证书样式\n4、保存证书\n编辑完证书后，点击保存，证书状态为【未发布】，平台不会发放【未发布】的证书5、发布证书\n检查无误后，鼠标放置“保存”位置，即可选择发布，证书一旦发布后，学员满足发证规则，即可获得证书。"
+          },
+          {
+            "case_id": "KT00210746",
+            "title": "外网用户如何获取CSC考试证书",
+            "keywords": [
+              "CSC考试",
+              "外网用户"
+            ],
+            "content": "外网用户(没有w3账号）如何参加CSC考试获取证书\n由于ilearningX系统的日落，CSC考试迁移至时习知平台，请到对接外网系统时习知平台进行学习，平台链接：http://shixizhi.huawei.com\n如何参与CSC考试：\n1、先加入CSC学堂【时习知】，邀请您加入【GTS网络安全与用户隐私保护办公室】，点击链接直接加入：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/commonUsage/joinCollegePage.htm?code=BTLT2B&sxz-lang=zh_CN2、加入学堂后，请参加下面考试，考试链接如下：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/iexam/1530365150992642049/examInfo?examId=2207051621563911447&sxz-lang=zh_CN\n注册登录账号请参考附件：附件2：分包商网络安全资质认证指导书(CNBG)中国区-V1.3-20230225.docx"
+          }
+        ],
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [],
+          "reason": "用户当前询问飞书无法连接的问题，但未提供具体报错或环境信息，已有案例与该问题无直接关联。建议先让用户尝试基础网络排查，同时推荐参考通用解决方案。"
+        },
+        "response": {
+          "response": "[案例链接: KT00249639]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！"
         }
-        for dialog_id in data
-    }
-
-    max_turn = max(
-        len(item["text"])
-        for item in data.values()
-    )
-
-    for t_id in range(
-        max_turn
-    ):
-
-        print(
-            f"\n========== "
-            f"TURN {t_id} "
-            f"=========="
-        )
-
-        current_batch = []
-
-        # ==============================================
-        # Current users
-        # ==============================================
-
-        for dialog_id, item in (
-            data.items()
-        ):
-
-            if (
-                t_id
-                >=
-                len(item["text"])
-            ):
-                continue
-
-            msg = item[
-                "text"
-            ][
-                t_id
-            ]
-
-            if "用户" in msg:
-
-                dialogue_history[
-                    dialog_id
-                ] += (
-                    f"用户: "
-                    f"{msg['用户']}\n"
-                )
-
-            elif "客服" in msg:
-
-                dialogue_history[
-                    dialog_id
-                ] += (
-                    f"客服: "
-                    f"{msg['客服']}\n"
-                )
-
-            if "用户" not in msg:
-                continue
-
-            golden_response = ""
-
-            if (
-                t_id + 1
-                <
-                len(item["text"])
-            ):
-
-                golden_response = (
-                    item[
-                        "text"
-                    ][
-                        t_id + 1
-                    ].get(
-                        "客服",
-                        ""
-                    )
-                )
-
-            current_batch.append(
-                {
-                    "dialog_id":
-                        dialog_id,
-
-                    "user":
-                        msg["用户"],
-
-                    "golden_response":
-                        golden_response,
-
-                    "dialogue_history":
-                        dialogue_history[
-                            dialog_id
-                        ]
-                }
-            )
-
-        if not current_batch:
-            continue
-
-        # ==============================================
-        # 1. Query Batch
-        # ==============================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Query Batch: "
-            f"{len(current_batch)}"
-        )
-
-        query_messages = []
-
-        for x in current_batch:
-
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            query_messages.append(
-                build_messages(
-                    query_prompt,
-                    build_query_input(
-                        memory,
-                        x["user"]
-                    )
-                )
-            )
-
-        query_outputs = (
-            parallel_inference(
-                query_messages
-            )
-        )
-
-        for x, out in zip(
-            current_batch,
-            query_outputs
-        ):
-
-            query_state = (
-                parse_llm_output(
-                    out
-                )
-            )
-
-            x[
-                "query"
-            ] = query_state
-
-            memories[
-                x["dialog_id"]
-            ] = update_issue_memory(
-                memories[
-                    x["dialog_id"]
-                ],
-                query_state
-            )
-
-        # ==============================================
-        # 2. Trigger Batch
-        # ==============================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Trigger Batch"
-        )
-
-        trigger_messages = []
-
-        for x in current_batch:
-
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            trigger_messages.append(
-                build_messages(
-                    trigger_prompt,
-                    build_trigger_input(
-                        memory
-                    )
-                )
-            )
-
-        trigger_outputs = (
-            parallel_inference(
-                trigger_messages
-            )
-        )
-
-        for x, out in zip(
-            current_batch,
-            trigger_outputs
-        ):
-
-            trigger_state = (
-                parse_llm_output(
-                    out
-                )
-            )
-
-            x[
-                "trigger"
-            ] = trigger_state
-
-        # ==============================================
-        # 3. RAG Batch
-        # ==============================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"RAG Batch"
-        )
-
-        rag_dialogs = []
-        rag_queries = []
-        rag_indices = []
-
-        for idx, x in enumerate(
-            current_batch
-        ):
-
-            if (
-                x["trigger"].get(
-                    "evidence_mode"
-                )
-                ==
-                "retrieve_new_evidence"
-            ):
-
-                memory = memories[
-                    x["dialog_id"]
-                ]
-
-                rag_dialogs.append(
-                    x[
-                        "dialogue_history"
-                    ]
-                )
-
-                rag_queries.append(
-                    memory[
-                        "issue_state"
-                    ][
-                        "current_issue"
-                    ]
-                )
-
-                rag_indices.append(
-                    idx
-                )
-
-            else:
-
-                x["evidence"] = (
-                    memories[
-                        x["dialog_id"]
-                    ][
-                        "evidence_state"
-                    ][
-                        "active_cases"
-                    ]
-                )
-
-                x[
-                    "topic_structure"
-                ] = copy.deepcopy(
-                    memories[
-                        x["dialog_id"]
-                    ][
-                        "evidence_state"
-                    ][
-                        "topic_structure"
-                    ]
-                )
-
-        if rag_dialogs:
-            
-            rag_queries = [validate_rag_query(q) for q in rag_queries]
-
-            rag_outputs = (
-                batch_zefeng_rag(
-                    rag_dialogs,
-                    rag_queries
-                )
-            )
-
-            for idx, evidence in zip(
-                rag_indices,
-                rag_outputs
-            ):
-
-                current_batch[
-                    idx
-                ][
-                    "evidence"
-                ] = evidence
-
-        # ==============================================
-        # 3.5 Topic Structure
-        # ==============================================
-
-        topic_items = []
-        topic_indices = []
-
-        for idx in rag_indices:
-
-            x = current_batch[idx]
-
-            memory = memories[
-                x["dialog_id"]
-            ]
-
-            query = (
-                memory[
-                    "issue_state"
-                ][
-                    "current_issue"
-                ]
-            )
-
-            topic_items.append(
-                {
-                    "query":
-                        query,
-
-                    "cases":
-                        x[
-                            "evidence"
-                        ]
-                }
-            )
-
-            topic_indices.append(
-                idx
-            )
-
-        if topic_items:
-
-            print(
-                f"[Turn {t_id}] "
-                f"Topic Structure: "
-                f"{len(topic_items)}"
-            )
-
-            structures = (
-                generate_topic_structures_batch(
-                    topic_items,
-                    topic_prompt
-                )
-            )
-
-            for idx, structure in zip(
-                topic_indices,
-                structures
-            ):
-
-                current_batch[
-                    idx
-                ][
-                    "topic_structure"
-                ] = structure
-
-        # ==============================================
-        # Update Evidence Memory
-        # ==============================================
-
-        for x in current_batch:
-
-            memories[
-                x["dialog_id"]
-            ] = update_evidence_memory(
-
-                memories[
-                    x["dialog_id"]
-                ],
-
-                x[
-                    "trigger"
-                ],
-
-                x[
-                    "evidence"
-                ],
-
-                x.get(
-                    "topic_structure"
-                )
-            )
-
-        # ==============================================
-        # 4. Policy Batch
-        # ==============================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Policy Batch"
-        )
-
-        policy_messages = []
-
-        for x in current_batch:
-
-            policy_messages.append(
-                build_messages(
-                    policy_prompt,
-                    build_policy_input(
-                        memories[
-                            x[
-                                "dialog_id"
-                            ]
-                        ],
-                        x["user"]
-                    )
-                )
-            )
-
-        policy_outputs = (
-            parallel_inference(
-                policy_messages
-            )
-        )
-
-        for x, out in zip(
-            current_batch,
-            policy_outputs
-        ):
-
-            policy_state = (
-                parse_llm_output(
-                    out
-                )
-            )
-
-            x[
-                "policy"
-            ] = policy_state
-
-            memories[
-                x["dialog_id"]
-            ] = update_interaction_memory(
-
-                memories[
-                    x["dialog_id"]
-                ],
-
-                policy_state
-            )
-
-        # ==============================================
-        # 5. Response Batch
-        # ==============================================
-
-        print(
-            f"[Turn {t_id}] "
-            f"Response Batch"
-        )
-
-        response_messages = []
-
-        for x in current_batch:
-
-            response_messages.append(
-                build_messages(
-                    response_prompt,
-                    build_response_input(
-                        memories[
-                            x[
-                                "dialog_id"
-                            ]
-                        ],
-                        x["user"]
-                    )
-                )
-            )
-
-        response_outputs = (
-            parallel_inference(
-                response_messages
-            )
-        )
-
-        for x, out in zip(
-            current_batch,
-            response_outputs
-        ):
-
-            x[
-                "response"
-            ] = parse_llm_output(
-                out
-            )
-
-            memories[
-                x["dialog_id"]
-            ] = update_dialogue_memory(
-
-                memories[
-                    x["dialog_id"]
-                ],
-
-                x["user"],
-
-                x[
-                    "golden_response"
-                ]
-            )
-
-            # 明确保存实际使用的 structure
-            x[
-                "topic_structure"
-            ] = copy.deepcopy(
-                memories[
-                    x["dialog_id"]
-                ][
-                    "evidence_state"
-                ][
-                    "topic_structure"
-                ]
-            )
-
-            results[
-                x["dialog_id"]
-            ][
-                "turns"
-            ].append(
-                {
-                    "turn_id":
-                        int(t_id / 2),
-
-                    **x
-                }
-            )
-
-    for dialog_id in data:
-
-        results[
-            dialog_id
-        ][
-            "final_memory"
-        ] = memories[
-            dialog_id
+      }
+    ],
+    "final_memory": {
+      "issue_state": {
+        "current_issue": "飞书显示无法连接的解决方法",
+        "query_history": [
+          "HCIE 考试通过后如何查看正式成绩",
+          "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "飞书显示无法连接的解决方法"
         ]
-
-    return results
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main():
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--data_path",
-        required=True
-    )
-
-    parser.add_argument(
-        "--output_path",
-        required=True
-    )
-
-    parser.add_argument(
-        "--batch",
-        action="store_true"
-    )
-
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=300
-    )
-
-    args = parser.parse_args()
-
-    with open(
-        args.data_path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        data = json.load(f)
-
-    if args.limit is not None:
-
-        data = dict(
-            list(
-                data.items()
-            )[
-                240:240+args.limit
-            ]
-        )
-
-    # if args.batch:
-
-    outputs = (
-        run_memory_agent_batch(
-            data
-        )
-    )
-
-    # else:
-
-    #     outputs = (
-    #         run_memory_agent(
-    #             data
-    #         )
-    #     )
-
-    write_json(
-        args.output_path,
-        outputs
-    )
-
-    print(
-        f"Saved "
-        f"{len(outputs)} "
-        f"dialogues to "
-        f"{args.output_path}"
-    )
+      },
+      "dialog_state": {
+        "compressed_history": [
+          {
+            "user": "我考过了 HCIE 的正式在哪里查看。",
+            "assistant": "您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？"
+          },
+          {
+            "user": "我的HCIE考试证书在哪查看 有啥链接吗？",
+            "assistant": "[案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！"
+          },
+          {
+            "user": "我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。",
+            "assistant": "好的。\n您好，请问还有其它可以帮到您的吗？"
+          }
+        ]
+      },
+      "evidence_state": {
+        "active_cases": [
+          {
+            "case_id": "KT00249639",
+            "title": "【ilearning】ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新",
+            "keywords": [
+              "HCIE证书",
+              "有效期更新"
+            ],
+            "content": "问题描述：ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新\n解决方案：此类证书均不是在ilearning平台考试获得的，ilearning显示的是历史数据，从2022年后ilearning就不再更新外训证书。\n目前查看证书均以【华为人才在线平台】为准，认证证书业务证书查看网址：https://e.huawei.com/cn/talent/#/personal/mycert，若有疑问可咨询【华为人才在线平台】。"
+          },
+          {
+            "case_id": "KT00176549",
+            "title": "HCIA考试通过，但无法关联上证书",
+            "keywords": [
+              "HCIA证书",
+              "无法关联"
+            ],
+            "content": "解决方案：\n您好，请您提供Uniportal账号，并以附件形式提供考试成绩报告单扫描件，或成绩报告单上的考生号、成绩注册号、考试日期、考试科目等信息，\n通过以下链接提交问题单，链接：https://e.huawei.com/cn/talent/#/issue/add我们将为您进一步处理，谢谢"
+          },
+          {
+            "case_id": "KT00090338",
+            "title": "如何获取CSP证书纸质文件?",
+            "keywords": [
+              "CSP证书",
+              "纸质版"
+            ],
+            "content": "CSP三钻、四钻、五钻有纸质证书，如果有需要，可以向fwrz@huawei.com提交纸质证书申请，在每个月前两周内将纸质证书下发到当地代表处，可联系当地服务经理获取。如果没有当地服务经理的联系方式，可以咨询渠道经理或者发邮件咨询fwrz@huawei.com。\n认证级CSP只有电子证书。同时可自己在https://partner.huawei.com上自行下载电子版证书。下载方法如下：ePartner-->认证与能力-->认证成员查询\n备注：华为提供的纸质证书与将电子证书直接打印出来没有区别，如果需要将证书放大、镶边、挂墙上等处理，请自行根据电子证书做相应处理，华为侧不提供。"
+          },
+          {
+            "case_id": "KT00232812",
+            "title": "【iLearning】考试证书如何设置",
+            "keywords": [
+              "iLearning",
+              "证书设置"
+            ],
+            "content": "问题描述：\n考试如何设置证书。\n考试如何设置证书。\n解决方案：\n1、创建证书\n证书名称：将在学员收到的证书页面中显示（iLearning-学习中心-我的证书页面）\n所属部门：发放证书的部门\n证书有效期（月）：分为永久和自定义月份，永久有效：证书不会过期；自定义月份：自学员拿到证书后的多少月后失效\n允许续期：在自定义证书的有效期后可设置证书是否允许续期，若允许续期，学员可在证书在有效期内，按照证书的发放条件再次获得，获得后会按照获得日期再次延长证书的有效期\n需申请：开启后用户可收到需申请状态的证书，但需点击申请才可以下载证书附件\n获得证书提醒：打开获得证书提醒，可通过应用号及站内消息给用户发送获得证书的提醒\n2、配置证书规则\n证书发放要求：即证书发放的规则，是满足任一规则还是满足所有规则，进行证书的发放。具体来说，如果一个证书配置了多个规则，这些规则之间的是【或】或者【且】的关系。\n考试规则：即针对考试设定的证书发放规则\n考试评判方式：默认为考试通过状态。\n考试结果有效期：作为证书发放要求的判断依据的考试，考试时间距离当前时间的跨度期限 （例如：考试结果有效期为1年，则1年之前的考试不可作为发证依据）\n添加资源：点击【+添加资源】的按钮，即可弹出选择资源的弹窗，输入资源编码或者名称即可。同一个规则下可以选择多个资源，且每个资源需设置是否必须完成。\n添加完资源后，需要选择是“必修”还是“选修”\n必修：获得此证书必学的课程或考试，且须达到通过标准\n选修：学员根据规则要求，可选择性学习的课程或考试\n3、配置证书模板\n平台标准模板：平台提供了5种标准证书模块，可直接选用\n自定义证书模板：在可拖动元素到证书模板中选择相关的参数：【学员账号】【学员姓名】【获得日期】【到期日期】【证书名称】【学员证书编码】，并可更改字体、颜色、大小、位置；可在参数前增加自定义的文本对参数进行说明，还可在证书任一地方参加文本，可更改文本的字体、颜色、大小、位置；可上传图片做为证书的logo，或签发人的签名；点击预览查看证书样式\n4、保存证书\n编辑完证书后，点击保存，证书状态为【未发布】，平台不会发放【未发布】的证书5、发布证书\n检查无误后，鼠标放置“保存”位置，即可选择发布，证书一旦发布后，学员满足发证规则，即可获得证书。"
+          },
+          {
+            "case_id": "KT00210746",
+            "title": "外网用户如何获取CSC考试证书",
+            "keywords": [
+              "CSC考试",
+              "外网用户"
+            ],
+            "content": "外网用户(没有w3账号）如何参加CSC考试获取证书\n由于ilearningX系统的日落，CSC考试迁移至时习知平台，请到对接外网系统时习知平台进行学习，平台链接：http://shixizhi.huawei.com\n如何参与CSC考试：\n1、先加入CSC学堂【时习知】，邀请您加入【GTS网络安全与用户隐私保护办公室】，点击链接直接加入：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/commonUsage/joinCollegePage.htm?code=BTLT2B&sxz-lang=zh_CN2、加入学堂后，请参加下面考试，考试链接如下：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/iexam/1530365150992642049/examInfo?examId=2207051621563911447&sxz-lang=zh_CN\n注册登录账号请参考附件：附件2：分包商网络安全资质认证指导书(CNBG)中国区-V1.3-20230225.docx"
+          }
+        ]
+      },
+      "interaction_state": {
+        "stage": "Resolution",
+        "last_action": "CaseRecommendation",
+        "action_history": [
+          "CaseRecommendation",
+          "ExplainedResponse",
+          "CaseRecommendation"
+        ]
+      }
+    }
+  },
 
 
-if __name__ == "__main__":
-    main()
+"220607028": {
+    "turns": [
+      {
+        "turn_id": 0,
+        "dialog_id": "220607028",
+        "user": "我考过了 HCIE 的正式在哪里查看。",
+        "golden_response": "您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "HCIE 考试通过后如何查看正式成绩",
+          "reason": "用户提出了一个新的 IT 相关问题，需要重新生成查询"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "not_needed",
+          "case_id": "",
+          "reason": "当前没有可用的 active_cases，需要重新检索案例"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00122980",
+            "title": "考试成绩查询链接",
+            "keywords": [
+              "HCIE成绩查询",
+              "考试结果通知"
+            ],
+            "content": "HCIE认证考试成绩的咨询：考试结束后5个工作日内会通过Certification@huawei.com邮箱通知您考试成绩，请耐心等待。官网介绍请点击：华为认证进阶路径。"
+          },
+          {
+            "case_id": "KT00071844",
+            "title": "已完成证书规则/考试已经通过，查不到证书",
+            "keywords": [
+              "证书查询",
+              "iLearning平台"
+            ],
+            "content": "一、问题现象：\n已经完成证书规则/通过考试，但是未找到证书。\n二、解决方案：\n证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n如果还是无法查询到证书，请联系证书管理员/考试页面的考试管理员咨询。"
+          },
+          {
+            "case_id": "KT00078394",
+            "title": "考试后，多久可以查到证书",
+            "keywords": [
+              "证书查询",
+              "1个工作日"
+            ],
+            "content": "账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书\n我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert"
+          },
+          {
+            "case_id": "KT00226785",
+            "title": "【iLearning】学员如何查看获得的证书",
+            "keywords": [
+              "iLearning",
+              "证书下载"
+            ],
+            "content": "问题描述：\n学员如何查看获得的证书信息，如何下载？\n解决方案：\n证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n请注意：ileaning个人中心证书查看只支持学员使用w3账号参加的，且链接带有：https://ilearning.huawei.com/的考试之后生成的证书信息，如考生使用了外网账号考试，请联系对应的平台协助咨询。"
+          },
+          {
+            "case_id": "KT00097768",
+            "title": "我要怎么查看自己的考试记录",
+            "keywords": [
+              "考试记录",
+              "查询"
+            ],
+            "content": "一、问题现象：\n考试的记录如何查询\n二、解决方案：\n步骤1（或：方法1、场景1）：步骤1标题\n点击个人中心>>工作台>>考试记录 即可查看自己所有的考试记录"
+          }
+        ],
+        "topic_structure": {
+          "query": "HCIE 考试通过后如何查看正式成绩",
+          "topic": "HCIE 考试通过后如何查看正式成绩",
+          "case_ids": [
+            "KT00122980",
+            "KT00071844",
+            "KT00078394",
+            "KT00226785",
+            "KT00097768"
+          ],
+          "leaf": false,
+          "children": [
+            {
+              "topic": "通过邮箱接收考试成绩通知",
+              "case_ids": [
+                "KT00122980"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00122980"
+            },
+            {
+              "topic": "在 iLearning 平台查看和下载证书",
+              "case_ids": [
+                "KT00071844",
+                "KT00226785"
+              ],
+              "leaf": false,
+              "children": [
+                {
+                  "topic": "已完成证书规则/考试已经通过，查不到证书",
+                  "case_ids": [
+                    "KT00071844"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00071844"
+                },
+                {
+                  "topic": "【iLearning】学员如何查看获得的证书",
+                  "case_ids": [
+                    "KT00226785"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00226785"
+                }
+              ],
+              "dimension": "证书获取方式"
+            },
+            {
+              "topic": "在 w3 华为人才平台查看证书",
+              "case_ids": [
+                "KT00078394"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00078394"
+            },
+            {
+              "topic": "查看考试记录（非证书）",
+              "case_ids": [
+                "KT00097768"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00097768"
+            }
+          ],
+          "dimension": "成绩与证书查询的渠道"
+        },
+        "policy": {
+          "label": "CaseRecommendation",
+          "case_id": [
+            "KT00071844",
+            "KT00226785"
+          ],
+          "reason": "用户明确询问 HCIE 考试通过后如何查看正式成绩，已有多个高相关案例提供 iLearning 平台的证书查询方法，且操作步骤清晰、风险低，可优先推荐。"
+        },
+        "response": {
+          "response": "关于HCIE考试通过后查看正式成绩，以下是相关案例供您参考：\n\n1. **考试成绩查询链接（KT00122980）**：考试结束后5个工作日内会通过Certification@huawei.com邮箱通知您考试成绩，请耐心等待。官网介绍请点击：华为认证进阶路径。\n\n2. **已完成证书规则/考试已经通过，查不到证书（KT00071844）**：证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate。证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n\n3. **考试后，多久可以查到证书（KT00078394）**：账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书。我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert。\n\n4. **【iLearning】学员如何查看获得的证书（KT00226785）**：证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate。\n\n5. **我要怎么查看自己的考试记录（KT00097768）**：点击个人中心>>工作台>>考试记录 即可查看自己所有的考试记录。\n\n建议您先检查邮箱是否收到成绩通知，并登录iLearning平台或W3平台查看证书信息。"
+        }
+      },
+      {
+        "turn_id": 1,
+        "dialog_id": "220607028",
+        "user": "我的HCIE考试证书在哪查看 有啥链接吗？",
+        "golden_response": "[案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n客服: 您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？\n用户: 我的HCIE考试证书在哪查看 有啥链接吗？\n",
+        "query": {
+          "query_mode": "refine",
+          "query_text": "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "reason": "用户补充了关于证书查看和链接的具体需求"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 提供了证书查询和成绩通知的通用信息，但未明确说明 HCIE 正式成绩与证书的具体查看方式，需进一步检索更匹配的案例。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00226785",
+            "title": "【iLearning】学员如何查看获得的证书",
+            "keywords": [
+              "iLearning",
+              "证书下载"
+            ],
+            "content": "问题描述：\n学员如何查看获得的证书信息，如何下载？\n解决方案：\n证书查看和下载操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询，点击证书即可下载。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n请注意：ileaning个人中心证书查看只支持学员使用w3账号参加的，且链接带有：https://ilearning.huawei.com/的考试之后生成的证书信息，如考生使用了外网账号考试，请联系对应的平台协助咨询。"
+          },
+          {
+            "case_id": "KT00078394",
+            "title": "考试后，多久可以查到证书",
+            "keywords": [
+              "考试后",
+              "证书查询"
+            ],
+            "content": "账号考试完成后，需等待1个工作日后，可查看到此账号下关联的证书\n我的证书查询：http://w3.huawei.com/cn/talent/#/personal/mycert"
+          },
+          {
+            "case_id": "KT00317770",
+            "title": "证书查看/导出证书、工程师绑定证书说明",
+            "keywords": [
+              "证书查看",
+              "工程师绑定"
+            ],
+            "content": "一、问题现象：\n用户希望了解证书如何绑定到伙伴，工程师绑定伙伴后证书多久能生效，工程师证书的应用方向（专业化等级，CSP等级，销售身份能力认证等）\n二、解决方案：\n场景1：工程师绑定伙伴\n伙伴工程师如何关联证书？使用个人账号登录华为企业业务官网：https://e.huawei.com/cn/->我的空间->我的售后服务 ->关联我的培训、考试和证书，填写申请证书时的关联邮箱，提交，等待系统发送邮件给关联邮箱，点击链接激活\n场景2：数据刷新说明\n1.工程师证书关联/获得后至少需要1天才能展示到页面和参与专业化等级/CSP等级/身份能力达标计算，请务必提前关联证书。\n2.证书明细页面展示的新集成证书，可能需要第二天才参与专业化/能力达标结果计算；如需这部分证书申请认证，请在第二天操作。\n3.证书展示范围：有效证书。运营商证书/失效过期证书不在伙伴360/伙伴能力地图页面展示\n4.申请证书的账号与关联组织的账号需严格一致\n5.证书明细的国家来源于工程师关联伙伴选择的国家信息（UIPM系统）。\n6.证书明细的邮箱来源于证书的邮箱，改工程师的邮箱是不会影响证书的邮箱，如果需要更改证书的邮箱，请联系证书系统人员。\n场景3：在哪里查看证书 下载/导出 伙伴证书明细\n1.查看单伙伴证书，通过伙伴360（内部）和伙伴能力地图（伙伴侧）查看\n2.查看/导出最新中国伙伴证书统计\n查看/导出最新海外伙伴证书统计\n3.查看历史中国伙伴证书统计\n查看历史海外伙伴证书统计\n4. 伙伴能力地图里，导出的人员证书《MemberCertifyDetail》/ 证书明细  这个表格里，能显示出人员姓名吗？\n姓名涉及个人隐私，系统不支持显示人员姓名。\n5.工程师去哪里个人查看和下载证书\n访问：华为人才在线-证书查看使用考试账号登录即可查询和下载。如有疑问，可联系华为人才在线页面客服咨询。\n场景4：中国区要求工程师证书实名制\n中国区政策要求，未完成实名认证工程师的售前售后证书不能计入有效证书参与专业化能力等级/身份认证能力达标计算。\n如何完成实名认证：由证书持有人用 证书明细中对应的官网账号 登录https://e.huawei.com/cn/talent/#/personal/myinfo进行实行认证，认证过程中有疑问，可以咨询talent页面的客服。实名认证完成后，伙伴360页面会在1天后刷新数据。\n如何查看工程师是否实名制：通过伙伴360/伙伴能力地图查看证书明细“是否实名”列。\n场景5：证书转移\nhttps://e.huawei.com/cn/talent/#/personal/mycert如何做证书转移：使用新账号登录华为人才在线平台我的证书处，点击 关联我的证书 按钮，然后对应的提示完成操作和验证，届时你可以解除证书与旧账号的绑定，关联到新的账户。\n场景6：证书重认证\nHCIA HCIP HCIE证书重认证请参考：\nhttps://e.huawei.com/cn/talent/#/cert/re-certification\n场景7：HCIE换绑公司需要间隔1年\nHCIE证书关联上一家公司的时间与关联下一家公司的时间需间隔一年；如果对此政策有疑问请与代表处服务经理或接口人联系。\n场景8：证书考试\n1.参加HCSP笔试（新通道）考试前，是否需要先获取对应方向HCSA证书？\n>>> 不需要。所有产品新通道HCSP认证笔试可以直接参加，通过考试即可获得HCSP证书，不要求必须先通过HCSA认证。\n2.旧证书认证截止时间是23年12月31日，那么旧证书面试提交截止时间点是什么？\n>>> 所有旧证书（含HCSP、HCSE）面试申请截止时间是23年12月5日。\n3.证书到期续认证说明\n>>>当前HCSP续认证/重认证是直接面试即可！面试通过的如果原HCSP证书未过期的就在原证书上进行延期，如果原 HCSP证书已过期的会下发新的HCSP证书。HCSA的证书不会随之变化延期的，如果要对HCSA证书进行续认证，和首次 HCSA认证一样，到VUE考生中心报考笔试！"
+          },
+          {
+            "case_id": "KT00071844",
+            "title": "已完成证书规则/考试已经通过，查不到证书",
+            "keywords": [
+              "证书查询",
+              "iLearning平台"
+            ],
+            "content": "一、问题现象：\n已经完成证书规则/通过考试，但是未找到证书。\n二、解决方案：\n证书查看操作步骤：进入iLearning平台点击个人中心，在我的证书里面查询。\n个人中心链接：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n证书生成规则：考试通过之后成绩会推送到LMS平台证书系统用于判定证书生成的条件，当成绩推送之后一般会在1小时内生成对应的证书。\n如果还是无法查询到证书，请联系证书管理员/考试页面的考试管理员咨询。"
+          },
+          {
+            "case_id": "KT00066712",
+            "title": "参加完华为认证考试后，我可以去哪里下载个人证书？",
+            "keywords": [
+              "华为电子证书",
+              "下载"
+            ],
+            "content": "一、问题现象：\n参加完认证考试后，我可以去哪里下载证书？\n二、解决方案：\n通过华为认证的考生，如需下载华为电子证书，可在完成相关考试的三个工作日后访问：华为电子证书下载（https://e.huawei.com/cn/talent/#/personal/mycert）。！"
+          }
+        ],
+        "topic_structure": {
+          "query": "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "topic": "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "case_ids": [
+            "KT00226785",
+            "KT00078394",
+            "KT00317770",
+            "KT00071844",
+            "KT00066712"
+          ],
+          "leaf": false,
+          "children": [
+            {
+              "topic": "通过 iLearning 平台查看和下载证书",
+              "case_ids": [
+                "KT00226785",
+                "KT00071844"
+              ],
+              "leaf": false,
+              "children": [
+                {
+                  "topic": "通过 w3 账号考试生成的证书查询与下载",
+                  "case_ids": [
+                    "KT00226785"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00226785"
+                },
+                {
+                  "topic": "已完成证书规则但未查到证书的处理",
+                  "case_ids": [
+                    "KT00071844"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00071844"
+                }
+              ],
+              "dimension": "证书获取方式"
+            },
+            {
+              "topic": "通过 华为人才在线（e.huawei.com）查看和下载证书",
+              "case_ids": [
+                "KT00078394",
+                "KT00317770",
+                "KT00066712"
+              ],
+              "leaf": false,
+              "children": [
+                {
+                  "topic": "通过华为人才在线平台查看和下载证书",
+                  "case_ids": [
+                    "KT00317770",
+                    "KT00066712"
+                  ],
+                  "leaf": false,
+                  "children": [
+                    {
+                      "topic": "KT00317770",
+                      "case_ids": [
+                        "KT00317770"
+                      ],
+                      "leaf": true,
+                      "case_id": "KT00317770",
+                      "children": []
+                    },
+                    {
+                      "topic": "KT00066712",
+                      "case_ids": [
+                        "KT00066712"
+                      ],
+                      "leaf": true,
+                      "case_id": "KT00066712",
+                      "children": []
+                    }
+                  ],
+                  "dimension": "案例差异"
+                },
+                {
+                  "topic": "考试后等待1个工作日查看证书",
+                  "case_ids": [
+                    "KT00078394"
+                  ],
+                  "leaf": true,
+                  "children": [],
+                  "case_id": "KT00078394"
+                }
+              ],
+              "dimension": "证书查看方式"
+            }
+          ],
+          "dimension": "证书查看平台"
+        },
+        "policy": {
+          "label": "ExplainedResponse",
+          "case_id": [
+            "KT00226785",
+            "KT00317770",
+            "KT00066712"
+          ],
+          "reason": "用户明确询问 HCIE 考试证书的查看方式和链接，已有多个案例提供具体平台（iLearning 和华为人才在线）及操作路径，可以直接引用并解释。"
+        },
+        "response": {
+          "response": "您可以通过以下链接查看和下载您的HCIE考试证书：\n1. 华为电子证书下载页面：https://e.huawei.com/cn/talent/#/personal/mycert\n2. iLearning平台个人中心证书查询：http://ilearning.huawei.com/edx/next/learningCenter/certificate\n\n请注意，证书一般在考试通过后1小时内生成。如果无法查询到，请联系相关考试管理员协助处理。"
+        }
+      },
+      {
+        "turn_id": 2,
+        "dialog_id": "220607028",
+        "user": "我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。",
+        "golden_response": "好的。\n您好，请问还有其它可以帮到您的吗？",
+        "dialogue_history": "用户: 我考过了 HCIE 的正式在哪里查看。\n客服: 您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？\n用户: 我的HCIE考试证书在哪查看 有啥链接吗？\n客服: [案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！\n用户: 我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。\n",
+        "query": {
+          "query_mode": "rewrite",
+          "query_text": "飞书显示无法连接的解决方法",
+          "reason": "用户提出新的问题，与之前的 HCIE 成绩和证书无关。"
+        },
+        "trigger": {
+          "trigger": true,
+          "evidence_mode": "retrieve_new_evidence",
+          "evidence_status": "insufficient",
+          "case_id": "",
+          "reason": "当前 active_cases 均与证书下载相关，无法支持解决“飞书显示无法连接”的问题。"
+        },
+        "evidence": [
+          {
+            "case_id": "KT00249639",
+            "title": "【ilearning】ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新",
+            "keywords": [
+              "HCIE证书",
+              "有效期更新"
+            ],
+            "content": "问题描述：ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新\n解决方案：此类证书均不是在ilearning平台考试获得的，ilearning显示的是历史数据，从2022年后ilearning就不再更新外训证书。\n目前查看证书均以【华为人才在线平台】为准，认证证书业务证书查看网址：https://e.huawei.com/cn/talent/#/personal/mycert，若有疑问可咨询【华为人才在线平台】。"
+          },
+          {
+            "case_id": "KT00176549",
+            "title": "HCIA考试通过，但无法关联上证书",
+            "keywords": [
+              "HCIA证书",
+              "无法关联"
+            ],
+            "content": "解决方案：\n您好，请您提供Uniportal账号，并以附件形式提供考试成绩报告单扫描件，或成绩报告单上的考生号、成绩注册号、考试日期、考试科目等信息，\n通过以下链接提交问题单，链接：https://e.huawei.com/cn/talent/#/issue/add我们将为您进一步处理，谢谢"
+          },
+          {
+            "case_id": "KT00090338",
+            "title": "如何获取CSP证书纸质文件?",
+            "keywords": [
+              "CSP证书",
+              "纸质版"
+            ],
+            "content": "CSP三钻、四钻、五钻有纸质证书，如果有需要，可以向fwrz@huawei.com提交纸质证书申请，在每个月前两周内将纸质证书下发到当地代表处，可联系当地服务经理获取。如果没有当地服务经理的联系方式，可以咨询渠道经理或者发邮件咨询fwrz@huawei.com。\n认证级CSP只有电子证书。同时可自己在https://partner.huawei.com上自行下载电子版证书。下载方法如下：ePartner-->认证与能力-->认证成员查询\n备注：华为提供的纸质证书与将电子证书直接打印出来没有区别，如果需要将证书放大、镶边、挂墙上等处理，请自行根据电子证书做相应处理，华为侧不提供。"
+          },
+          {
+            "case_id": "KT00232812",
+            "title": "【iLearning】考试证书如何设置",
+            "keywords": [
+              "iLearning",
+              "证书设置"
+            ],
+            "content": "问题描述：\n考试如何设置证书。\n考试如何设置证书。\n解决方案：\n1、创建证书\n证书名称：将在学员收到的证书页面中显示（iLearning-学习中心-我的证书页面）\n所属部门：发放证书的部门\n证书有效期（月）：分为永久和自定义月份，永久有效：证书不会过期；自定义月份：自学员拿到证书后的多少月后失效\n允许续期：在自定义证书的有效期后可设置证书是否允许续期，若允许续期，学员可在证书在有效期内，按照证书的发放条件再次获得，获得后会按照获得日期再次延长证书的有效期\n需申请：开启后用户可收到需申请状态的证书，但需点击申请才可以下载证书附件\n获得证书提醒：打开获得证书提醒，可通过应用号及站内消息给用户发送获得证书的提醒\n2、配置证书规则\n证书发放要求：即证书发放的规则，是满足任一规则还是满足所有规则，进行证书的发放。具体来说，如果一个证书配置了多个规则，这些规则之间的是【或】或者【且】的关系。\n考试规则：即针对考试设定的证书发放规则\n考试评判方式：默认为考试通过状态。\n考试结果有效期：作为证书发放要求的判断依据的考试，考试时间距离当前时间的跨度期限 （例如：考试结果有效期为1年，则1年之前的考试不可作为发证依据）\n添加资源：点击【+添加资源】的按钮，即可弹出选择资源的弹窗，输入资源编码或者名称即可。同一个规则下可以选择多个资源，且每个资源需设置是否必须完成。\n添加完资源后，需要选择是“必修”还是“选修”\n必修：获得此证书必学的课程或考试，且须达到通过标准\n选修：学员根据规则要求，可选择性学习的课程或考试\n3、配置证书模板\n平台标准模板：平台提供了5种标准证书模块，可直接选用\n自定义证书模板：在可拖动元素到证书模板中选择相关的参数：【学员账号】【学员姓名】【获得日期】【到期日期】【证书名称】【学员证书编码】，并可更改字体、颜色、大小、位置；可在参数前增加自定义的文本对参数进行说明，还可在证书任一地方参加文本，可更改文本的字体、颜色、大小、位置；可上传图片做为证书的logo，或签发人的签名；点击预览查看证书样式\n4、保存证书\n编辑完证书后，点击保存，证书状态为【未发布】，平台不会发放【未发布】的证书5、发布证书\n检查无误后，鼠标放置“保存”位置，即可选择发布，证书一旦发布后，学员满足发证规则，即可获得证书。"
+          },
+          {
+            "case_id": "KT00210746",
+            "title": "外网用户如何获取CSC考试证书",
+            "keywords": [
+              "CSC考试",
+              "外网用户"
+            ],
+            "content": "外网用户(没有w3账号）如何参加CSC考试获取证书\n由于ilearningX系统的日落，CSC考试迁移至时习知平台，请到对接外网系统时习知平台进行学习，平台链接：http://shixizhi.huawei.com\n如何参与CSC考试：\n1、先加入CSC学堂【时习知】，邀请您加入【GTS网络安全与用户隐私保护办公室】，点击链接直接加入：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/commonUsage/joinCollegePage.htm?code=BTLT2B&sxz-lang=zh_CN2、加入学堂后，请参加下面考试，考试链接如下：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/iexam/1530365150992642049/examInfo?examId=2207051621563911447&sxz-lang=zh_CN\n注册登录账号请参考附件：附件2：分包商网络安全资质认证指导书(CNBG)中国区-V1.3-20230225.docx"
+          }
+        ],
+        "topic_structure": {
+          "query": "飞书显示无法连接的解决方法",
+          "topic": "飞书显示无法连接的解决方法",
+          "case_ids": [
+            "KT00249639",
+            "KT00176549",
+            "KT00090338",
+            "KT00232812",
+            "KT00210746"
+          ],
+          "leaf": false,
+          "children": [
+            {
+              "topic": "HCIE/HCIA/HCIP证书有效期问题",
+              "case_ids": [
+                "KT00249639"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00249639"
+            },
+            {
+              "topic": "HCIA考试通过但无法关联证书",
+              "case_ids": [
+                "KT00176549"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00176549"
+            },
+            {
+              "topic": "CSP证书纸质版申请",
+              "case_ids": [
+                "KT00090338"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00090338"
+            },
+            {
+              "topic": "iLearning平台考试证书设置",
+              "case_ids": [
+                "KT00232812"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00232812"
+            },
+            {
+              "topic": "外网用户获取CSC考试证书",
+              "case_ids": [
+                "KT00210746"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00210746"
+            }
+          ],
+          "dimension": "证书类型"
+        },
+        "policy": {
+          "label": "AskClarification",
+          "case_id": [],
+          "reason": "用户当前问题从历史来看是关于证书查询，但最新输入转向飞书连接问题，且未提供足够信息判断具体原因（如网络环境、错误提示等），需进一步澄清问题本质。"
+        },
+        "response": {
+          "response": "您好，关于飞书显示无法连接的问题，请问您遇到此问题时是否有特定的操作或网络环境？例如是否在使用公司网络、防火墙设置等。方便提供更详细的信息吗？"
+        }
+      }
+    ],
+    "final_memory": {
+      "issue_state": {
+        "current_issue": "飞书显示无法连接的解决方法",
+        "query_history": [
+          "HCIE 考试通过后如何查看正式成绩",
+          "HCIE 考试通过后如何查看正式成绩和证书链接",
+          "飞书显示无法连接的解决方法"
+        ]
+      },
+      "dialog_state": {
+        "compressed_history": [
+          {
+            "user": "我考过了 HCIE 的正式在哪里查看。",
+            "assistant": "您好，方便对您问题精准定位，请您提供一下系统链接呢。\n请问您是想问什么正式呢？"
+          },
+          {
+            "user": "我的HCIE考试证书在哪查看 有啥链接吗？",
+            "assistant": "[案例链接: KT00317770]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若还有问题请反馈给我（工号60099975），谢谢！"
+          },
+          {
+            "user": "我的飞书为啥老是显示无法连接。\n麻烦联系我&nbsp;c00917062。",
+            "assistant": "好的。\n您好，请问还有其它可以帮到您的吗？"
+          }
+        ]
+      },
+      "evidence_state": {
+        "active_cases": [
+          {
+            "case_id": "KT00249639",
+            "title": "【ilearning】ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新",
+            "keywords": [
+              "HCIE证书",
+              "有效期更新"
+            ],
+            "content": "问题描述：ilearning上HCIE\\HCIA\\HCIP证书的有效期没有更新\n解决方案：此类证书均不是在ilearning平台考试获得的，ilearning显示的是历史数据，从2022年后ilearning就不再更新外训证书。\n目前查看证书均以【华为人才在线平台】为准，认证证书业务证书查看网址：https://e.huawei.com/cn/talent/#/personal/mycert，若有疑问可咨询【华为人才在线平台】。"
+          },
+          {
+            "case_id": "KT00176549",
+            "title": "HCIA考试通过，但无法关联上证书",
+            "keywords": [
+              "HCIA证书",
+              "无法关联"
+            ],
+            "content": "解决方案：\n您好，请您提供Uniportal账号，并以附件形式提供考试成绩报告单扫描件，或成绩报告单上的考生号、成绩注册号、考试日期、考试科目等信息，\n通过以下链接提交问题单，链接：https://e.huawei.com/cn/talent/#/issue/add我们将为您进一步处理，谢谢"
+          },
+          {
+            "case_id": "KT00090338",
+            "title": "如何获取CSP证书纸质文件?",
+            "keywords": [
+              "CSP证书",
+              "纸质版"
+            ],
+            "content": "CSP三钻、四钻、五钻有纸质证书，如果有需要，可以向fwrz@huawei.com提交纸质证书申请，在每个月前两周内将纸质证书下发到当地代表处，可联系当地服务经理获取。如果没有当地服务经理的联系方式，可以咨询渠道经理或者发邮件咨询fwrz@huawei.com。\n认证级CSP只有电子证书。同时可自己在https://partner.huawei.com上自行下载电子版证书。下载方法如下：ePartner-->认证与能力-->认证成员查询\n备注：华为提供的纸质证书与将电子证书直接打印出来没有区别，如果需要将证书放大、镶边、挂墙上等处理，请自行根据电子证书做相应处理，华为侧不提供。"
+          },
+          {
+            "case_id": "KT00232812",
+            "title": "【iLearning】考试证书如何设置",
+            "keywords": [
+              "iLearning",
+              "证书设置"
+            ],
+            "content": "问题描述：\n考试如何设置证书。\n考试如何设置证书。\n解决方案：\n1、创建证书\n证书名称：将在学员收到的证书页面中显示（iLearning-学习中心-我的证书页面）\n所属部门：发放证书的部门\n证书有效期（月）：分为永久和自定义月份，永久有效：证书不会过期；自定义月份：自学员拿到证书后的多少月后失效\n允许续期：在自定义证书的有效期后可设置证书是否允许续期，若允许续期，学员可在证书在有效期内，按照证书的发放条件再次获得，获得后会按照获得日期再次延长证书的有效期\n需申请：开启后用户可收到需申请状态的证书，但需点击申请才可以下载证书附件\n获得证书提醒：打开获得证书提醒，可通过应用号及站内消息给用户发送获得证书的提醒\n2、配置证书规则\n证书发放要求：即证书发放的规则，是满足任一规则还是满足所有规则，进行证书的发放。具体来说，如果一个证书配置了多个规则，这些规则之间的是【或】或者【且】的关系。\n考试规则：即针对考试设定的证书发放规则\n考试评判方式：默认为考试通过状态。\n考试结果有效期：作为证书发放要求的判断依据的考试，考试时间距离当前时间的跨度期限 （例如：考试结果有效期为1年，则1年之前的考试不可作为发证依据）\n添加资源：点击【+添加资源】的按钮，即可弹出选择资源的弹窗，输入资源编码或者名称即可。同一个规则下可以选择多个资源，且每个资源需设置是否必须完成。\n添加完资源后，需要选择是“必修”还是“选修”\n必修：获得此证书必学的课程或考试，且须达到通过标准\n选修：学员根据规则要求，可选择性学习的课程或考试\n3、配置证书模板\n平台标准模板：平台提供了5种标准证书模块，可直接选用\n自定义证书模板：在可拖动元素到证书模板中选择相关的参数：【学员账号】【学员姓名】【获得日期】【到期日期】【证书名称】【学员证书编码】，并可更改字体、颜色、大小、位置；可在参数前增加自定义的文本对参数进行说明，还可在证书任一地方参加文本，可更改文本的字体、颜色、大小、位置；可上传图片做为证书的logo，或签发人的签名；点击预览查看证书样式\n4、保存证书\n编辑完证书后，点击保存，证书状态为【未发布】，平台不会发放【未发布】的证书5、发布证书\n检查无误后，鼠标放置“保存”位置，即可选择发布，证书一旦发布后，学员满足发证规则，即可获得证书。"
+          },
+          {
+            "case_id": "KT00210746",
+            "title": "外网用户如何获取CSC考试证书",
+            "keywords": [
+              "CSC考试",
+              "外网用户"
+            ],
+            "content": "外网用户(没有w3账号）如何参加CSC考试获取证书\n由于ilearningX系统的日落，CSC考试迁移至时习知平台，请到对接外网系统时习知平台进行学习，平台链接：http://shixizhi.huawei.com\n如何参与CSC考试：\n1、先加入CSC学堂【时习知】，邀请您加入【GTS网络安全与用户隐私保护办公室】，点击链接直接加入：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/commonUsage/joinCollegePage.htm?code=BTLT2B&sxz-lang=zh_CN2、加入学堂后，请参加下面考试，考试链接如下：https://f2d447f643a5467ea6f9ab67f410d18a.shixizhi.huawei.com/iexam/1530365150992642049/examInfo?examId=2207051621563911447&sxz-lang=zh_CN\n注册登录账号请参考附件：附件2：分包商网络安全资质认证指导书(CNBG)中国区-V1.3-20230225.docx"
+          }
+        ],
+        "topic_structure": {
+          "query": "飞书显示无法连接的解决方法",
+          "topic": "飞书显示无法连接的解决方法",
+          "case_ids": [
+            "KT00249639",
+            "KT00176549",
+            "KT00090338",
+            "KT00232812",
+            "KT00210746"
+          ],
+          "leaf": false,
+          "children": [
+            {
+              "topic": "HCIE/HCIA/HCIP证书有效期问题",
+              "case_ids": [
+                "KT00249639"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00249639"
+            },
+            {
+              "topic": "HCIA考试通过但无法关联证书",
+              "case_ids": [
+                "KT00176549"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00176549"
+            },
+            {
+              "topic": "CSP证书纸质版申请",
+              "case_ids": [
+                "KT00090338"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00090338"
+            },
+            {
+              "topic": "iLearning平台考试证书设置",
+              "case_ids": [
+                "KT00232812"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00232812"
+            },
+            {
+              "topic": "外网用户获取CSC考试证书",
+              "case_ids": [
+                "KT00210746"
+              ],
+              "leaf": true,
+              "children": [],
+              "case_id": "KT00210746"
+            }
+          ],
+          "dimension": "证书类型"
+        }
+      },
+      "interaction_state": {
+        "stage": "Clarification",
+        "last_action": "AskClarification",
+        "action_history": [
+          "CaseRecommendation",
+          "ExplainedResponse",
+          "AskClarification"
+        ]
+      }
+    }
+  },
