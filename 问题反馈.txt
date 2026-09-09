@@ -1,126 +1,24 @@
-Dynamic Multi-turn Customer Service Agent
+def call_llm(self, prompt, data):
+    import time
 
-提供三种使用方式：
+    messages = build_messages(prompt, data)
 
-1. 将客服 Agent 接入其他系统
-2. 与用户模拟器进行动态多轮交互
-3. 与真人进行终端交互
+    input_text = json.dumps(
+        messages,
+        ensure_ascii=False
+    )
 
-1. 文件结构
+    print(f"Input chars: {len(input_text)}")
 
-.
-├── agent.py
-├── run_simulator.py
-├── run_human.py
-├── prompts/
-│   ├── query.prompt
-│   ├── trigger.prompt
-│   ├── policy.prompt
-│   └── response.prompt
-└── utils/
-    ├── scu_rag.py
-    └── qwen_api_multi.py
+    start = time.time()
 
-2. 接入其他系统
+    output = parallel_inference(
+        [messages]
+    )[0]
 
-客服 Agent 的统一接口为：
+    print(
+        f"LLM time: "
+        f"{time.time() - start:.2f}s"
+    )
 
-from agent import MemoryAgent
-agent = MemoryAgent()
-response = agent.reply(dialogue_history)
-
-dialogue_history 格式：
-
-dialogue_history = [
-    {
-        "role": "user",
-        "content": "我的Outlook打不开了"
-    },
-    {
-        "role": "assistant",
-        "content": "请问具体是什么现象？"
-    },
-    {
-        "role": "user",
-        "content": "启动以后一直卡住"
-    }
-]
-
-最后一条消息需要是当前用户输入。
-
-reply() 返回客服回复字符串：
-
-response = agent.reply(dialogue_history)
-dialogue_history.append({
-    "role": "assistant",
-    "content": response
-})
-
-同一段对话需要持续使用同一个 MemoryAgent：
-
-agent = MemoryAgent()
-response1 = agent.reply(history1)
-response2 = agent.reply(history2)
-response3 = agent.reply(history3)
-
-开始新对话时重新创建 Agent：
-
-agent = MemoryAgent()
-
-或者：
-
-agent.reset()
-
-3. 与用户模拟器交互
-
-运行入口：
-
-python run_simulator.py \
-    --first_user_message "我的Outlook打不开了" \
-    --output_path outputs/dialogue_001.json \
-    --max_turns 10
-
-用户模拟器需要提供统一接口：
-
-class UserSimulator:
-    def reply(self, dialogue_history):
-        ...
-        return next_user_message
-
-然后在 run_simulator.py 中接入：
-
-from your_user_simulator import UserSimulator
-user_simulator = UserSimulator(...)
-
-运行过程中终端显示：
-
-[Turn 1] User Simulator -> Customer Service Agent
-[Turn 1] Customer Service Agent -> User Simulator
-[Turn 2] User Simulator -> Customer Service Agent
-[Turn 2] Customer Service Agent -> User Simulator
-
-完整对话会保存到 --output_path 指定的 JSON 文件。
-
-4. 与真人交互
-
-运行：
-
-python run_human.py
-
-然后直接在终端输入：
-
-User: 我的Outlook打不开
-Agent: 请问具体是什么现象？
-User: 启动以后一直卡住
-Agent: 请问您的Outlook版本是多少？
-User:
-
-输入：
-
-exit
-
-或：
-
-quit
-
-结束对话。
+    return parse_llm_output(output)
