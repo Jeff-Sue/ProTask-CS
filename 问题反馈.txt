@@ -1,145 +1,40 @@
-import argparse
-import json
-from pathlib import Path
-
 from agent import MemoryAgent
 
 
-def save_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def run_dialogue(
-    customer_service_agent,
-    user_simulator,
-    first_user_message,
-    max_turns=10,
-):
-    """
-    user_simulator must expose:
-
-        reply(dialogue_history) -> str
-
-    dialogue_history uses:
-        {"role": "user", "content": "..."}
-        {"role": "assistant", "content": "..."}
-    """
-
+def main():
+    agent = MemoryAgent()
     dialogue_history = []
-    turns = []
 
-    user_message = first_user_message
+    print("Customer Service Agent")
+    print("Type 'exit' or 'quit' to end the conversation.\n")
 
-    for turn_id in range(1, max_turns + 1):
-        print(f"[Turn {turn_id}] User Simulator -> Customer Service Agent")
+    while True:
+        user = input("User: ").strip()
+
+        if not user:
+            continue
+
+        if user.lower() in {"exit", "quit"}:
+            print("Conversation ended.")
+            break
 
         dialogue_history.append(
             {
                 "role": "user",
-                "content": user_message,
+                "content": user,
             }
         )
 
-        agent_response = customer_service_agent.reply(
-            dialogue_history
-        )
+        response = agent.reply(dialogue_history)
+
+        print(f"Agent: {response}\n")
 
         dialogue_history.append(
             {
                 "role": "assistant",
-                "content": agent_response,
+                "content": response,
             }
         )
-
-        turns.append(
-            {
-                "turn_id": turn_id,
-                "user": user_message,
-                "assistant": agent_response,
-            }
-        )
-
-        print(f"[Turn {turn_id}] Customer Service Agent -> User Simulator")
-
-        if turn_id == max_turns:
-            break
-
-        user_message = user_simulator.reply(dialogue_history)
-
-        if user_message is None:
-            break
-
-        user_message = str(user_message).strip()
-
-        if not user_message:
-            break
-
-    return {
-        "turns": turns,
-        "dialogue_history": dialogue_history,
-    }
-
-
-# ============================================================
-# Example simulator adapter
-# Replace this class with your own simulator implementation.
-# ============================================================
-
-class UserSimulator:
-    def __init__(self):
-        raise NotImplementedError(
-            "Replace UserSimulator with your actual user simulator, "
-            "or import it from your simulator module."
-        )
-
-    def reply(self, dialogue_history):
-        raise NotImplementedError
-
-
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--first_user_message",
-        required=True,
-        help="Initial utterance from the user simulator.",
-    )
-    parser.add_argument(
-        "--output_path",
-        default="outputs/simulator_dialogue.json",
-    )
-    parser.add_argument(
-        "--max_turns",
-        type=int,
-        default=10,
-    )
-
-    args = parser.parse_args()
-
-    customer_service_agent = MemoryAgent()
-
-    # Replace this with your real simulator, for example:
-    #
-    # from user_simulator import UserSimulator
-    # user_simulator = UserSimulator(...)
-    #
-    user_simulator = UserSimulator()
-
-    result = run_dialogue(
-        customer_service_agent=customer_service_agent,
-        user_simulator=user_simulator,
-        first_user_message=args.first_user_message,
-        max_turns=args.max_turns,
-    )
-
-    save_json(args.output_path, result)
-
-    print(f"Dialogue saved to {args.output_path}")
 
 
 if __name__ == "__main__":
