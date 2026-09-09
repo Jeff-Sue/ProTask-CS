@@ -1,240 +1,146 @@
+import argparse
 import json
 from pathlib import Path
 
-from utils.scu_rag import batch_zefeng_rag
-from utils.qwen_api_multi import parallel_inference
+from agent import MemoryAgent
 
 
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-
-    if not isinstance(text, str):
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
+def save_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
-def parse_llm_output(output):
-    output = parse_json(output)
-    return parse_json(output.get("response", ""))
-
-
-def prompt_read(path):
-    return Path(path).read_text(encoding="utf-8").strip()
-
-
-def build_messages(system_prompt, data):
-    return [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": json.dumps(data, ensure_ascii=False),
-        },
-    ]
-
-
-def history_to_text(history):
-    lines = []
-
-    for msg in history:
-        if msg["role"] == "user":
-            lines.append(f"用户: {msg['content']}")
-        elif msg["role"] == "assistant":
-            lines.append(f"客服: {msg['content']}")
-
-    return "\n".join(lines)
-
-
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": [],
-        },
-        "dialog_state": {
-            "compressed_history": [],
-        },
-        "evidence_state": {
-            "active_cases": [],
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "action_history": [],
-        },
-    }
-
-
-class MemoryAgent:
+def run_dialogue(
+    customer_service_agent,
+    user_simulator,
+    first_user_message,
+    max_turns=10,
+):
     """
-    Stateful customer-service agent.
+    user_simulator must expose:
 
-    One MemoryAgent instance corresponds to one dialogue.
-    Call reset() before starting a new dialogue if reusing the instance.
+        reply(dialogue_history) -> str
+
+    dialogue_history uses:
+        {"role": "user", "content": "..."}
+        {"role": "assistant", "content": "..."}
     """
 
-    def __init__(self, prompt_dir="prompts"):
-        prompt_dir = Path(prompt_dir)
+    dialogue_history = []
+    turns = []
 
-        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
-        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
-        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
-        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
+    user_message = first_user_message
 
-        self.memory = init_memory()
+    for turn_id in range(1, max_turns + 1):
+        print(f"[Turn {turn_id}] User Simulator -> Customer Service Agent")
 
-    def call_llm(self, prompt, data):
-        messages = build_messages(prompt, data)
-        output = parallel_inference([messages])[0]
-        return parse_llm_output(output)
-
-    def update_issue(self, query_state):
-        mode = query_state.get("query_mode", "none")
-        query = query_state.get("query_text", "").strip()
-
-        if mode in {"rewrite", "refine"} and query:
-            self.memory["issue_state"]["current_issue"] = query
-            self.memory["issue_state"]["query_history"].append(query)
-
-    def update_evidence(self, trigger_state, evidence):
-        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-            self.memory["evidence_state"]["active_cases"] = evidence
-
-    def update_interaction(self, policy_state):
-        label = policy_state.get("label", "")
-
-        self.memory["interaction_state"]["last_action"] = label
-        self.memory["interaction_state"]["action_history"].append(label)
-
-        if label in {"AskMissingSlot", "AskClarification"}:
-            self.memory["interaction_state"]["stage"] = "Clarification"
-        elif label in {"ExplainedResponse", "CaseRecommendation"}:
-            self.memory["interaction_state"]["stage"] = "Resolution"
-        elif label == "Handoff":
-            self.memory["interaction_state"]["stage"] = "End"
-
-    def update_dialogue(self, user, response):
-        history = self.memory["dialog_state"]["compressed_history"]
-
-        history.append(
+        dialogue_history.append(
             {
-                "user": user,
-                "assistant": response,
+                "role": "user",
+                "content": user_message,
             }
         )
 
-        self.memory["dialog_state"]["compressed_history"] = history[-5:]
+        agent_response = customer_service_agent.reply(
+            dialogue_history
+        )
+
+        dialogue_history.append(
+            {
+                "role": "assistant",
+                "content": agent_response,
+            }
+        )
+
+        turns.append(
+            {
+                "turn_id": turn_id,
+                "user": user_message,
+                "assistant": agent_response,
+            }
+        )
+
+        print(f"[Turn {turn_id}] Customer Service Agent -> User Simulator")
+
+        if turn_id == max_turns:
+            break
+
+        user_message = user_simulator.reply(dialogue_history)
+
+        if user_message is None:
+            break
+
+        user_message = str(user_message).strip()
+
+        if not user_message:
+            break
+
+    return {
+        "turns": turns,
+        "dialogue_history": dialogue_history,
+    }
+
+
+# ============================================================
+# Example simulator adapter
+# Replace this class with your own simulator implementation.
+# ============================================================
+
+class UserSimulator:
+    def __init__(self):
+        raise NotImplementedError(
+            "Replace UserSimulator with your actual user simulator, "
+            "or import it from your simulator module."
+        )
 
     def reply(self, dialogue_history):
-        """
-        Args:
-            dialogue_history:
-                [
-                    {"role": "user", "content": "..."},
-                    {"role": "assistant", "content": "..."},
-                    ...
-                    {"role": "user", "content": "..."},
-                ]
+        raise NotImplementedError
 
-        Returns:
-            str: customer-service response
-        """
-        if not dialogue_history:
-            raise ValueError("dialogue_history is empty")
 
-        last_msg = dialogue_history[-1]
+def main():
+    parser = argparse.ArgumentParser()
 
-        if last_msg.get("role") != "user":
-            raise ValueError(
-                "The last message in dialogue_history must be from user."
-            )
+    parser.add_argument(
+        "--first_user_message",
+        required=True,
+        help="Initial utterance from the user simulator.",
+    )
+    parser.add_argument(
+        "--output_path",
+        default="outputs/simulator_dialogue.json",
+    )
+    parser.add_argument(
+        "--max_turns",
+        type=int,
+        default=10,
+    )
 
-        user = str(last_msg.get("content", "")).strip()
+    args = parser.parse_args()
 
-        if not user:
-            raise ValueError("Current user message is empty")
+    customer_service_agent = MemoryAgent()
 
-        # 1. Query
-        query_state = self.call_llm(
-            self.query_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {"u": user},
-            },
-        )
-        self.update_issue(query_state)
+    # Replace this with your real simulator, for example:
+    #
+    # from user_simulator import UserSimulator
+    # user_simulator = UserSimulator(...)
+    #
+    user_simulator = UserSimulator()
 
-        # 2. Trigger
-        trigger_state = self.call_llm(
-            self.trigger_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "dialog_state": self.memory["dialog_state"],
-            },
-        )
+    result = run_dialogue(
+        customer_service_agent=customer_service_agent,
+        user_simulator=user_simulator,
+        first_user_message=args.first_user_message,
+        max_turns=args.max_turns,
+    )
 
-        # 3. Evidence
-        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-            query = (
-                self.memory["issue_state"]["current_issue"].strip()
-                or user
-            )
+    save_json(args.output_path, result)
 
-            evidence = batch_zefeng_rag(
-                [history_to_text(dialogue_history)],
-                [query],
-            )[0]
-        else:
-            evidence = self.memory["evidence_state"]["active_cases"]
+    print(f"Dialogue saved to {args.output_path}")
 
-        self.update_evidence(trigger_state, evidence)
 
-        # 4. Policy
-        policy_state = self.call_llm(
-            self.policy_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "interaction_state": self.memory["interaction_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {"u": user},
-            },
-        )
-        self.update_interaction(policy_state)
-
-        # 5. Response
-        response_state = self.call_llm(
-            self.response_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "interaction_state": self.memory["interaction_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {
-                    "u": user,
-                    "policy": self.memory["interaction_state"]["last_action"],
-                },
-            },
-        )
-
-        response = (
-            response_state.get("response")
-            or response_state.get("text")
-            or response_state.get("content")
-            or ""
-        )
-
-        response = str(response).strip()
-
-        self.update_dialogue(user, response)
-
-        return response
-
-    def reset(self):
-        self.memory = init_memory()
+if __name__ == "__main__":
+    main()
