@@ -1,0 +1,63 @@
+  "220625683": {
+    "text": [
+      {
+        "用户": "邮件怎么设置自动发送邮件呀。"
+      },
+      {
+        "客服": "定时发送还是自动回复呢？"
+      },
+      {
+        "用户": "定时发送。"
+      },
+      {
+        "客服": "可参考[案例链接: KT00005126]。"
+      }
+    ],
+    "Image": [],
+    "caseId": [
+      "KT00005126"
+    ]
+  },
+
+
+
+  User: 邮件怎么设置自动发送邮件呀。
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:02<00:00,  2.43s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : rewrite | 如何设置邮件自动发送
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00005126, KT00403407, KT00000637, KT00041924, KT00001305
+ Policy   : AskClarification
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，关于设置邮件自动发送，您是想在特定时间发送单封邮件，还是希望每天定时自动发送邮件？另外，请问您使用的是 Outlook 客户端、网页版邮箱，还是其他邮件系统？
+
+User: 定时发
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | 如何设置邮件定时自动发送
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00005126, KT00403407, KT00000637, KT00041924, KT00001305
+ Policy   : CaseRecommendation
+ Case     : ['KT00005126', 'KT00403407']
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，根据您的需求，这里有两种相关解决方案供参考：
+
+1. **Outlook 客户端设置定时发送单封邮件**（案例编号 KT00005126）：
+   - 打开 Outlook，新建一封邮件，点击【选项】→【延迟传递】。
+   - 在弹出的对话框中，勾选“传递不早于”并设置好此邮件的发送时间，点击“关闭”。
+   - 注意：邮件点击“发送”后会保存在发件箱，在邮件发送之前请勿关闭邮箱，否则可能会发送失败。定时发送功能只有客户端才可以实现。
+
+2. **每天定时自动发送邮件（需通过系统规则或任务创建）**（案例编号 KT00403407）：
+   - 可以通过导航者新增定时邮件规则，并访问以下链接添加定时邮件任务：
+     http://ebusiness-jn.huawei.com/ebusiness/jn/publicservices/timeTask/reminder
+   - 示例参数：{ "shopId":"70000009", "businessType":"Light_Billing", "ruleType":"SEND_MESSAGE_STRATEGY", "ruleName":"MS Manager 待办","modelName":"InvoiceHead" }
+
+请问您使用的是哪种方式？我可以进一步协助您操作。
