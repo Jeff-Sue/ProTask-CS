@@ -1,0 +1,164 @@
+  "220624290": {
+    "text": [
+      {
+        "用户": "麻烦帮忙查看下我的gate居家办公外网权限是不是过期啦。"
+      },
+      {
+        "客服": "稍等。"
+      },
+      {
+        "用户": "等着用网络，现在可以通过吗？"
+      },
+      {
+        "客服": "我查询你现在账号确实没这个权限了。\n如果要使用，需要重新申请了。"
+      },
+      {
+        "用户": "这个需要领导审批的吗？\n需要提交电子流吗？"
+      },
+      {
+        "客服": "是的。\n[案例链接: KT00191104] 发这个链接给你内网同事帮你申请下。\n他帮你提交申请，主管审批后，过一会就可以使用了。"
+      },
+      {
+        "用户": "手机提不了是吧。"
+      },
+      {
+        "客服": "是的。\n需要能连内网的电脑上填写。"
+      }
+    ],
+    "Image": [],
+    "caseId": [
+      "KT00191104"
+    ]
+  },
+
+
+    "KT00191104": {
+        "case_name": "内网怎样申请iAccess(xGate外网接入)权限？",
+        "text": [
+            "iAccess(xGate外网接入)权限仅支持在公司内网申请，不支持在外网申请。",
+            "查询是否有iAccess权限：",
+            "华为员工(工号00开头的)默认开通iAccess（xGate外网接入）权限。",
+            "若您不确定是否有iAccess（xGate外网接入）权限，请点击查询链接进行查询（注：请在个人申请的权限和业务管理的权限栏目中展开查询确认，如下图）。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N905763116775923842",
+            "若未查询到iAccess(xGate外网接入)的应用权限，可参考下文进行权限申请。",
+            "iAccess权限申请的注意事项：",
+            "公共/专业账号不能申请iAccess权限；",
+            "iAccess权限有效期：默认最长一年到期，到期后重新申请；",
+            "iAccess权限生效时间：iAccess权限生效时间：电子流提交--直接主管审批--部门权签人（部门系统中任命的主管）审批--权限需要0.5小时同步生效；审批状态查看请点击此处。",
+            "若无法打开申请链接或者申请完无法提交等情况，可以尝试清理浏览器缓存（或者更换浏览器)重新填写提交。",
+            "新入职员工申请iAccess权限报错注意事项：",
+            "新入职员工申请IAccess权限的时候通常会报“人员信息未同步-新员工需要等待24小时后申请”或者“无部门权签人-无法获取你的部门权签人”，此时需要等部门HR数据集成，系统同步新员工部门数据，之后才能申请；",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N918518727674437694",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N918518590625554710",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "iAccess权限开通电子流：https://w3.huawei.com/iauth/#/selectPrivilege?onlyRole=true",
+            "选择\"权限申请\"->\"按应用权限申请\"",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N853685389147271273",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "第一步: 填入申请人w3账号, 如果是代他人申请, 请填写实际使用人w3账号",
+            "第二步: 在中间第二个方框内填入iAccess或者xGate, 会自动带出”xGate外网接入”",
+            "第三步: 勾选对应的权限:",
+            ":华为员工(含慧通), 请选择”Huawei Staff”(默认有权限无需申请)；",
+            "外协员工工号WX开头，实习生， 请选择”External Staff”；",
+            "租赁, OD, 工号3/6/8开头，请选择”Leasing Employee”；",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N802114391222992925",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "填写直接主管, 申请原因, 并提交申请即可",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N853685929276449003",
+            "相关案例：XGate外网接入权限申请时，审批人与实际不符",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "若权限已经申请了或者名下有权限了，无法外网连接请咨询或联系iAccess(xGate外网接入)的支持人员：",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N1015992655436869852",
+            "其他相关链接：",
+            "XGate外网接入权限申请时，审批人与实际不符",
+            "什么是双因子认证？是否每次登陆都需要认证？",
+            "spes外网接入认证连接失败"
+        ]
+    },
+
+
+User: 麻烦帮忙查看下我的gate居家办公外网权限是不是过期啦。
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:03<00:00,  3.56s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : rewrite | gate居家办公外网权限过期
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00042679, KT00002092, KT00191104, KT00143878, KT00233757
+ Policy   : CaseRecommendation
+ Case     : ['KT00143878']
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，关于查看gate居家办公外网权限是否过期的问题，您可以按照以下步骤操作：
+
+1. 登录 https://iright-t.huawei.com/index，点击“我的申请”。
+2. 找到之前申请的电子流“研发紧急接黄”，查看有效期时间。
+3. 确认在有效期内后，可以打开SPES客户端，点击“诊断工具”->“权限检查”，查看是否有“Inner_UG_ERAY”和“iAccess_UG_ERAY”权限。
+
+如果仍有疑问或无法确认，请随时告知我。
+
+User: 还真是  到期了 这咋办
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | gate居家办公外网权限过期且已到期如何处理
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00042679, KT00002092, KT00191104, KT00143878, KT00233757
+ Policy   : CaseRecommendation
+ Case     : ['KT00233757', 'KT00002092']
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，针对您的gate居家办公外网权限已到期的情况，您可以参考以下方法重新申请权限：
+
+1. 访问链接 https://w3.huawei.com/iauth/#/myApprove，进入“我的工作流”查看以往的权限申请记录。
+2. 找到“xGate外网接入”权限的申请记录，点击“查看全部”。
+3. 如果只有一条审批记录，不符合安全规定，需要取消当前权限后重新申请。
+4. 点击“取消权限”，然后重新提交“xGate外网接入”权限的申请即可。
+
+此外，您也可以直接通过权限申请电子流进行新的申请。如果在操作过程中遇到问题，可以随时联系我协助处理。
+
+User: 提交不了申请
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:06<00:00,  6.13s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | gate居家办公外网权限过期且已到期如何处理，用户无法提交申请
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00233757, KT00002092, KT00191104, KT00042679, KT00001208
+ Policy   : AskMissingSlot
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，关于您提到的无法提交申请的问题，请尝试以下操作：
+
+1. 清理浏览器缓存或更换浏览器重新尝试提交。
+2. 确保您当前处于公司内网环境下进行申请（部分权限仅支持内网申请）。
+3. 检查填写的信息是否完整且符合要求，例如审批人、申请原因等。
+
+如果以上方法仍无法解决，请告知我具体遇到的报错信息，我会进一步协助处理。
+
+User: 我当然不是内网了 现在在家呢
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:06<00:00,  6.05s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | gate居家办公外网权限过期且已到期如何处理，用户无法提交申请，当前在家无法使用内网
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00233757, KT00191104, KT00002092, KT00143878, KT00152460
+ Policy   : AskMissingSlot
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，理解您当前在家办公的情况。由于iAccess(xGate外网接入)权限的申请通常需要在公司内网环境下操作，建议您尝试以下方法：
+
+1. 如果您有公司便携机，请使用便携机连接内网后进行权限申请。
+2. 若无法使用便携机，可尝试通过公司提供的远程访问工具（如HIS在家办公服务）登录内网环境后再提交申请。
+3. 您也可以联系您的主管或IT支持人员，确认是否有其他方式协助您完成申请流程。
+
+如果需要进一步帮助，请随时告知我。
+
+User: 
