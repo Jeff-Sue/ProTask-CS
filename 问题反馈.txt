@@ -1,86 +1,393 @@
-def print_state(
-    self,
-    query_state,
-    trigger_state,
-    evidence,
-    policy_state,
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from openai import OpenAI
+from tqdm import tqdm
+
+
+# ============================================================
+# Config
+# ============================================================
+
+MODEL_NAME = "qwen3-32b"
+
+OPENAI_API_BASES = [
+    "http://localhost:8848/v1",
+    "http://localhost:8849/v1",
+    # "http://localhost:8850/v1",
+    # "http://localhost:8851/v1",
+]
+
+OPENAI_API_KEY = "EMPTY"
+
+MAX_WORKERS = 16
+MAX_RETRY = 3
+
+
+# ============================================================
+# Clients
+# ============================================================
+
+class ClientRouter:
+    """
+    Batch 模式：
+        多 endpoint 轮询。
+
+    Single 模式：
+        固定使用指定 endpoint。
+    """
+
+    def __init__(self, api_bases, api_key):
+        self.api_bases = api_bases
+
+        self.clients = [
+            OpenAI(
+                api_key=api_key,
+                base_url=base,
+            )
+            for base in api_bases
+        ]
+
+        self._idx = 0
+        self._lock = threading.Lock()
+
+    def get_next_client(self):
+        """Batch 模式：轮询 endpoint。"""
+        with self._lock:
+            idx = self._idx
+            self._idx = (
+                self._idx + 1
+            ) % len(self.clients)
+
+        return self.clients[idx]
+
+    def get_client(self, endpoint_id=0):
+        """Single 模式：固定 endpoint。"""
+        return self.clients[endpoint_id]
+
+
+client_router = ClientRouter(
+    OPENAI_API_BASES,
+    OPENAI_API_KEY,
+)
+
+
+# ============================================================
+# Basic API Call
+# ============================================================
+
+def call_qwen_api(messages, client):
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=2048,
+        top_p=0.5,
+        presence_penalty=1.5,
+        extra_body={
+            "top_k": 1,
+            "chat_template_kwargs": {
+                "enable_thinking": False
+            },
+        },
+    )
+
+    return response.choices[0].message.content
+
+
+# ============================================================
+# Retry
+# ============================================================
+
+def build_retry_messages(
+    base_messages,
+    bad_response,
+    format_error,
 ):
-    # Query
-    query_mode = query_state.get("query_mode", "")
-    query_text = query_state.get("query_text", "")
+    retry_messages = list(base_messages)
 
-    # Trigger / Evidence
-    trigger = trigger_state.get("trigger", "")
-    evidence_mode = trigger_state.get("evidence_mode", "")
+    retry_messages.append(
+        {
+            "role": "assistant",
+            "content": bad_response,
+        }
+    )
 
-    # Top-K Case IDs
-    case_ids = []
+    retry_messages.append(
+        {
+            "role": "user",
+            "content": (
+                "你刚才的输出不符合要求。"
+                f"错误原因：{format_error}。"
+                "请严格按原要求重新输出，"
+                "且只输出合法结果，不要输出任何解释、"
+                "前缀、后缀或 markdown 代码块。"
+            ),
+        }
+    )
 
-    for case in evidence or []:
-        if not isinstance(case, dict):
-            continue
+    return retry_messages
 
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
+
+def process_one_sample(
+    sample,
+    client,
+    validator=None,
+    max_retry=MAX_RETRY,
+):
+    base_messages = sample
+    current_messages = sample
+
+    last_error = None
+    last_response = None
+
+    for attempt in range(1, max_retry + 1):
+
+        try:
+            response = call_qwen_api(
+                current_messages,
+                client,
+            )
+
+            last_response = response
+
+            # 不需要格式校验
+            if validator is None:
+                return {
+                    "messages": base_messages,
+                    "response": response,
+                    "parsed_response": None,
+                    "success": True,
+                    "error": None,
+                    "retry_count": attempt - 1,
+                    "format_valid": True,
+                }
+
+            # 格式校验
+            is_valid, parsed_or_error = validator(
+                response
+            )
+
+            if is_valid:
+                return {
+                    "messages": base_messages,
+                    "response": response,
+                    "parsed_response": parsed_or_error,
+                    "success": True,
+                    "error": None,
+                    "retry_count": attempt - 1,
+                    "format_valid": True,
+                }
+
+            last_error = parsed_or_error
+
+            current_messages = build_retry_messages(
+                base_messages,
+                response,
+                parsed_or_error,
+            )
+
+        except Exception as e:
+            last_error = str(e)
+
+        # 最后一次失败后没必要再 sleep
+        if attempt < max_retry:
+            time.sleep(1)
+
+    return {
+        "messages": base_messages,
+        "response": last_response,
+        "parsed_response": None,
+        "success": False,
+        "error": last_error,
+        "retry_count": max_retry,
+        "format_valid": False,
+    }
+
+
+# ============================================================
+# Single Inference
+# ============================================================
+
+def single_inference(
+    messages,
+    endpoint_id=0,
+    validator=None,
+    max_retry=MAX_RETRY,
+):
+    """
+    单对话 / 真人交互 / 单个 Simulator rollout 使用。
+
+    特点：
+    - 不创建 ThreadPoolExecutor
+    - 不使用 tqdm
+    - 不做 endpoint round-robin
+    - 一个 dialogue 固定使用同一个模型 endpoint
+
+    Args:
+        messages:
+            [
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "..."}
+            ]
+
+        endpoint_id:
+            使用哪个模型服务。
+            0 -> localhost:8848
+            1 -> localhost:8849
+
+    Returns:
+        与 parallel_inference 单条结果相同的 dict。
+    """
+
+    client = client_router.get_client(
+        endpoint_id
+    )
+
+    return process_one_sample(
+        messages,
+        client=client,
+        validator=validator,
+        max_retry=max_retry,
+    )
+
+
+# ============================================================
+# Batch Parallel Inference
+# ============================================================
+
+def parallel_inference(
+    samples,
+    max_workers=MAX_WORKERS,
+    max_retry=MAX_RETRY,
+    validator=None,
+    show_progress=True,
+):
+    """
+    批量数据集评测使用。
+
+    每条请求自动分配到不同 endpoint。
+    """
+
+    results = [None] * len(samples)
+
+    def worker(sample):
+        client = client_router.get_next_client()
+
+        return process_one_sample(
+            sample,
+            client=client,
+            validator=validator,
+            max_retry=max_retry,
         )
 
-        if case_id:
-            case_ids.append(str(case_id))
+    with ThreadPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
 
-    # Policy
-    policy = policy_state.get("label", "")
+        future_to_idx = {
+            executor.submit(
+                worker,
+                sample,
+            ): idx
+            for idx, sample in enumerate(samples)
+        }
 
-    selected_case = (
-        policy_state.get("case_id")
-        or policy_state.get("selected_case")
-        or ""
+        iterator = as_completed(
+            future_to_idx
+        )
+
+        if show_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(samples),
+                desc="Processing",
+                ncols=100,
+            )
+
+        for future in iterator:
+
+            idx = future_to_idx[future]
+
+            try:
+                results[idx] = future.result()
+
+            except Exception as e:
+                results[idx] = {
+                    "messages": samples[idx],
+                    "response": None,
+                    "parsed_response": None,
+                    "success": False,
+                    "error": (
+                        f"Worker crashed: {str(e)}"
+                    ),
+                    "retry_count": max_retry,
+                    "format_valid": False,
+                }
+
+    return results
+
+
+# ============================================================
+# Unified Interface (Optional)
+# ============================================================
+
+def inference(
+    samples,
+    mode="auto",
+    endpoint_id=0,
+    max_workers=MAX_WORKERS,
+    max_retry=MAX_RETRY,
+    validator=None,
+):
+    """
+    可选统一接口。
+
+    mode:
+        "single"
+            单条请求，固定 endpoint。
+
+        "batch"
+            多条请求，并行处理。
+
+        "auto"
+            len(samples) == 1 -> single
+            len(samples) > 1  -> batch
+    """
+
+    if mode == "auto":
+        mode = (
+            "single"
+            if len(samples) == 1
+            else "batch"
+        )
+
+    if mode == "single":
+
+        if len(samples) != 1:
+            raise ValueError(
+                "single mode requires exactly one sample"
+            )
+
+        return [
+            single_inference(
+                samples[0],
+                endpoint_id=endpoint_id,
+                validator=validator,
+                max_retry=max_retry,
+            )
+        ]
+
+    if mode == "batch":
+
+        return parallel_inference(
+            samples,
+            max_workers=max_workers,
+            max_retry=max_retry,
+            validator=validator,
+        )
+
+    raise ValueError(
+        f"Unknown inference mode: {mode}"
     )
-
-    # Print
-    print("\n╔══════════════ AGENT STATE ══════════════╗")
-    print(f" Query    : {query_mode} | {query_text}")
-    print(f" Trigger  : {trigger}")
-    print(f" Evidence : {evidence_mode}")
-    print(
-        f" Cases    : "
-        f"{', '.join(case_ids) if case_ids else 'None'}"
-    )
-    print(f" Policy   : {policy}")
-    print(f" Case     : {selected_case or 'None'}")
-    print("╚══════════════════════════════════════════╝")
-
-
-
-
-
-response = str(response).strip()
-
-self.update_dialogue(user, response)
-
-# 输出中间状态
-
-self.print_state(
-
-    query_state=query_state,
-
-    trigger_state=trigger_state,
-
-    evidence=evidence,
-
-    policy_state=policy_state,
-
-)
-
-return response
-
-
-
-
-response = agent.reply(
-    dialogue_history
-)
-print("\n>>> AGENT RESPONSE")
-print(response)
-print()
