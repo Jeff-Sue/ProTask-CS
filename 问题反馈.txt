@@ -1,393 +1,1401 @@
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from openai import OpenAI
-from tqdm import tqdm
-
-
-# ============================================================
-# Config
-# ============================================================
-
-MODEL_NAME = "qwen3-32b"
-
-OPENAI_API_BASES = [
-    "http://localhost:8848/v1",
-    "http://localhost:8849/v1",
-    # "http://localhost:8850/v1",
-    # "http://localhost:8851/v1",
-]
-
-OPENAI_API_KEY = "EMPTY"
-
-MAX_WORKERS = 16
-MAX_RETRY = 3
-
-
-# ============================================================
-# Clients
-# ============================================================
-
-class ClientRouter:
-    """
-    Batch 模式：
-        多 endpoint 轮询。
-
-    Single 模式：
-        固定使用指定 endpoint。
-    """
-
-    def __init__(self, api_bases, api_key):
-        self.api_bases = api_bases
-
-        self.clients = [
-            OpenAI(
-                api_key=api_key,
-                base_url=base,
-            )
-            for base in api_bases
-        ]
-
-        self._idx = 0
-        self._lock = threading.Lock()
-
-    def get_next_client(self):
-        """Batch 模式：轮询 endpoint。"""
-        with self._lock:
-            idx = self._idx
-            self._idx = (
-                self._idx + 1
-            ) % len(self.clients)
-
-        return self.clients[idx]
-
-    def get_client(self, endpoint_id=0):
-        """Single 模式：固定 endpoint。"""
-        return self.clients[endpoint_id]
-
-
-client_router = ClientRouter(
-    OPENAI_API_BASES,
-    OPENAI_API_KEY,
+from Agent.utils.scu_rag import batch_zefeng_rag
+from Agent.utils.qwen_api_multi import (
+    single_inference,
+    parallel_inference,
 )
 
 
 # ============================================================
-# Basic API Call
+# Utils
 # ============================================================
 
-def call_qwen_api(messages, client):
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=2048,
-        top_p=0.5,
-        presence_penalty=1.5,
-        extra_body={
-            "top_k": 1,
-            "chat_template_kwargs": {
-                "enable_thinking": False
-            },
-        },
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+
+    if not isinstance(text, str):
+        return {}
+
+    text = text.strip()
+
+    if not text:
+        return {}
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    if "```json" in text:
+        try:
+            text = (
+                text
+                .split("```json", 1)[1]
+                .split("```", 1)[0]
+                .strip()
+            )
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    if "```" in text:
+        try:
+            text = (
+                text
+                .split("```", 1)[1]
+                .split("```", 1)[0]
+                .strip()
+            )
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    return {}
+
+
+def parse_llm_output(output):
+    parsed = parse_json(output)
+
+    if not parsed:
+        return {}
+
+    if "response" not in parsed:
+        return parsed
+
+    return parse_json(
+        parsed["response"]
     )
 
-    return response.choices[0].message.content
+
+def prompt_read(path):
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}"
+        )
+
+    return path.read_text(
+        encoding="utf-8"
+    ).strip()
 
 
-# ============================================================
-# Retry
-# ============================================================
-
-def build_retry_messages(
-    base_messages,
-    bad_response,
-    format_error,
+def build_messages(
+    system_prompt,
+    data,
 ):
-    retry_messages = list(base_messages)
-
-    retry_messages.append(
+    return [
         {
-            "role": "assistant",
-            "content": bad_response,
-        }
-    )
-
-    retry_messages.append(
+            "role": "system",
+            "content": system_prompt,
+        },
         {
             "role": "user",
-            "content": (
-                "你刚才的输出不符合要求。"
-                f"错误原因：{format_error}。"
-                "请严格按原要求重新输出，"
-                "且只输出合法结果，不要输出任何解释、"
-                "前缀、后缀或 markdown 代码块。"
+            "content": json.dumps(
+                data,
+                ensure_ascii=False,
             ),
-        }
-    )
-
-    return retry_messages
+        },
+    ]
 
 
-def process_one_sample(
-    sample,
-    client,
-    validator=None,
-    max_retry=MAX_RETRY,
-):
-    base_messages = sample
-    current_messages = sample
+def history_to_text(history):
+    lines = []
 
-    last_error = None
-    last_response = None
+    for msg in history:
 
-    for attempt in range(1, max_retry + 1):
-
-        try:
-            response = call_qwen_api(
-                current_messages,
-                client,
+        if msg["role"] == "user":
+            lines.append(
+                f"用户: {msg['content']}"
             )
 
-            last_response = response
-
-            # 不需要格式校验
-            if validator is None:
-                return {
-                    "messages": base_messages,
-                    "response": response,
-                    "parsed_response": None,
-                    "success": True,
-                    "error": None,
-                    "retry_count": attempt - 1,
-                    "format_valid": True,
-                }
-
-            # 格式校验
-            is_valid, parsed_or_error = validator(
-                response
+        elif msg["role"] == "assistant":
+            lines.append(
+                f"客服: {msg['content']}"
             )
 
-            if is_valid:
-                return {
-                    "messages": base_messages,
-                    "response": response,
-                    "parsed_response": parsed_or_error,
-                    "success": True,
-                    "error": None,
-                    "retry_count": attempt - 1,
-                    "format_valid": True,
-                }
+    return "\n".join(lines)
 
-            last_error = parsed_or_error
 
-            current_messages = build_retry_messages(
-                base_messages,
-                response,
-                parsed_or_error,
-            )
+def get_case_id(case):
+    return str(
+        case.get("case_id", "")
+    ).strip()
 
-        except Exception as e:
-            last_error = str(e)
 
-        # 最后一次失败后没必要再 sleep
-        if attempt < max_retry:
-            time.sleep(1)
+def case_map_from_cases(cases):
+    result = {}
 
+    for case in cases:
+
+        case_id = get_case_id(case)
+
+        if case_id:
+            result[case_id] = case
+
+    return result
+
+
+# ============================================================
+# Memory
+# ============================================================
+
+def init_memory():
     return {
-        "messages": base_messages,
-        "response": last_response,
-        "parsed_response": None,
-        "success": False,
-        "error": last_error,
-        "retry_count": max_retry,
-        "format_valid": False,
+
+        "issue_state": {
+            "current_issue": "",
+            "query_history": [],
+        },
+
+        "dialog_state": {
+            "compressed_history": [],
+        },
+
+        "evidence_state": {
+            "active_cases": [],
+            "topic_structure": {},
+        },
+
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": [],
+        },
     }
 
 
 # ============================================================
-# Single Inference
+# Topic Structure
 # ============================================================
 
-def single_inference(
-    messages,
-    endpoint_id=0,
-    validator=None,
-    max_retry=MAX_RETRY,
+def build_topic_split_input(
+    query,
+    cases,
+    parent_topic,
+    depth,
 ):
-    """
-    单对话 / 真人交互 / 单个 Simulator rollout 使用。
+    return {
+        "query": query,
+        "parent_topic": parent_topic,
+        "depth": depth,
+        "cases": cases,
+    }
 
-    特点：
-    - 不创建 ThreadPoolExecutor
-    - 不使用 tqdm
-    - 不做 endpoint round-robin
-    - 一个 dialogue 固定使用同一个模型 endpoint
 
-    Args:
-        messages:
-            [
-                {"role": "system", "content": "..."},
-                {"role": "user", "content": "..."}
+def make_leaf(
+    case_id,
+    topic=None,
+):
+    return {
+        "topic": topic or case_id,
+        "case_ids": [case_id],
+        "leaf": True,
+        "case_id": case_id,
+        "children": [],
+    }
+
+
+def normalize_split(
+    split_result,
+    expected_case_ids,
+):
+    if not isinstance(
+        split_result,
+        dict,
+    ):
+        return None
+
+    dimension = str(
+        split_result.get(
+            "dimension",
+            "",
+        )
+    ).strip()
+
+    children = split_result.get(
+        "children",
+        [],
+    )
+
+    if (
+        not dimension
+        or not isinstance(children, list)
+    ):
+        return None
+
+    normalized_children = []
+    observed = []
+
+    expected_set = set(
+        expected_case_ids
+    )
+
+    for child in children:
+
+        if not isinstance(child, dict):
+            continue
+
+        topic = str(
+            child.get(
+                "topic",
+                "",
+            )
+        ).strip()
+
+        case_ids = child.get(
+            "case_ids",
+            [],
+        )
+
+        if (
+            not topic
+            or not isinstance(case_ids, list)
+        ):
+            continue
+
+        clean_ids = []
+
+        for case_id in case_ids:
+
+            case_id = str(
+                case_id
+            ).strip()
+
+            if (
+                case_id
+                and case_id in expected_set
+            ):
+                clean_ids.append(
+                    case_id
+                )
+
+        clean_ids = list(
+            dict.fromkeys(clean_ids)
+        )
+
+        if not clean_ids:
+            continue
+
+        normalized_children.append({
+            "topic": topic,
+            "case_ids": clean_ids,
+        })
+
+        observed.extend(
+            clean_ids
+        )
+
+    # 至少两个子主题
+    if len(normalized_children) < 2:
+        return None
+
+    # 不允许遗漏
+    if sorted(observed) != sorted(
+        expected_case_ids
+    ):
+        return None
+
+    # 不允许重复
+    if len(observed) != len(
+        set(observed)
+    ):
+        return None
+
+    return {
+        "dimension": dimension,
+        "children": normalized_children,
+    }
+
+
+def fallback_to_case_leaves(
+    node,
+    case_ids,
+):
+    node["leaf"] = False
+
+    node["dimension"] = (
+        "案例差异"
+    )
+
+    node["children"] = [
+        make_leaf(case_id)
+        for case_id in case_ids
+    ]
+
+
+# ============================================================
+# Memory Agent
+# ============================================================
+
+class MemoryAgent:
+
+    def __init__(
+        self,
+        prompt_dir="Agent/prompts",
+        mode="single",
+        show_state=True,
+        max_topic_depth=8,
+        max_topic_retry=2,
+    ):
+
+        if mode not in {
+            "single",
+            "parallel",
+        }:
+            raise ValueError(
+                f"Unsupported mode: {mode}"
+            )
+
+        prompt_dir = Path(
+            prompt_dir
+        )
+
+        self.query_prompt = prompt_read(
+            prompt_dir / "query.prompt"
+        )
+
+        self.trigger_prompt = prompt_read(
+            prompt_dir / "trigger.prompt"
+        )
+
+        self.topic_prompt = prompt_read(
+            prompt_dir / "topic.prompt"
+        )
+
+        self.policy_prompt = prompt_read(
+            prompt_dir / "policy.prompt"
+        )
+
+        self.response_prompt = prompt_read(
+            prompt_dir / "response.prompt"
+        )
+
+        self.mode = mode
+        self.show_state = show_state
+
+        self.max_topic_depth = (
+            max_topic_depth
+        )
+
+        self.max_topic_retry = (
+            max_topic_retry
+        )
+
+        self.memory = init_memory()
+
+    # ========================================================
+    # LLM
+    # ========================================================
+
+    def call_llm(
+        self,
+        prompt,
+        data,
+    ):
+        messages = build_messages(
+            prompt,
+            data,
+        )
+
+        if self.mode == "single":
+
+            output = single_inference(
+                messages
+            )
+
+        else:
+
+            output = parallel_inference(
+                [messages]
+            )[0]
+
+        return parse_llm_output(
+            output
+        )
+
+    def call_llm_batch(
+        self,
+        messages,
+    ):
+        """
+        Topic Structure 一层可能同时存在多个 frontier node。
+
+        即使 Agent 是 single mode，
+        同一层的多个 sibling split 仍然可以并行，
+        因为它们之间没有依赖关系。
+        """
+
+        if not messages:
+            return []
+
+        if len(messages) == 1:
+
+            if self.mode == "single":
+                return [
+                    parse_llm_output(
+                        single_inference(
+                            messages[0]
+                        )
+                    )
+                ]
+
+            return [
+                parse_llm_output(
+                    parallel_inference(
+                        messages
+                    )[0]
+                )
             ]
 
-        endpoint_id:
-            使用哪个模型服务。
-            0 -> localhost:8848
-            1 -> localhost:8849
-
-    Returns:
-        与 parallel_inference 单条结果相同的 dict。
-    """
-
-    client = client_router.get_client(
-        endpoint_id
-    )
-
-    return process_one_sample(
-        messages,
-        client=client,
-        validator=validator,
-        max_retry=max_retry,
-    )
-
-
-# ============================================================
-# Batch Parallel Inference
-# ============================================================
-
-def parallel_inference(
-    samples,
-    max_workers=MAX_WORKERS,
-    max_retry=MAX_RETRY,
-    validator=None,
-    show_progress=True,
-):
-    """
-    批量数据集评测使用。
-
-    每条请求自动分配到不同 endpoint。
-    """
-
-    results = [None] * len(samples)
-
-    def worker(sample):
-        client = client_router.get_next_client()
-
-        return process_one_sample(
-            sample,
-            client=client,
-            validator=validator,
-            max_retry=max_retry,
+        outputs = parallel_inference(
+            messages
         )
-
-    with ThreadPoolExecutor(
-        max_workers=max_workers
-    ) as executor:
-
-        future_to_idx = {
-            executor.submit(
-                worker,
-                sample,
-            ): idx
-            for idx, sample in enumerate(samples)
-        }
-
-        iterator = as_completed(
-            future_to_idx
-        )
-
-        if show_progress:
-            iterator = tqdm(
-                iterator,
-                total=len(samples),
-                desc="Processing",
-                ncols=100,
-            )
-
-        for future in iterator:
-
-            idx = future_to_idx[future]
-
-            try:
-                results[idx] = future.result()
-
-            except Exception as e:
-                results[idx] = {
-                    "messages": samples[idx],
-                    "response": None,
-                    "parsed_response": None,
-                    "success": False,
-                    "error": (
-                        f"Worker crashed: {str(e)}"
-                    ),
-                    "retry_count": max_retry,
-                    "format_valid": False,
-                }
-
-    return results
-
-
-# ============================================================
-# Unified Interface (Optional)
-# ============================================================
-
-def inference(
-    samples,
-    mode="auto",
-    endpoint_id=0,
-    max_workers=MAX_WORKERS,
-    max_retry=MAX_RETRY,
-    validator=None,
-):
-    """
-    可选统一接口。
-
-    mode:
-        "single"
-            单条请求，固定 endpoint。
-
-        "batch"
-            多条请求，并行处理。
-
-        "auto"
-            len(samples) == 1 -> single
-            len(samples) > 1  -> batch
-    """
-
-    if mode == "auto":
-        mode = (
-            "single"
-            if len(samples) == 1
-            else "batch"
-        )
-
-    if mode == "single":
-
-        if len(samples) != 1:
-            raise ValueError(
-                "single mode requires exactly one sample"
-            )
 
         return [
-            single_inference(
-                samples[0],
-                endpoint_id=endpoint_id,
-                validator=validator,
-                max_retry=max_retry,
-            )
+            parse_llm_output(output)
+            for output in outputs
         ]
 
-    if mode == "batch":
+    # ========================================================
+    # Memory Update
+    # ========================================================
 
-        return parallel_inference(
-            samples,
-            max_workers=max_workers,
-            max_retry=max_retry,
-            validator=validator,
+    def update_issue(
+        self,
+        query_state,
+    ):
+        mode = query_state.get(
+            "query_mode",
+            "none",
         )
 
-    raise ValueError(
-        f"Unknown inference mode: {mode}"
-    )
+        query = str(
+            query_state.get(
+                "query_text",
+                "",
+            )
+        ).strip()
+
+        if (
+            mode in {"rewrite", "refine"}
+            and query
+        ):
+            self.memory[
+                "issue_state"
+            ][
+                "current_issue"
+            ] = query
+
+            self.memory[
+                "issue_state"
+            ][
+                "query_history"
+            ].append(query)
+
+    def update_evidence(
+        self,
+        trigger_state,
+        evidence,
+        topic_structure=None,
+    ):
+        mode = trigger_state.get(
+            "evidence_mode",
+            "no_evidence_needed",
+        )
+
+        if mode == "retrieve_new_evidence":
+
+            self.memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ] = evidence
+
+            self.memory[
+                "evidence_state"
+            ][
+                "topic_structure"
+            ] = (
+                topic_structure
+                or {}
+            )
+
+    def update_interaction(
+        self,
+        policy_state,
+    ):
+        label = policy_state.get(
+            "label",
+            "",
+        )
+
+        interaction = self.memory[
+            "interaction_state"
+        ]
+
+        interaction[
+            "last_action"
+        ] = label
+
+        interaction[
+            "action_history"
+        ].append(label)
+
+        if label in {
+            "AskMissingSlot",
+            "AskClarification",
+        }:
+            interaction[
+                "stage"
+            ] = "Clarification"
+
+        elif label in {
+            "ExplainedResponse",
+            "CaseRecommendation",
+        }:
+            interaction[
+                "stage"
+            ] = "Resolution"
+
+        elif label == "Handoff":
+            interaction[
+                "stage"
+            ] = "End"
+
+    def update_dialogue(
+        self,
+        user,
+        response,
+    ):
+        history = self.memory[
+            "dialog_state"
+        ][
+            "compressed_history"
+        ]
+
+        history.append({
+            "user": user,
+            "assistant": response,
+        })
+
+        self.memory[
+            "dialog_state"
+        ][
+            "compressed_history"
+        ] = history[-5:]
+
+    # ========================================================
+    # Input Builder
+    # ========================================================
+
+    def build_query_input(
+        self,
+        user,
+    ):
+        return {
+            "issue_state":
+                self.memory[
+                    "issue_state"
+                ],
+
+            "dialog_state":
+                self.memory[
+                    "dialog_state"
+                ],
+
+            "current": {
+                "u": user
+            },
+        }
+
+    def build_trigger_input(
+        self,
+    ):
+        return {
+            "issue_state":
+                self.memory[
+                    "issue_state"
+                ],
+
+            "evidence_state": {
+                "active_cases":
+                    self.memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+            },
+
+            "dialog_state":
+                self.memory[
+                    "dialog_state"
+                ],
+        }
+
+    def build_policy_input(
+        self,
+        user,
+    ):
+        return {
+            "issue_state":
+                self.memory[
+                    "issue_state"
+                ],
+
+            "evidence_state": {
+                "active_cases":
+                    self.memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ],
+
+                "topic_structure":
+                    self.memory[
+                        "evidence_state"
+                    ][
+                        "topic_structure"
+                    ],
+            },
+
+            "interaction_state":
+                self.memory[
+                    "interaction_state"
+                ],
+
+            "dialog_state":
+                self.memory[
+                    "dialog_state"
+                ],
+
+            "current": {
+                "u": user
+            },
+        }
+
+    def build_response_input(
+        self,
+        user,
+    ):
+        return {
+            "issue_state":
+                self.memory[
+                    "issue_state"
+                ],
+
+            "evidence_state": {
+                "active_cases":
+                    self.memory[
+                        "evidence_state"
+                    ][
+                        "active_cases"
+                    ]
+            },
+
+            "interaction_state":
+                self.memory[
+                    "interaction_state"
+                ],
+
+            "dialog_state":
+                self.memory[
+                    "dialog_state"
+                ],
+
+            "current": {
+                "u": user,
+
+                "policy":
+                    self.memory[
+                        "interaction_state"
+                    ][
+                        "last_action"
+                    ],
+            },
+        }
+
+    # ========================================================
+    # Topic Structure
+    # ========================================================
+
+    def generate_topic_structure(
+        self,
+        query,
+        cases,
+    ):
+        """
+        V2.2 核心。
+
+        对当前 Top-K cases 进行层级主题划分。
+
+        与原 generate_topic_structures_batch 的逻辑一致，
+        这里只处理当前 dialogue 的一棵树。
+        """
+
+        case_map = case_map_from_cases(
+            cases
+        )
+
+        case_ids = list(
+            case_map.keys()
+        )
+
+        root = {
+            "query": query,
+            "topic": query,
+            "case_ids": case_ids,
+            "leaf": len(case_ids) <= 1,
+            "children": [],
+        }
+
+        # 无 case
+        if not case_ids:
+            return root
+
+        # 单 case
+        if len(case_ids) == 1:
+
+            root["case_id"] = (
+                case_ids[0]
+            )
+
+            return root
+
+        frontier = [{
+            "node": root,
+            "case_ids": case_ids,
+            "depth": 0,
+        }]
+
+        while frontier:
+
+            active_frontier = []
+
+            # --------------------------------------------
+            # Depth check
+            # --------------------------------------------
+
+            for task in frontier:
+
+                node = task["node"]
+                ids = task["case_ids"]
+                depth = task["depth"]
+
+                if (
+                    depth
+                    >= self.max_topic_depth
+                ):
+                    fallback_to_case_leaves(
+                        node,
+                        ids,
+                    )
+
+                    continue
+
+                active_frontier.append(
+                    task
+                )
+
+            if not active_frontier:
+                break
+
+            # --------------------------------------------
+            # Current level
+            # --------------------------------------------
+
+            messages = []
+
+            for task in active_frontier:
+
+                node = task["node"]
+                ids = task["case_ids"]
+                depth = task["depth"]
+
+                node_cases = [
+                    case_map[case_id]
+                    for case_id in ids
+                ]
+
+                split_input = (
+                    build_topic_split_input(
+                        query=query,
+                        cases=node_cases,
+                        parent_topic=node[
+                            "topic"
+                        ],
+                        depth=depth,
+                    )
+                )
+
+                messages.append(
+                    build_messages(
+                        self.topic_prompt,
+                        split_input,
+                    )
+                )
+
+            outputs = self.call_llm_batch(
+                messages
+            )
+
+            valid_results = {}
+            retry_tasks = []
+
+            # --------------------------------------------
+            # Validate
+            # --------------------------------------------
+
+            for idx, (
+                task,
+                split_result,
+            ) in enumerate(
+                zip(
+                    active_frontier,
+                    outputs,
+                )
+            ):
+
+                valid_split = (
+                    normalize_split(
+                        split_result,
+                        task["case_ids"],
+                    )
+                )
+
+                if valid_split:
+
+                    valid_results[
+                        idx
+                    ] = valid_split
+
+                else:
+
+                    retry_tasks.append({
+                        "frontier_idx": idx,
+                        "task": task,
+                        "attempt": 1,
+                    })
+
+            # --------------------------------------------
+            # Retry invalid split
+            # --------------------------------------------
+
+            while retry_tasks:
+
+                retry_messages = []
+
+                for retry_item in retry_tasks:
+
+                    task = retry_item[
+                        "task"
+                    ]
+
+                    node = task["node"]
+                    ids = task["case_ids"]
+                    depth = task["depth"]
+
+                    node_cases = [
+                        case_map[case_id]
+                        for case_id in ids
+                    ]
+
+                    split_input = (
+                        build_topic_split_input(
+                            query=query,
+                            cases=node_cases,
+                            parent_topic=node[
+                                "topic"
+                            ],
+                            depth=depth,
+                        )
+                    )
+
+                    split_input[
+                        "retry_instruction"
+                    ] = (
+                        "上一次划分结果不合法。"
+                        "请重新划分，并严格保证："
+                        "每个输入 case_id 必须且只能出现一次；"
+                        "至少划分为两个有意义的子主题；"
+                        "不得遗漏或重复任何 case_id。"
+                    )
+
+                    retry_messages.append(
+                        build_messages(
+                            self.topic_prompt,
+                            split_input,
+                        )
+                    )
+
+                retry_outputs = (
+                    self.call_llm_batch(
+                        retry_messages
+                    )
+                )
+
+                next_retry_tasks = []
+
+                for (
+                    retry_item,
+                    split_result,
+                ) in zip(
+                    retry_tasks,
+                    retry_outputs,
+                ):
+
+                    frontier_idx = (
+                        retry_item[
+                            "frontier_idx"
+                        ]
+                    )
+
+                    task = retry_item[
+                        "task"
+                    ]
+
+                    valid_split = (
+                        normalize_split(
+                            split_result,
+                            task[
+                                "case_ids"
+                            ],
+                        )
+                    )
+
+                    if valid_split:
+
+                        valid_results[
+                            frontier_idx
+                        ] = valid_split
+
+                        continue
+
+                    next_attempt = (
+                        retry_item[
+                            "attempt"
+                        ]
+                        + 1
+                    )
+
+                    if (
+                        next_attempt
+                        <= self.max_topic_retry
+                    ):
+
+                        next_retry_tasks.append({
+                            "frontier_idx":
+                                frontier_idx,
+
+                            "task":
+                                task,
+
+                            "attempt":
+                                next_attempt,
+                        })
+
+                retry_tasks = (
+                    next_retry_tasks
+                )
+
+            # --------------------------------------------
+            # Build next level
+            # --------------------------------------------
+
+            next_frontier = []
+
+            for idx, task in enumerate(
+                active_frontier
+            ):
+
+                node = task["node"]
+                ids = task["case_ids"]
+                depth = task["depth"]
+
+                valid_split = (
+                    valid_results.get(
+                        idx
+                    )
+                )
+
+                if not valid_split:
+
+                    fallback_to_case_leaves(
+                        node,
+                        ids,
+                    )
+
+                    continue
+
+                node["leaf"] = False
+
+                node[
+                    "dimension"
+                ] = valid_split[
+                    "dimension"
+                ]
+
+                node["children"] = []
+
+                for child_info in (
+                    valid_split[
+                        "children"
+                    ]
+                ):
+
+                    child_ids = (
+                        child_info[
+                            "case_ids"
+                        ]
+                    )
+
+                    child_node = {
+                        "topic":
+                            child_info[
+                                "topic"
+                            ],
+
+                        "case_ids":
+                            child_ids,
+
+                        "leaf":
+                            len(
+                                child_ids
+                            ) == 1,
+
+                        "children": [],
+                    }
+
+                    node[
+                        "children"
+                    ].append(
+                        child_node
+                    )
+
+                    if len(child_ids) == 1:
+
+                        child_node[
+                            "case_id"
+                        ] = child_ids[0]
+
+                        continue
+
+                    next_frontier.append({
+                        "node":
+                            child_node,
+
+                        "case_ids":
+                            child_ids,
+
+                        "depth":
+                            depth + 1,
+                    })
+
+            frontier = next_frontier
+
+        return root
+
+    # ========================================================
+    # State Display
+    # ========================================================
+
+    def print_state(
+        self,
+        query_state,
+        trigger_state,
+        policy_state,
+    ):
+        if not self.show_state:
+            return
+
+        query_mode = (
+            query_state.get(
+                "query_mode",
+                "",
+            )
+        )
+
+        query_text = (
+            query_state.get(
+                "query_text",
+                "",
+            )
+        )
+
+        trigger = (
+            trigger_state.get(
+                "trigger",
+                "",
+            )
+        )
+
+        evidence_mode = (
+            trigger_state.get(
+                "evidence_mode",
+                "",
+            )
+        )
+
+        cases = self.memory[
+            "evidence_state"
+        ][
+            "active_cases"
+        ]
+
+        case_ids = [
+            get_case_id(case)
+            for case in cases
+            if get_case_id(case)
+        ]
+
+        policy = policy_state.get(
+            "label",
+            "",
+        )
+
+        selected_case = (
+            policy_state.get(
+                "case_id"
+            )
+            or policy_state.get(
+                "selected_case"
+            )
+            or ""
+        )
+
+        print(
+            "\n"
+            "╔══════════════ AGENT STATE ══════════════╗"
+        )
+
+        print(
+            f" Query    : "
+            f"{query_mode} | {query_text}"
+        )
+
+        print(
+            f" Trigger  : {trigger}"
+        )
+
+        print(
+            f" Evidence : {evidence_mode}"
+        )
+
+        print(
+            " Cases    : "
+            + (
+                ", ".join(case_ids)
+                if case_ids
+                else "None"
+            )
+        )
+
+        print(
+            f" Policy   : {policy}"
+        )
+
+        print(
+            f" Case     : "
+            f"{selected_case or 'None'}"
+        )
+
+        print(
+            "╚══════════════════════════════════════════╝"
+        )
+
+    # ========================================================
+    # Main Interface
+    # ========================================================
+
+    def reply(
+        self,
+        dialogue_history,
+    ):
+
+        if not dialogue_history:
+            raise ValueError(
+                "dialogue_history is empty"
+            )
+
+        last_msg = (
+            dialogue_history[-1]
+        )
+
+        if (
+            last_msg.get("role")
+            != "user"
+        ):
+            raise ValueError(
+                "The last message in "
+                "dialogue_history must be from user."
+            )
+
+        user = str(
+            last_msg.get(
+                "content",
+                "",
+            )
+        ).strip()
+
+        if not user:
+            raise ValueError(
+                "Current user message is empty"
+            )
+
+        # ====================================================
+        # 1. Query
+        # ====================================================
+
+        query_state = self.call_llm(
+            self.query_prompt,
+            self.build_query_input(
+                user
+            ),
+        )
+
+        self.update_issue(
+            query_state
+        )
+
+        # ====================================================
+        # 2. Trigger
+        # ====================================================
+
+        trigger_state = self.call_llm(
+            self.trigger_prompt,
+            self.build_trigger_input(),
+        )
+
+        # ====================================================
+        # 3. Evidence + Topic Structure
+        # ====================================================
+
+        if (
+            trigger_state.get(
+                "evidence_mode"
+            )
+            == "retrieve_new_evidence"
+        ):
+
+            query = (
+                self.memory[
+                    "issue_state"
+                ][
+                    "current_issue"
+                ].strip()
+                or user
+            )
+
+            # RAG
+            evidence = batch_zefeng_rag(
+                [
+                    history_to_text(
+                        dialogue_history
+                    )
+                ],
+                [query],
+            )[0]
+
+            # V2.2 Topic Structure
+            topic_structure = (
+                self.generate_topic_structure(
+                    query=query,
+                    cases=evidence,
+                )
+            )
+
+        else:
+
+            # reuse existing evidence
+            evidence = self.memory[
+                "evidence_state"
+            ][
+                "active_cases"
+            ]
+
+            topic_structure = self.memory[
+                "evidence_state"
+            ][
+                "topic_structure"
+            ]
+
+        self.update_evidence(
+            trigger_state,
+            evidence,
+            topic_structure,
+        )
+
+        # ====================================================
+        # 4. Policy
+        # ====================================================
+
+        policy_state = self.call_llm(
+            self.policy_prompt,
+            self.build_policy_input(
+                user
+            ),
+        )
+
+        self.update_interaction(
+            policy_state
+        )
+
+        # ====================================================
+        # 5. Response
+        # ====================================================
+
+        response_state = self.call_llm(
+            self.response_prompt,
+            self.build_response_input(
+                user
+            ),
+        )
+
+        response = (
+            response_state.get(
+                "response"
+            )
+            or response_state.get(
+                "text"
+            )
+            or response_state.get(
+                "content"
+            )
+            or ""
+        )
+
+        response = str(
+            response
+        ).strip()
+
+        # ====================================================
+        # 6. Dynamic Memory Update
+        # ====================================================
+
+        self.update_dialogue(
+            user,
+            response,
+        )
+
+        # ====================================================
+        # 7. Display State
+        # ====================================================
+
+        self.print_state(
+            query_state,
+            trigger_state,
+            policy_state,
+        )
+
+        return response
+
+    # ========================================================
+    # Reset
+    # ========================================================
+
+    def reset(self):
+        self.memory = init_memory()
