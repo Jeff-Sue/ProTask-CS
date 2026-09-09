@@ -5,10 +5,6 @@ from utils.scu_rag import batch_zefeng_rag
 from utils.qwen_api_multi import parallel_inference
 
 
-# ============================================================
-# Utils
-# ============================================================
-
 def parse_json(text):
     if isinstance(text, dict):
         return text
@@ -23,14 +19,6 @@ def parse_json(text):
 
 
 def parse_llm_output(output):
-    """
-    parallel_inference 输出:
-    {
-        "response": "..."
-    }
-
-    response 本身可能又是 JSON 字符串。
-    """
     output = parse_json(output)
     return parse_json(output.get("response", ""))
 
@@ -41,14 +29,11 @@ def prompt_read(path):
 
 def build_messages(system_prompt, data):
     return [
-        {
-            "role": "system",
-            "content": system_prompt
-        },
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": json.dumps(data, ensure_ascii=False)
-        }
+            "content": json.dumps(data, ensure_ascii=False),
+        },
     ]
 
 
@@ -64,236 +49,180 @@ def history_to_text(history):
     return "\n".join(lines)
 
 
-# ============================================================
-# Memory
-# ============================================================
-
 def init_memory():
     return {
         "issue_state": {
             "current_issue": "",
-            "query_history": []
+            "query_history": [],
         },
-
         "dialog_state": {
-            "compressed_history": []
+            "compressed_history": [],
         },
-
         "evidence_state": {
-            "active_cases": []
+            "active_cases": [],
         },
-
         "interaction_state": {
             "stage": "Start",
             "last_action": "",
-            "action_history": []
-        }
+            "action_history": [],
+        },
     }
 
 
-# ============================================================
-# Agent
-# ============================================================
-
 class MemoryAgent:
+    """
+    Stateful customer-service agent.
+
+    One MemoryAgent instance corresponds to one dialogue.
+    Call reset() before starting a new dialogue if reusing the instance.
+    """
 
     def __init__(self, prompt_dir="prompts"):
-
         prompt_dir = Path(prompt_dir)
 
-        self.query_prompt = prompt_read(
-            prompt_dir / "query.prompt"
-        )
-        self.trigger_prompt = prompt_read(
-            prompt_dir / "trigger.prompt"
-        )
-        self.policy_prompt = prompt_read(
-            prompt_dir / "policy.prompt"
-        )
-        self.response_prompt = prompt_read(
-            prompt_dir / "response.prompt"
-        )
+        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
+        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
+        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
+        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
 
         self.memory = init_memory()
-
-    # --------------------------------------------------------
-    # LLM
-    # --------------------------------------------------------
 
     def call_llm(self, prompt, data):
         messages = build_messages(prompt, data)
         output = parallel_inference([messages])[0]
         return parse_llm_output(output)
 
-    # --------------------------------------------------------
-    # Memory Update
-    # --------------------------------------------------------
-
     def update_issue(self, query_state):
-
         mode = query_state.get("query_mode", "none")
         query = query_state.get("query_text", "").strip()
 
-        if mode in ["rewrite", "refine"] and query:
+        if mode in {"rewrite", "refine"} and query:
             self.memory["issue_state"]["current_issue"] = query
             self.memory["issue_state"]["query_history"].append(query)
 
     def update_evidence(self, trigger_state, evidence):
-
         if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
             self.memory["evidence_state"]["active_cases"] = evidence
 
     def update_interaction(self, policy_state):
-
         label = policy_state.get("label", "")
 
         self.memory["interaction_state"]["last_action"] = label
         self.memory["interaction_state"]["action_history"].append(label)
 
-        if label in ["AskMissingSlot", "AskClarification"]:
+        if label in {"AskMissingSlot", "AskClarification"}:
             self.memory["interaction_state"]["stage"] = "Clarification"
-
-        elif label in ["ExplainedResponse", "CaseRecommendation"]:
+        elif label in {"ExplainedResponse", "CaseRecommendation"}:
             self.memory["interaction_state"]["stage"] = "Resolution"
-
         elif label == "Handoff":
             self.memory["interaction_state"]["stage"] = "End"
 
     def update_dialogue(self, user, response):
-
         history = self.memory["dialog_state"]["compressed_history"]
 
-        history.append({
-            "user": user,
-            "assistant": response
-        })
+        history.append(
+            {
+                "user": user,
+                "assistant": response,
+            }
+        )
 
         self.memory["dialog_state"]["compressed_history"] = history[-5:]
 
-    # --------------------------------------------------------
-    # Main Interface
-    # --------------------------------------------------------
-
     def reply(self, dialogue_history):
+        """
+        Args:
+            dialogue_history:
+                [
+                    {"role": "user", "content": "..."},
+                    {"role": "assistant", "content": "..."},
+                    ...
+                    {"role": "user", "content": "..."},
+                ]
 
+        Returns:
+            str: customer-service response
+        """
         if not dialogue_history:
             raise ValueError("dialogue_history is empty")
 
         last_msg = dialogue_history[-1]
 
-        if last_msg["role"] != "user":
+        if last_msg.get("role") != "user":
             raise ValueError(
                 "The last message in dialogue_history must be from user."
             )
 
-        user = last_msg["content"]
+        user = str(last_msg.get("content", "")).strip()
 
-        # ====================================================
+        if not user:
+            raise ValueError("Current user message is empty")
+
         # 1. Query
-        # ====================================================
-
-        query_input = {
-            "issue_state": self.memory["issue_state"],
-            "dialog_state": self.memory["dialog_state"],
-            "current": {
-                "u": user
-            }
-        }
-
         query_state = self.call_llm(
             self.query_prompt,
-            query_input
+            {
+                "issue_state": self.memory["issue_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {"u": user},
+            },
         )
-
         self.update_issue(query_state)
 
-        # ====================================================
         # 2. Trigger
-        # ====================================================
-
-        trigger_input = {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": self.memory["evidence_state"],
-            "dialog_state": self.memory["dialog_state"]
-        }
-
         trigger_state = self.call_llm(
             self.trigger_prompt,
-            trigger_input
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "dialog_state": self.memory["dialog_state"],
+            },
         )
 
-        # ====================================================
         # 3. Evidence
-        # ====================================================
-
         if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-
             query = (
                 self.memory["issue_state"]["current_issue"].strip()
-                or user.strip()
+                or user
             )
 
-            dialogue_text = history_to_text(dialogue_history)
-
             evidence = batch_zefeng_rag(
-                [dialogue_text],
-                [query]
+                [history_to_text(dialogue_history)],
+                [query],
             )[0]
-
         else:
-            evidence = self.memory[
-                "evidence_state"
-            ]["active_cases"]
+            evidence = self.memory["evidence_state"]["active_cases"]
 
-        self.update_evidence(
-            trigger_state,
-            evidence
-        )
+        self.update_evidence(trigger_state, evidence)
 
-        # ====================================================
         # 4. Policy
-        # ====================================================
-
-        policy_input = {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": self.memory["evidence_state"],
-            "interaction_state": self.memory["interaction_state"],
-            "dialog_state": self.memory["dialog_state"],
-            "current": {
-                "u": user
-            }
-        }
-
         policy_state = self.call_llm(
             self.policy_prompt,
-            policy_input
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "interaction_state": self.memory["interaction_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {"u": user},
+            },
         )
-
         self.update_interaction(policy_state)
 
-        # ====================================================
         # 5. Response
-        # ====================================================
-
-        response_input = {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": self.memory["evidence_state"],
-            "interaction_state": self.memory["interaction_state"],
-            "dialog_state": self.memory["dialog_state"],
-            "current": {
-                "u": user,
-                "policy": self.memory[
-                    "interaction_state"
-                ]["last_action"]
-            }
-        }
-
         response_state = self.call_llm(
             self.response_prompt,
-            response_input
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "interaction_state": self.memory["interaction_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {
+                    "u": user,
+                    "policy": self.memory["interaction_state"]["last_action"],
+                },
+            },
         )
 
-        # 根据你的 response.prompt 输出格式调整这里
         response = (
             response_state.get("response")
             or response_state.get("text")
@@ -301,12 +230,9 @@ class MemoryAgent:
             or ""
         )
 
-        # 注意：
-        # 动态多轮必须写入模型自己生成的 response
-        self.update_dialogue(
-            user,
-            response
-        )
+        response = str(response).strip()
+
+        self.update_dialogue(user, response)
 
         return response
 
