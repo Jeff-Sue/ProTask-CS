@@ -1,0 +1,85 @@
+  "220624218": {
+    "text": [
+      {
+        "用户": "你好，我的电脑无法启动Chrome，直接点击和相关的跳转都无法启动？"
+      },
+      {
+        "客服": "[案例链接: KT00150092]。\n有没有设置为ghrome为默认应用呢？\n桌面的谷歌可以打开吗？"
+      },
+      {
+        "用户": "打不开。\n直接打开都打不开。"
+      },
+      {
+        "客服": "发脚本给您了。\n重置下试试呢？\n您好，请问还有其它可以帮到您的吗？"
+      }
+    ],
+    "Image": [],
+    "caseId": [
+      "KT00150092"
+    ]
+  },
+
+
+"KT00150092": {
+    "case_name": "Win10 系统无法设置Chrome浏览器为默认浏览器",
+    "text": [
+        "一、问题现象：",
+        "【问题描述和现象】：Win10 系统无法设置 Chrome 浏览器为默认浏览器，默认应用设置中没有 Chrome 浏览器。",
+        "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R5S781D0031461902020082915484732983876",
+        "二、方法/步骤",
+        "步骤1：",
+        "关闭所有 Chrome 界面，右键 Chrome 快捷方式，选择以管理员身份运行 Chrome 浏览器后，默认应用设置中即可设置 Chrome 为默认浏览器。",
+        "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R5S781D00021005220200915193832950867809",
+        "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R5S781D00325220620200915193836120868260"
+    ]
+},
+
+
+User: 你好，我的电脑无法启动Chrome，直接点击和相关的跳转都无法启动？
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:02<00:00,  2.85s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : rewrite | 电脑无法启动Chrome，直接点击和相关跳转都无法启动
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00040009, KT00168413, KT00374372, KT00029634, KT00247054
+ Policy   : CaseRecommendation
+ Case     : ['KT00040009', 'KT00374372']
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，根据您的描述，以下是两个可能相关的解决方案：
+
+1. **问题原因可能是Windows系统的安全机制验证异常或管理员模式运行导致**。
+   - 您可以尝试在命令提示符中输入以下命令删除旧的密钥文件：`rd /s /q %Appdata%\Microsoft\Protect`，系统会重新生成相关文件。
+   - 或者右键点击Chrome图标 -> 属性 -> 兼容性 -> 取消勾选“以管理员身份运行此程序”。
+
+2. **异常软件干扰也可能导致Chrome无法启动**。
+   - 您可以通过运行 `win + r` 输入 `appwiz.cpl`，检查是否有可疑软件并卸载它们。
+
+您可以尝试以上方法，如果问题仍未解决，请随时告诉我。
+
+User: 打不开,   直接打开也不行
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : reuse | 电脑无法启动Chrome，直接点击和相关跳转都无法启动
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00040009, KT00168413, KT00374372, KT00029634, KT00247054
+ Policy   : CaseRecommendation
+ Case     : ['KT00040009', 'KT00374372']
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，根据您的描述，以下是两个可能相关的解决方案：
+
+1. **问题原因可能是Windows系统的安全机制验证异常或管理员模式运行导致**。
+   - 您可以尝试在命令提示符中输入以下命令删除旧的密钥文件：`rd /s /q %Appdata%\Microsoft\Protect`，系统会重新生成相关文件。
+   - 或者右键点击Chrome图标 -> 属性 -> 兼容性 -> 取消勾选“以管理员身份运行此程序”。
+
+2. **异常软件干扰也可能导致Chrome无法启动**。
+   - 您可以通过运行 `win + r` 输入 `appwiz.cpl`，检查是否有可疑软件并卸载它们。
+
+您可以尝试以上方法，如果问题仍未解决，请随时告诉我。
+
+User: 
