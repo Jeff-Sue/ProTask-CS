@@ -1,15 +1,14 @@
-# Dynamic Multi-turn Customer Service Agent
+Dynamic Multi-turn Customer Service Agent
 
-这个目录提供一个最小化的动态多轮客服 Agent 接口，并支持两种交互模式：
+提供三种使用方式：
 
-1. 接入其他系统
-2. 与用户模拟器进行动态多轮 rollout
-3. 与真人在终端中交互
+1. 将客服 Agent 接入其他系统
+2. 与用户模拟器进行动态多轮交互
+3. 与真人进行终端交互
 
-目录结构：
+1. 文件结构
 
-```text
-dynamic_multi_turn_agent/
+.
 ├── agent.py
 ├── run_simulator.py
 ├── run_human.py
@@ -21,29 +20,17 @@ dynamic_multi_turn_agent/
 └── utils/
     ├── scu_rag.py
     └── qwen_api_multi.py
-```
 
-其中 `agent.py` 是核心模块，另外两个文件只是不同的运行入口。
+2. 接入其他系统
 
----
+客服 Agent 的统一接口为：
 
-## 1. Agent 接入其他系统
-
-核心接口是：
-
-```python
 from agent import MemoryAgent
-
 agent = MemoryAgent()
-
 response = agent.reply(dialogue_history)
-```
 
-### 输入格式
+dialogue_history 格式：
 
-`dialogue_history` 是标准的多轮消息列表：
-
-```python
 dialogue_history = [
     {
         "role": "user",
@@ -58,369 +45,82 @@ dialogue_history = [
         "content": "启动以后一直卡住"
     }
 ]
-```
 
-调用时，最后一条消息必须是用户消息：
+最后一条消息需要是当前用户输入。
 
-```python
-response = agent.reply(dialogue_history)
-```
-
-返回：
-
-```python
-str
-```
-
-例如：
-
-```python
-"请问您的Outlook版本是多少？"
-```
-
-然后调用方需要把客服回复追加回历史：
-
-```python
-dialogue_history.append(
-    {
-        "role": "assistant",
-        "content": response
-    }
-)
-```
-
-下一轮用户输入到来后，再追加：
-
-```python
-dialogue_history.append(
-    {
-        "role": "user",
-        "content": next_user_message
-    }
-)
+reply() 返回客服回复字符串：
 
 response = agent.reply(dialogue_history)
-```
+dialogue_history.append({
+    "role": "assistant",
+    "content": response
+})
 
-### 一个 Agent 实例对应一段对话
+同一段对话需要持续使用同一个 MemoryAgent：
 
-`MemoryAgent` 内部维护：
-
-```text
-Issue State
-Evidence State
-Interaction State
-Dialogue State
-```
-
-因此同一段对话必须持续使用同一个实例：
-
-```python
 agent = MemoryAgent()
+response1 = agent.reply(history1)
+response2 = agent.reply(history2)
+response3 = agent.reply(history3)
 
-agent.reply(history_1)
-agent.reply(history_2)
-agent.reply(history_3)
-```
+开始新对话时重新创建 Agent：
 
-新建另一段对话时，可以新建实例：
-
-```python
 agent = MemoryAgent()
-```
 
 或者：
 
-```python
 agent.reset()
-```
 
-不要在同一段动态多轮对话的每一轮重新创建 `MemoryAgent`，否则内部状态会丢失。
+3. 与用户模拟器交互
 
----
+运行入口：
 
-## 2. 与用户模拟器交互
-
-入口：
-
-```text
-run_simulator.py
-```
-
-整体流程为：
-
-```text
-User Simulator
-      ↓
-user utterance
-      ↓
-Customer Service Agent
-      ↓
-agent response
-      ↓
-User Simulator
-      ↓
-next user utterance
-      ↓
-...
-```
-
-### 用户模拟器接口
-
-你的用户模拟器只需要提供：
-
-```python
-reply(dialogue_history) -> str
-```
-
-例如：
-
-```python
-class UserSimulator:
-
-    def reply(self, dialogue_history):
-
-        ...
-
-        return next_user_message
-```
-
-然后在 `run_simulator.py` 中：
-
-```python
-from your_user_simulator import UserSimulator
-
-user_simulator = UserSimulator(...)
-```
-
-替换示例中的占位 `UserSimulator`。
-
-### dialogue_history
-
-用户模拟器和客服 Agent 使用完全相同的对话历史：
-
-```python
-[
-    {
-        "role": "user",
-        "content": "Outlook打不开"
-    },
-    {
-        "role": "assistant",
-        "content": "请问具体是什么现象？"
-    }
-]
-```
-
-这样用户模拟器能够根据客服上一轮真实生成的回复继续产生下一轮用户行为。
-
-### Rollout Log
-
-运行过程中终端只显示 Agent 间的轮次进程：
-
-```text
-[Turn 1] User Simulator -> Customer Service Agent
-[Turn 1] Customer Service Agent -> User Simulator
-
-[Turn 2] User Simulator -> Customer Service Agent
-[Turn 2] Customer Service Agent -> User Simulator
-```
-
-不会打印：
-
-```text
-Query
-Trigger
-RAG
-Policy
-Memory
-```
-
-等内部模块信息。
-
-### 输出文件
-
-完整 rollout 会保存为 JSON：
-
-```json
-{
-  "turns": [
-    {
-      "turn_id": 1,
-      "user": "Outlook打不开",
-      "assistant": "请问具体是什么现象？"
-    },
-    {
-      "turn_id": 2,
-      "user": "启动以后一直卡住",
-      "assistant": "请问您的Outlook版本是多少？"
-    }
-  ],
-  "dialogue_history": [
-    ...
-  ]
-}
-```
-
-默认输出：
-
-```text
-outputs/simulator_dialogue.json
-```
-
-### 启动
-
-在接入真实的 User Simulator 后：
-
-```bash
 python run_simulator.py \
     --first_user_message "我的Outlook打不开了" \
     --output_path outputs/dialogue_001.json \
     --max_turns 10
-```
 
-其中：
+用户模拟器需要提供统一接口：
 
-```text
---first_user_message
-```
+class UserSimulator:
+    def reply(self, dialogue_history):
+        ...
+        return next_user_message
 
-是模拟用户的第一句话。
+然后在 run_simulator.py 中接入：
 
-```text
---max_turns
-```
+from your_user_simulator import UserSimulator
+user_simulator = UserSimulator(...)
 
-限制最多进行多少轮用户-客服交互，防止模拟器出现无限对话。
+运行过程中终端显示：
 
----
+[Turn 1] User Simulator -> Customer Service Agent
+[Turn 1] Customer Service Agent -> User Simulator
+[Turn 2] User Simulator -> Customer Service Agent
+[Turn 2] Customer Service Agent -> User Simulator
 
-## 3. 与真人交互
+完整对话会保存到 --output_path 指定的 JSON 文件。
 
-入口：
+4. 与真人交互
 
-```text
-run_human.py
-```
+运行：
 
-启动：
-
-```bash
 python run_human.py
-```
 
-终端会进入交互模式：
-
-```text
-Customer Service Agent
-Type 'exit' or 'quit' to end the conversation.
+然后直接在终端输入：
 
 User: 我的Outlook打不开
 Agent: 请问具体是什么现象？
-
 User: 启动以后一直卡住
 Agent: 请问您的Outlook版本是多少？
-
 User:
-```
-
-程序会持续等待用户输入。
 
 输入：
 
-```text
 exit
-```
 
 或：
 
-```text
 quit
-```
 
-结束当前对话。
-
----
-
-## 4. 动态多轮与原静态评测的区别
-
-原来的数据集评测代码中，每一轮使用的是：
-
-```text
-golden_response
-```
-
-更新下一轮对话状态。
-
-因此即使当前模型回复错误，错误也不会真正进入下一轮。
-
-现在动态版本使用：
-
-```text
-Agent Response_t
-      ↓
-Dialogue History
-      ↓
-User Simulator / Human
-      ↓
-User_{t+1}
-```
-
-也就是说，模型本轮生成的真实回复会直接影响下一轮用户行为。
-
-因此可以观察：
-
-```text
-Error Propagation
-Clarification Efficiency
-Premature Recommendation
-Dialogue Recovery
-Task Completion
-Long-horizon Policy Behavior
-```
-
-等真正的动态多轮行为。
-
----
-
-## 5. 核心调用约定
-
-无论接入用户模拟器、真人界面、Web API 或其他系统，都建议只依赖以下接口：
-
-```python
-agent = MemoryAgent()
-
-response = agent.reply(dialogue_history)
-```
-
-外部系统负责：
-
-```text
-保存 observable dialogue history
-```
-
-`MemoryAgent` 负责：
-
-```text
-维护内部 state
-执行 Query
-执行 Trigger
-调用 RAG
-预测 Policy
-生成 Response
-```
-
-两者不要混在一起。
-
-这样后续无论把 Agent 接到：
-
-```text
-User Simulator
-Terminal
-FastAPI
-Web Frontend
-Benchmark Environment
-RL Rollout Environment
-```
-
-都不需要修改 Agent 内部实现，只需要替换最外层交互接口。
+结束对话。
