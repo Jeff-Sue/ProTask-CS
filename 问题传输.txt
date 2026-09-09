@@ -1,190 +1,260 @@
-import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from openai import OpenAI
-from tqdm import tqdm
+import json
+from pathlib import Path
 
-## Qwen3-32B
-MODEL_NAME = "qwen3-32b"
-OPENAI_API_BASES = [
-    "http://localhost:8848/v1",
-    "http://localhost:8849/v1",
-    # "http://localhost:8850/v1",
-    # "http://localhost:8851/v1",
-]
-OPENAI_API_KEY = "EMPTY"
-
-MAX_WORKERS = 16
-MAX_RETRY = 3
+from Agent.utils.scu_rag import batch_zefeng_rag
+from Agent.utils.qwen_api_multi import single_inference, parallel_inference
 
 
-class ClientRouter:
-    """
-    多 endpoint 轮询路由器
-    - 线程安全
-    - 每次请求轮流分配到不同端口
-    """
-    def __init__(self, api_bases, api_key):
-        self.api_bases = api_bases
-        self.api_key = api_key
-        self._idx = 0
-        self._lock = threading.Lock()
-        self._clients = {
-            base: OpenAI(api_key=api_key, base_url=base)
-            for base in api_bases
-        }
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
 
-    def get_next_client(self):
-        with self._lock:
-            base = self.api_bases[self._idx]
-            self._idx = (self._idx + 1) % len(self.api_bases)
-        return self._clients[base], base
+    if not isinstance(text, str):
+        return {}
+
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
 
 
-client_router = ClientRouter(OPENAI_API_BASES, OPENAI_API_KEY)
+def parse_llm_output(output):
+    output = parse_json(output)
+    return parse_json(output.get("response", ""))
 
 
-def call_qwen_api(messages):
-    client, base = client_router.get_next_client()
+def prompt_read(path):
+    return Path(path).read_text(encoding="utf-8").strip()
 
-    chat_response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=2048,
-        top_p=0.5,
-        presence_penalty=1.5,
-        extra_body={
-            "top_k": 1,
-            "chat_template_kwargs": {"enable_thinking": False}
+
+def build_messages(system_prompt, data):
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": json.dumps(data, ensure_ascii=False),
         },
-    )
-    return chat_response.choices[0].message.content
+    ]
 
 
-def build_retry_messages(base_messages, bad_response, format_error):
-    retry_messages = list(base_messages)
-    retry_messages.append({"role": "assistant", "content": bad_response})
-    retry_messages.append({
-        "role": "user",
-        "content": (
-            "你刚才的输出不符合要求。"
-            f"错误原因：{format_error}。"
-            "请严格按原要求重新输出，且只输出合法结果，不要输出任何解释、前缀、后缀或 markdown 代码块。"
-        )
-    })
-    return retry_messages
+def history_to_text(history):
+    lines = []
+
+    for msg in history:
+        if msg["role"] == "user":
+            lines.append(f"用户: {msg['content']}")
+        elif msg["role"] == "assistant":
+            lines.append(f"客服: {msg['content']}")
+
+    return "\n".join(lines)
 
 
-def process_one_sample(sample, validator=None, max_retry=MAX_RETRY):
-    # sample_id = sample.get("id")
-    # base_messages = sample.get("messages", [])
-
-    # current_messages = list(base_messages)
-    base_messages = sample
-    current_messages = sample
-    last_error = None
-    last_response = None
-    parsed_response = None
-
-    for attempt in range(1, max_retry + 1):
-        try:
-            response = call_qwen_api(current_messages)
-            last_response = response
-
-            if validator is None:
-                return {
-                    # "id": sample_id,
-                    "messages": base_messages,
-                    "response": response,
-                    "parsed_response": None,
-                    "success": True,
-                    "error": None,
-                    "retry_count": attempt - 1,
-                    "format_valid": True
-                }
-
-            is_valid, parsed_or_error = validator(response)
-
-            if is_valid:
-                parsed_response = parsed_or_error
-                return {
-                    # "id": sample_id,
-                    "messages": base_messages,
-                    "response": response,
-                    "parsed_response": parsed_response,
-                    "success": True,
-                    "error": None,
-                    "retry_count": attempt - 1,
-                    "format_valid": True
-                }
-
-            last_error = parsed_or_error
-            current_messages = build_retry_messages(
-                base_messages,
-                response,
-                parsed_or_error
-            )
-
-        except Exception as e:
-            last_error = str(e)
-
-        time.sleep(1)
-
+def init_memory():
     return {
-        # "id": sample_id,
-        "messages": base_messages,
-        "response": last_response,
-        "parsed_response": None,
-        "success": False,
-        "error": last_error,
-        "retry_count": max_retry,
-        "format_valid": False
+        "issue_state": {
+            "current_issue": "",
+            "query_history": [],
+        },
+        "dialog_state": {
+            "compressed_history": [],
+        },
+        "evidence_state": {
+            "active_cases": [],
+        },
+        "interaction_state": {
+            "stage": "Start",
+            "last_action": "",
+            "action_history": [],
+        },
     }
 
 
-def parallel_inference(samples, max_workers=MAX_WORKERS, max_retry=MAX_RETRY, validator=None):
-    results = [None] * len(samples)
-    start_time = time.time()
+class MemoryAgent:
+    """
+    Stateful customer-service agent.
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {
-            executor.submit(process_one_sample, sample, validator, max_retry): idx
-            for idx, sample in enumerate(samples)
-        }
+    One MemoryAgent instance corresponds to one dialogue.
+    Call reset() before starting a new dialogue if reusing the instance.
+    """
 
-        success_count = 0
-        fail_count = 0
+    def __init__(self, prompt_dir="Agent/prompts", mode="single"):
+        prompt_dir = Path(prompt_dir)
+        
+        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
+        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
+        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
+        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
 
-        with tqdm(total=len(samples), desc="Processing", ncols=100) as pbar:
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = {
-                        # "id": samples[idx].get("id"),
-                        "messages": samples[idx],
-                        "response": None,
-                        "parsed_response": None,
-                        "success": False,
-                        "error": f"Worker crashed: {str(e)}",
-                        "retry_count": max_retry,
-                        "format_valid": False
-                    }
+        self.mode = mode
+        self.memory = init_memory()
 
-                results[idx] = result
-                pbar.update(1)
+    def call_llm(self, prompt, data):
+        import time
+        messages = build_messages(prompt, data)
+        input_text = json.dumps(
+            messages,
+            ensure_ascii=False
+        )
+        # print(f"Input chars: {len(input_text)}")
+        start = time.time()
 
-                if result["success"]:
-                    success_count += 1
-                else:
-                    fail_count += 1
+        if self.mode == "single":
+            output = single_inference(
+                messages
+            )
+        elif self.mode == "parallel":
+            output = parallel_inference(
+                [messages]
+            )[0]
+        # print(
+        #     f"LLM time: "
+        #     f"{time.time() - start:.2f}s"
+        # )
+        return parse_llm_output(output)
 
-                pbar.set_postfix(success=success_count, fail=fail_count)
+    def update_issue(self, query_state):
+        mode = query_state.get("query_mode", "none")
+        query = query_state.get("query_text", "").strip()
 
-    elapsed = time.time() - start_time
-    # print(f"\n全部完成，总耗时: {elapsed:.2f} 秒")
-    # print(f"平均每条耗时: {elapsed / len(samples):.2f} 秒")
+        if mode in {"rewrite", "refine"} and query:
+            self.memory["issue_state"]["current_issue"] = query
+            self.memory["issue_state"]["query_history"].append(query)
 
-    return results
+    def update_evidence(self, trigger_state, evidence):
+        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
+            self.memory["evidence_state"]["active_cases"] = evidence
+
+    def update_interaction(self, policy_state):
+        label = policy_state.get("label", "")
+
+        self.memory["interaction_state"]["last_action"] = label
+        self.memory["interaction_state"]["action_history"].append(label)
+
+        if label in {"AskMissingSlot", "AskClarification"}:
+            self.memory["interaction_state"]["stage"] = "Clarification"
+        elif label in {"ExplainedResponse", "CaseRecommendation"}:
+            self.memory["interaction_state"]["stage"] = "Resolution"
+        elif label == "Handoff":
+            self.memory["interaction_state"]["stage"] = "End"
+
+    def update_dialogue(self, user, response):
+        history = self.memory["dialog_state"]["compressed_history"]
+
+        history.append(
+            {
+                "user": user,
+                "assistant": response,
+            }
+        )
+
+        self.memory["dialog_state"]["compressed_history"] = history[-5:]
+
+    def reply(self, dialogue_history):
+        """
+        Args:
+            dialogue_history:
+                [
+                    {"role": "user", "content": "..."},
+                    {"role": "assistant", "content": "..."},
+                    ...
+                    {"role": "user", "content": "..."},
+                ]
+
+        Returns:
+            str: customer-service response
+        """
+        if not dialogue_history:
+            raise ValueError("dialogue_history is empty")
+
+        last_msg = dialogue_history[-1]
+
+        if last_msg.get("role") != "user":
+            raise ValueError(
+                "The last message in dialogue_history must be from user."
+            )
+
+        user = str(last_msg.get("content", "")).strip()
+
+        if not user:
+            raise ValueError("Current user message is empty")
+
+        # 1. Query
+        query_state = self.call_llm(
+            self.query_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {"u": user},
+            },
+        )
+        self.update_issue(query_state)
+
+        # 2. Trigger
+        trigger_state = self.call_llm(
+            self.trigger_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "dialog_state": self.memory["dialog_state"],
+            },
+        )
+
+        # 3. Evidence
+        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
+            query = (
+                self.memory["issue_state"]["current_issue"].strip()
+                or user
+            )
+
+            evidence = batch_zefeng_rag(
+                [history_to_text(dialogue_history)],
+                [query],
+            )[0]
+        else:
+            evidence = self.memory["evidence_state"]["active_cases"]
+
+        self.update_evidence(trigger_state, evidence)
+
+        # 4. Policy
+        policy_state = self.call_llm(
+            self.policy_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "interaction_state": self.memory["interaction_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {"u": user},
+            },
+        )
+        self.update_interaction(policy_state)
+
+        # 5. Response
+        response_state = self.call_llm(
+            self.response_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": self.memory["evidence_state"],
+                "interaction_state": self.memory["interaction_state"],
+                "dialog_state": self.memory["dialog_state"],
+                "current": {
+                    "u": user,
+                    "policy": self.memory["interaction_state"]["last_action"],
+                },
+            },
+        )
+
+        response = (
+            response_state.get("response")
+            or response_state.get("text")
+            or response_state.get("content")
+            or ""
+        )
+
+        response = str(response).strip()
+
+        self.update_dialogue(user, response)
+
+        return response
+
+    def reset(self):
+        self.memory = init_memory()
