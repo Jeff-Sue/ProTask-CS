@@ -1,687 +1,142 @@
-import json
-from pathlib import Path
 
-from Agent.utils.scu_rag import batch_zefeng_rag
-from Agent.utils.qwen_api_multi import single_inference, parallel_inference
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    if not isinstance(text, str):
-        return {}
-
-    text = text.strip()
-    if not text:
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    for mark in ("```json", "```"):
-        if mark in text:
-            try:
-                content = text.split(mark, 1)[1].split("```", 1)[0].strip()
-                return json.loads(content)
-            except Exception:
-                pass
-
-    return {}
-
-
-def parse_llm_output(output):
-    parsed = parse_json(output)
-    if not parsed:
-        return {}
-    return parsed if "response" not in parsed else parse_json(parsed["response"])
-
-
-def prompt_read(path):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
-
-def build_messages(prompt, data):
-    return [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-    ]
-
-
-def history_to_text(history):
-    return "\n".join(
-        f"{'用户' if x['role'] == 'user' else '客服'}: {x['content']}"
-        for x in history
-        if x.get("role") in {"user", "assistant"}
-    )
-
-
-def get_case_id(case):
-    return str(case.get("case_id", "")).strip()
-
-
-def case_map_from_cases(cases):
-    return {get_case_id(c): c for c in cases if get_case_id(c)}
-
-
-def normalize_case_ids(case_ids):
-    if case_ids is None:
-        return []
-    if isinstance(case_ids, str):
-        case_ids = [case_ids]
-    if not isinstance(case_ids, list):
-        return []
-    return list(dict.fromkeys(str(x).strip() for x in case_ids if str(x).strip()))
-
-
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-    return {
-        "issue_state": {"current_issue": "", "query_history": []},
-        "dialog_state": {"compressed_history": []},
-        "evidence_state": {"active_cases": [], "topic_structure": {}},
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "last_information": None,
-            "last_case_ids": [],
-            "action_history": [],
-        },
-    }
-
-
-# ============================================================
-# Topic Structure
-# ============================================================
-
-def build_topic_split_input(query, cases, parent_topic, depth, resolved_path=None):
-    return {
-        "query": query,
-        "parent_topic": parent_topic,
-        "depth": depth,
-        "resolved_path": resolved_path or [],
-        "cases": cases,
-    }
-
-
-def make_leaf(case_id, topic=None, query_match=False):
-    return {
-        "topic": topic or case_id,
-        "query_match": query_match,
-        "case_ids": [case_id],
-        "leaf": True,
-        "case_id": case_id,
-        "children": [],
-    }
-
-
-def normalize_split(result, expected_case_ids):
-    if not isinstance(result, dict):
-        return None
-
-    common_topic = str(result.get("common_topic", "")).strip()
-    dimension = str(result.get("dimension", "")).strip()
-    query_topic = result.get("query_topic")
-    query_topic = str(query_topic).strip() if query_topic is not None else None
-    query_topic = query_topic or None
-    children = result.get("children", [])
-
-    if not common_topic or not dimension or not isinstance(children, list):
-        return None
-
-    expected = set(expected_case_ids)
-    normalized, observed = [], []
-    query_match_count = 0
-
-    for child in children:
-        if not isinstance(child, dict):
-            continue
-
-        topic = str(child.get("topic", "")).strip()
-        case_ids = child.get("case_ids", [])
-        query_match = bool(child.get("query_match", False))
-
-        if not topic or not isinstance(case_ids, list):
-            continue
-
-        case_ids = list(dict.fromkeys(
-            str(x).strip() for x in case_ids
-            if str(x).strip() in expected
-        ))
-
-        # Query branch 允许没有 Case，普通 branch 不允许为空
-        if not case_ids and not query_match:
-            continue
-
-        query_match_count += int(query_match)
-        normalized.append({
-            "topic": topic,
-            "query_match": query_match,
-            "case_ids": case_ids,
-        })
-        observed.extend(case_ids)
-
-    if len(normalized) < 2:
-        return None
-    if sorted(observed) != sorted(expected_case_ids):
-        return None
-    if len(observed) != len(set(observed)):
-        return None
-    if query_match_count > 1:
-        return None
-    if query_topic is not None and query_match_count != 1:
-        return None
-    if query_topic is None and query_match_count != 0:
-        return None
-
-    return {
-        "common_topic": common_topic,
-        "dimension": dimension,
-        "query_topic": query_topic,
-        "children": normalized,
-    }
-
-
-def fallback_to_case_leaves(node, case_ids):
-    node.update({
-        "leaf": False,
-        "dimension": "案例差异",
-        "query_topic": None,
-        "children": [make_leaf(x) for x in case_ids],
-    })
-
-
-def format_topic_tree(tree):
-    if not isinstance(tree, dict) or not tree:
-        return "None"
-
-    lines = []
-
-    def label(node):
-        topic = str(node.get("topic", "")).strip()
-        dimension = str(node.get("dimension", "")).strip()
-        case_id = str(node.get("case_id", "")).strip()
-        query_match = bool(node.get("query_match", False))
-        marker = "  [Query]" if query_match else ""
-
-        if node.get("leaf") and case_id:
-            return f"{topic}  [{case_id}]{marker}" if topic != case_id else f"{case_id}{marker}"
-
-        if dimension:
-            query_topic = node.get("query_topic")
-            query_info = f" | Query={query_topic}" if query_topic else ""
-            return f"{topic}  <{dimension}{query_info}>{marker}"
-
-        return f"{topic or case_id or 'Unknown'}{marker}"
-
-    def walk(node, prefix="", is_last=True, root=False):
-        lines.append(label(node) if root else prefix + ("└─ " if is_last else "├─ ") + label(node))
-        children = node.get("children", [])
-        if not isinstance(children, list):
-            return
-
-        child_prefix = "" if root else prefix + ("   " if is_last else "│  ")
-        for i, child in enumerate(children):
-            walk(child, child_prefix, i == len(children) - 1)
-
-    walk(tree, root=True)
-    return "\n".join(lines)
-
-
-# ============================================================
-# Agent
-# ============================================================
-
-class MemoryAgent:
-
-    def __init__(
-        self,
-        prompt_dir="/home/aarc/CuhkszTeam/nas1/RUNTIME/Baselines/动态多轮测试版/user_simulator/knowledge_assistance/Agent/promptsv2_2",
-        mode="single",
-        show_state=True,
-        max_topic_depth=8,
-        max_topic_retry=2,
-    ):
-        if mode not in {"single", "parallel"}:
-            raise ValueError(f"Unsupported mode: {mode}")
-
-        p = Path(prompt_dir)
-        self.query_prompt = prompt_read(p / "query.prompt")
-        self.trigger_prompt = prompt_read(p / "trigger.prompt")
-        self.topic_prompt = prompt_read(p / "topic.prompt")
-        self.policy_prompt = prompt_read(p / "policy.prompt")
-        self.response_prompt = prompt_read(p / "response.prompt")
-
-        self.mode = mode
-        self.show_state = show_state
-        self.max_topic_depth = max_topic_depth
-        self.max_topic_retry = max_topic_retry
-        self.memory = init_memory()
-
-    # ========================================================
-    # LLM
-    # ========================================================
-
-    def call_llm(self, prompt, data):
-        messages = build_messages(prompt, data)
-        output = (
-            single_inference(messages)
-            if self.mode == "single"
-            else parallel_inference([messages])[0]
-        )
-        return parse_llm_output(output)
-
-    def call_llm_batch(self, messages):
-        if not messages:
-            return []
-
-        if len(messages) == 1:
-            output = (
-                single_inference(messages[0])
-                if self.mode == "single"
-                else parallel_inference(messages)[0]
-            )
-            return [parse_llm_output(output)]
-
-        return [parse_llm_output(x) for x in parallel_inference(messages)]
-
-    # ========================================================
-    # Memory
-    # ========================================================
-
-    def update_issue(self, query_state):
-        mode = query_state.get("query_mode", "none")
-        query = str(query_state.get("query_text", "")).strip()
-
-        if mode in {"rewrite", "refine"} and query:
-            self.memory["issue_state"]["current_issue"] = query
-            self.memory["issue_state"]["query_history"].append(query)
-
-    def update_evidence(self, trigger_state, evidence, topic_structure):
-        mode = trigger_state.get("evidence_mode", "no_evidence_needed")
-
-        if mode == "retrieve_new_evidence":
-            self.memory["evidence_state"]["active_cases"] = evidence
-            self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
-
-        elif mode == "reuse_existing_evidence":
-            self.memory["evidence_state"]["active_cases"] = evidence
-            if topic_structure is not None:
-                self.memory["evidence_state"]["topic_structure"] = topic_structure
-
-    def update_interaction(self, policy_state):
-        interaction = self.memory["interaction_state"]
-        label = str(policy_state.get("label", "")).strip()
-
-        interaction["last_action"] = label
-        interaction["last_information"] = policy_state.get("information")
-        interaction["last_case_ids"] = normalize_case_ids(policy_state.get("case_id"))
-        interaction["action_history"].append(label)
-
-        if label in {"AskMissingSlot", "AskClarification"}:
-            interaction["stage"] = "Clarification"
-        elif label in {"ExplainedResponse", "CaseRecommendation"}:
-            interaction["stage"] = "Resolution"
-        elif label == "Handoff":
-            interaction["stage"] = "End"
-
-    def update_dialogue(self, user, response):
-        history = self.memory["dialog_state"]["compressed_history"]
-        history.append({"user": user, "assistant": response})
-        self.memory["dialog_state"]["compressed_history"] = history[-5:]
-
-    # ========================================================
-    # Inputs
-    # ========================================================
-
-    def build_query_input(self, user):
-        return {
-            "issue_state": self.memory["issue_state"],
-            "dialog_state": self.memory["dialog_state"],
-            "current": {"u": user},
-        }
-
-    def build_trigger_input(self):
-        return {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
-            "dialog_state": self.memory["dialog_state"],
-        }
-
-    def build_policy_input(self, user):
-        return {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": self.memory["evidence_state"],
-            "interaction_state": self.memory["interaction_state"],
-            "dialog_state": self.memory["dialog_state"],
-            "current": {"u": user},
-        }
-
-    def build_response_input(self, user):
-        interaction = self.memory["interaction_state"]
-        return {
-            "issue_state": self.memory["issue_state"],
-            "evidence_state": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
-            "interaction_state": interaction,
-            "dialog_state": self.memory["dialog_state"],
-            "current": {
-                "u": user,
-                "policy_label": interaction["last_action"],
-                "policy_information": interaction["last_information"],
-                "case_ids": interaction["last_case_ids"],
-            },
-        }
-
-    # ========================================================
-    # Topic Structure
-    # ========================================================
-
-    def generate_topic_structure(self, query, cases):
-        case_map = case_map_from_cases(cases)
-        case_ids = list(case_map)
-
-        root = {
-            "query": query,
-            "topic": query,
-            "common_topic": "",
-            "dimension": "",
-            "query_topic": None,
-            "query_match": False,
-            "case_ids": case_ids,
-            "leaf": len(case_ids) <= 1,
-            "children": [],
-        }
-
-        if not case_ids:
-            return root
-
-        if len(case_ids) == 1:
-            root["case_id"] = case_ids[0]
-            return root
-
-        frontier = [{
-            "node": root,
-            "case_ids": case_ids,
-            "depth": 0,
-            "resolved_path": [],
-        }]
-
-        while frontier:
-            active = []
-
-            for task in frontier:
-                if task["depth"] >= self.max_topic_depth:
-                    fallback_to_case_leaves(task["node"], task["case_ids"])
-                else:
-                    active.append(task)
-
-            if not active:
-                break
-
-            messages = []
-            for task in active:
-                ids = task["case_ids"]
-                data = build_topic_split_input(
-                    query=query,
-                    cases=[case_map[x] for x in ids],
-                    parent_topic=task["node"]["topic"],
-                    depth=task["depth"],
-                    resolved_path=task["resolved_path"],
-                )
-                messages.append(build_messages(self.topic_prompt, data))
-
-            outputs = self.call_llm_batch(messages)
-            results, retry_tasks = {}, []
-
-            for i, (task, output) in enumerate(zip(active, outputs)):
-                split = normalize_split(output, task["case_ids"])
-                if split:
-                    results[i] = split
-                else:
-                    retry_tasks.append({"index": i, "task": task, "attempt": 1})
-
-            while retry_tasks:
-                messages = []
-
-                for item in retry_tasks:
-                    task = item["task"]
-                    ids = task["case_ids"]
-
-                    data = build_topic_split_input(
-                        query=query,
-                        cases=[case_map[x] for x in ids],
-                        parent_topic=task["node"]["topic"],
-                        depth=task["depth"],
-                        resolved_path=task["resolved_path"],
-                    )
-
-                    data["retry_instruction"] = (
-                        "上一次结果不合法。请保证："
-                        "输出 common_topic、dimension、query_topic、children；"
-                        "每个输入 case_id 必须且只能出现一次；"
-                        "至少两个子主题；"
-                        "最多一个 query_match=true；"
-                        "query_topic 非 null 时必须存在 query_match=true；"
-                        "Query 分支允许 case_ids 为空，其他分支不能为空。"
-                    )
-
-                    messages.append(build_messages(self.topic_prompt, data))
-
-                outputs = self.call_llm_batch(messages)
-                next_retry = []
-
-                for item, output in zip(retry_tasks, outputs):
-                    split = normalize_split(output, item["task"]["case_ids"])
-
-                    if split:
-                        results[item["index"]] = split
-                    elif item["attempt"] < self.max_topic_retry:
-                        next_retry.append({
-                            "index": item["index"],
-                            "task": item["task"],
-                            "attempt": item["attempt"] + 1,
-                        })
-
-                retry_tasks = next_retry
-
-            next_frontier = []
-
-            for i, task in enumerate(active):
-                node = task["node"]
-                split = results.get(i)
-
-                if not split:
-                    fallback_to_case_leaves(node, task["case_ids"])
-                    continue
-
-                node["leaf"] = False
-                node["common_topic"] = split["common_topic"]
-                node["dimension"] = split["dimension"]
-                node["query_topic"] = split["query_topic"]
-                node["children"] = []
-
-                if task["depth"] == 0:
-                    node["topic"] = split["common_topic"]
-
-                for child in split["children"]:
-                    ids = child["case_ids"]
-                    query_match = child["query_match"]
-
-                    child_node = {
-                        "topic": child["topic"],
-                        "query_match": query_match,
-                        "case_ids": ids,
-                        "leaf": len(ids) <= 1,
-                        "children": [],
-                    }
-
-                    if len(ids) == 1:
-                        child_node["case_id"] = ids[0]
-
-                    node["children"].append(child_node)
-
-                    if len(ids) > 1:
-                        path = task["resolved_path"] + [{
-                            "dimension": split["dimension"],
-                            "topic": child["topic"],
-                            "query_match": query_match,
-                        }]
-
-                        next_frontier.append({
-                            "node": child_node,
-                            "case_ids": ids,
-                            "depth": task["depth"] + 1,
-                            "resolved_path": path,
-                        })
-
-            frontier = next_frontier
-
-        return root
-
-    # ========================================================
-    # Display
-    # ========================================================
-
-    def print_state(self, query_state, trigger_state, policy_state):
-        if not self.show_state:
-            return
-
-        cases = self.memory["evidence_state"]["active_cases"]
-        case_ids = [get_case_id(x) for x in cases if get_case_id(x)]
-        information = policy_state.get("information")
-
-        if information is None or information == "":
-            information = "None"
-        elif isinstance(information, (dict, list)):
-            information = json.dumps(information, ensure_ascii=False)
-        else:
-            information = str(information)
-
-        selected = normalize_case_ids(
-            policy_state.get("case_id") or policy_state.get("selected_case")
-        )
-
-        print("\n╔══════════════ AGENT STATE ══════════════╗")
-        print(f" Query    : {query_state.get('query_mode', '')} | {query_state.get('query_text', '')}")
-        print(f" Trigger  : {trigger_state.get('trigger', '')}")
-        print(f" Evidence : {trigger_state.get('evidence_mode', '')}")
-        print(f" Cases    : {', '.join(case_ids) if case_ids else 'None'}")
-        print("\n Topic Tree")
-
-        for line in format_topic_tree(
-            self.memory["evidence_state"]["topic_structure"]
-        ).splitlines():
-            print(f" {line}")
-
-        print(f"\n Policy   : {policy_state.get('label', '')}")
-        print(f" Info     : {information}")
-        print(f" Case     : {selected if selected else 'None'}")
-        print("╚══════════════════════════════════════════╝")
-
-    # ========================================================
-    # Main
-    # ========================================================
-
-    def reply(self, dialogue_history):
-        for turn in dialogue_history:
-            if "text" in turn:
-                turn["content"] = turn.pop("text")
-
-        if not dialogue_history:
-            raise ValueError("dialogue_history is empty")
-
-        last = dialogue_history[-1]
-        if last.get("role") != "user":
-            raise ValueError("The last message must be from user.")
-
-        user = str(last.get("content", "")).strip()
-        if not user:
-            raise ValueError("Current user message is empty")
-
-        # 1. Query
-        previous_query = self.memory["issue_state"]["current_issue"]
-
-        query_state = self.call_llm(
-            self.query_prompt,
-            self.build_query_input(user),
-        )
-        self.update_issue(query_state)
-
-        query = self.memory["issue_state"]["current_issue"].strip() or user
-        query_changed = (
-            query_state.get("query_mode") in {"rewrite", "refine"}
-            and bool(query)
-            and query != previous_query
-        )
-
-        # 2. Trigger
-        trigger_state = self.call_llm(
-            self.trigger_prompt,
-            self.build_trigger_input(),
-        )
-
-        # 3. Evidence + Tree
-        evidence_mode = trigger_state.get("evidence_mode")
-
-        if evidence_mode == "retrieve_new_evidence":
-            evidence = batch_zefeng_rag(
-                [history_to_text(dialogue_history)],
-                [query],
-            )[0]
-            topic_structure = self.generate_topic_structure(query, evidence)
-
-        else:
-            evidence = self.memory["evidence_state"]["active_cases"]
-            topic_structure = self.memory["evidence_state"]["topic_structure"]
-
-            if (
-                evidence_mode == "reuse_existing_evidence"
-                and query_changed
-                and evidence
-            ):
-                topic_structure = self.generate_topic_structure(query, evidence)
-
-        self.update_evidence(trigger_state, evidence, topic_structure)
-
-        # 4. Policy
-        policy_state = self.call_llm(
-            self.policy_prompt,
-            self.build_policy_input(user),
-        )
-        self.update_interaction(policy_state)
-
-        # 5. Response
-        response_state = self.call_llm(
-            self.response_prompt,
-            self.build_response_input(user),
-        )
-
-        response = str(
-            response_state.get("response")
-            or response_state.get("text")
-            or response_state.get("content")
-            or ""
-        ).strip()
-
-        self.update_dialogue(user, response)
-        self.print_state(query_state, trigger_state, policy_state)
-
-        return response
-
-    def reset(self):
-        self.memory = init_memory()
+    "text": [
+      {
+        "用户": "安装win11后无法使用记事本、计算器、截图工具。"
+      },
+      {
+        "客服": "您好、有提示什么报错吗？"
+      },
+      {
+        "用户": "无法打开这个应用。\n就上面这句话。"
+      },
+      {
+        "客服": "[案例链接: KT00296401]。\n参考案例操作后再试试。"
+      },
+      {
+        "用户": "好的。"
+      },
+      {
+        "客服": "辛苦试试。\n您好、参考案例解决了吗？"
+      },
+      {
+        "用户": "稍等，还在安装中。"
+      },
+      {
+        "客服": "好的。"
+      },
+      {
+        "用户": "已经解决，多谢！"
+      },
+      {
+        "客服": "不客气。"
+      }
+    ],
+
+
+
+
+User: 安装win11后无法使用记事本、计算器、截图工具。
+Processing: 100%|████████████████████████████████████████████████████████████████| 1/1 [00:07<00:00,  7.72s/it]
+Processing: 100%|█████████████████████████████████████████████████████| 2/2 [00:10<00:00,  5.42s/it]
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : rewrite | 安装 Windows 11 后无法使用记事本、计算器、截图工具
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00296401, KT00363881, KT00386285, KT00000700, KT00406950
+
+ Topic Tree
+ 安装 Windows 11 后无法使用记事本、计算器、截图工具  <问题原因及修复方式 | Query=系统内置应用提示损坏的映像或无响应>
+ ├─ 系统内置应用提示损坏的映像或无响应  <问题原因及修复方式 | Query=安装 Windows 11 后无法使用记事本、计算器、截图工具>  [Query]
+ │  ├─ 运行库缺失或异常，可尝试运行运行库修复包  [KT00296401]  [Query]
+ │  ├─ 升级后常见问题汇总，包含多个内置应用异常的解决方案  [KT00386285]
+ │  └─ UAC设置错误或系统文件异常导致内置应用无法打开  [KT00000700]
+ └─ 打开内置应用提示没有被指定在Windows上运行，或者它包含错误  <问题原因及修复方式 | Query=安装 Windows 11 后无法使用记事本、计算器、截图工具>
+    ├─ 通过重新注册或卸载重装内置应用进行修复  [KT00363881]  [Query]
+    └─ 通过定位并替换异常的AppRuntime模块进行修复  [KT00406950]
+
+ Policy   : AskMissingSlot
+ Info     : {"dimension": "系统内置应用提示损坏的映像或无响应 / 打开内置应用提示没有被指定在Windows上运行，或者它包含错误", "options": ["系统内置应用提示损坏的映像或无响应", "打开内置应用提示没有被指定在Windows上运行，或者它包含错误"]}
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，请问您在打开这些应用时，是提示“损坏的映像”或无响应，还是提示“没有被指定在Windows上运行，或者它包含错误”？
+
+User: 无法打开这个应用。\n就上面这句话。
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : reuse | 安装 Windows 11 后无法使用记事本、计算器、截图工具
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00296401, KT00363881, KT00386285, KT00000700, KT00406950
+
+ Topic Tree
+ 安装 Windows 11 后无法使用记事本、计算器、截图工具  <问题原因及修复方式 | Query=系统内置应用提示损坏的映像或无响应>
+ ├─ 系统内置应用提示损坏的映像或无响应  <问题原因及修复方式 | Query=安装 Windows 11 后无法使用记事本、计算器、截图工具>  [Query]
+ │  ├─ 运行库缺失或异常，可尝试运行运行库修复包  [KT00296401]  [Query]
+ │  ├─ 升级后常见问题汇总，包含多个内置应用异常的解决方案  [KT00386285]
+ │  └─ UAC设置错误或系统文件异常导致内置应用无法打开  [KT00000700]
+ └─ 打开内置应用提示没有被指定在Windows上运行，或者它包含错误  <问题原因及修复方式 | Query=安装 Windows 11 后无法使用记事本、计算器、截图工具>
+    ├─ 通过重新注册或卸载重装内置应用进行修复  [KT00363881]  [Query]
+    └─ 通过定位并替换异常的AppRuntime模块进行修复  [KT00406950]
+
+ Policy   : AskMissingSlot
+ Info     : {"dimension": "系统内置应用提示损坏的映像或无响应 / 打开内置应用提示没有被指定在Windows上运行，或者它包含错误", "options": ["系统内置应用提示损坏的映像或无响应", "打开内置应用提示没有被指定在Windows上运行，或者它包含错误"]}
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，请问您在打开这些应用时，是提示“损坏的映像”或无响应，还是提示“没有被指定在Windows上运行，或者它包含错误”？
+
+User: 就显示无法打开这个应用。
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | 安装 Windows 11 后无法使用记事本、计算器、截图工具，显示无法打开这个应用
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00296401, KT00363881, KT00386285, KT00000700, KT00406950
+
+ Topic Tree
+ 安装 Windows 11 后无法使用记事本、计算器、截图工具，显示无法打开这个应用  <内置应用异常类型 | Query=多个内置应用无法打开并提示错误>
+ ├─ 多个内置应用无法打开并提示错误  <问题原因类型 | Query=系统运行库或依赖损坏导致多个内置应用无法打开>  [Query]
+ │  ├─ 系统运行库或依赖损坏导致多个内置应用无法打开  <修复方式 | Query=使用运行库修复包进行修复>  [Query]
+ │  │  ├─ 使用运行库修复包进行修复  [KT00296401]  [Query]
+ │  │  └─ 通过 PowerShell 脚本重新注册或修复 Appx 应用  [KT00363881]
+ │  ├─ UAC设置异常或系统文件损坏导致多个内置应用无法打开  [KT00000700]
+ │  └─ AppRuntime模块缺失或版本不匹配导致内置应用报错  [KT00406950]
+ └─ 升级后常见问题汇总（含部分内置应用修复）  [KT00386285]
+
+ Policy   : AskMissingSlot
+ Info     : {"dimension": "系统内置应用提示损坏的映像或无响应 / 打开内置应用提示没有被指定在Windows上运行，或者它包含错误", "options": ["系统内置应用提示损坏的映像或无响应", "打开内置应用提示没有被指定在Windows上运行，或者它包含错误"]}
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，请问您在打开这些应用时，是提示“损坏的映像”或无响应，还是提示“没有被指定在Windows上运行，或者它包含错误”？
+
+User: 无法打开这个应用。你给我推一个案例
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : reuse | 安装 Windows 11 后无法使用记事本、计算器、截图工具，显示无法打开这个应用
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00296401, KT00363881, KT00386285, KT00000700, KT00406950
+
+ Topic Tree
+ 安装 Windows 11 后无法使用记事本、计算器、截图工具，显示无法打开这个应用  <内置应用异常类型 | Query=多个内置应用无法打开并提示错误>
+ ├─ 多个内置应用无法打开并提示错误  <问题原因类型 | Query=系统运行库或依赖损坏导致多个内置应用无法打开>  [Query]
+ │  ├─ 系统运行库或依赖损坏导致多个内置应用无法打开  <修复方式 | Query=使用运行库修复包进行修复>  [Query]
+ │  │  ├─ 使用运行库修复包进行修复  [KT00296401]  [Query]
+ │  │  └─ 通过 PowerShell 脚本重新注册或修复 Appx 应用  [KT00363881]
+ │  ├─ UAC设置异常或系统文件损坏导致多个内置应用无法打开  [KT00000700]
+ │  └─ AppRuntime模块缺失或版本不匹配导致内置应用报错  [KT00406950]
+ └─ 升级后常见问题汇总（含部分内置应用修复）  [KT00386285]
+
+ Policy   : AskMissingSlot
+ Info     : {"dimension": "系统内置应用提示损坏的映像或无响应 / 打开内置应用提示没有被指定在Windows上运行，或者它包含错误", "options": ["系统内置应用提示损坏的映像或无响应", "打开内置应用提示没有被指定在Windows上运行，或者它包含错误"]}
+ Case     : None
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您好，请问您在打开这些应用时，是提示“损坏的映像”或无响应，还是提示“没有被指定在Windows上运行，或者它包含错误”？
