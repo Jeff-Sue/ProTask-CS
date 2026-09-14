@@ -1,19 +1,26 @@
-╔══════════════ AGENT STATE ══════════════╗
- Query    : rewrite | 电脑退库流程
- Trigger  : True
- Evidence : retrieve_new_evidence
- Cases    : KT00202729, KT00411750, KT00235654, KT00288265, KT00196182
+for i, (task, output) in enumerate(zip(active, outputs)):
+    split = normalize_split(output, task["case_ids"])
+    if split:
+        results[i] = split
+    else:
+        print("\n[Topic Invalid]")
+        print("Parent:", task["node"]["topic"])
+        print("Cases:", task["case_ids"])
+        print("Output:", json.dumps(output, ensure_ascii=False, indent=2))
+        retry_tasks.append({"index": i, "task": task, "attempt": 1})
 
- Topic Tree
- 电脑退库流程  <退库资产类型>
- ├─ 普通资产退库（通过AMT系统发起资产转移）  <案例差异>
- │  ├─ KT00202729
- │  ├─ KT00411750
- │  ├─ KT00235654
- │  └─ KT00196182
- └─ 安全PC退黄/退库（涉及低格和绿区网络接入）  [KT00288265]
 
- Policy   : CaseRecommendation
- Info     : None
- Case     : ['KT00202729', 'KT00411750', 'KT00235654', 'KT00196182']
-╚══════════════════════════════════════════╝
+
+if split:
+    results[item["index"]] = split
+elif item["attempt"] < self.max_topic_retry:
+    next_retry.append({
+        "index": item["index"],
+        "task": item["task"],
+        "attempt": item["attempt"] + 1,
+    })
+else:
+    print("\n[Topic Retry Failed]")
+    print("Parent:", item["task"]["node"]["topic"])
+    print("Cases:", item["task"]["case_ids"])
+    print("Output:", json.dumps(output, ensure_ascii=False, indent=2))
