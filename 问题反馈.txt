@@ -14,16 +14,13 @@ def parse_json(text):
         return text
     if not isinstance(text, str):
         return {}
-
     text = text.strip()
     if not text:
         return {}
-
     try:
         return json.loads(text)
     except Exception:
         pass
-
     for mark in ("```json", "```"):
         if mark in text:
             try:
@@ -31,7 +28,6 @@ def parse_json(text):
                 return json.loads(content)
             except Exception:
                 pass
-
     return {}
 
 
@@ -59,8 +55,7 @@ def build_messages(prompt, data):
 def history_to_text(history):
     return "\n".join(
         f"{'用户' if x['role'] == 'user' else '客服'}: {x['content']}"
-        for x in history
-        if x.get("role") in {"user", "assistant"}
+        for x in history if x.get("role") in {"user", "assistant"}
     )
 
 
@@ -105,12 +100,13 @@ def init_memory():
 # Topic Structure
 # ============================================================
 
-def build_topic_split_input(query, cases, parent_topic, depth, resolved_path=None):
+def build_topic_split_input(query, cases, parent_topic, depth, resolved_path=None, query_active=True):
     return {
         "query": query,
         "parent_topic": parent_topic,
         "depth": depth,
         "resolved_path": resolved_path or [],
+        "query_active": query_active,
         "cases": cases,
     }
 
@@ -126,7 +122,7 @@ def make_leaf(case_id, topic=None, query_match=False):
     }
 
 
-def normalize_split(result, expected_case_ids):
+def normalize_split(result, expected_case_ids, query_active=True):
     if not isinstance(result, dict):
         return None
 
@@ -160,7 +156,6 @@ def normalize_split(result, expected_case_ids):
             if str(x).strip() in expected
         ))
 
-        # Query branch 允许没有 Case，普通 branch 不允许为空
         if not case_ids and not query_match:
             continue
 
@@ -180,10 +175,15 @@ def normalize_split(result, expected_case_ids):
         return None
     if query_match_count > 1:
         return None
-    if query_topic is not None and query_match_count != 1:
-        return None
-    if query_topic is None and query_match_count != 0:
-        return None
+
+    if not query_active:
+        if query_topic is not None or query_match_count != 0:
+            return None
+    else:
+        if query_topic is not None and query_match_count != 1:
+            return None
+        if query_topic is None and query_match_count != 0:
+            return None
 
     return {
         "common_topic": common_topic,
@@ -220,7 +220,7 @@ def format_topic_tree(tree):
 
         if dimension:
             query_topic = node.get("query_topic")
-            query_info = f" | Query={query_topic}" if query_topic else ""
+            query_info = f" | Query={query_topic}" if query_topic is not None else " | Query=Unresolved"
             return f"{topic}  <{dimension}{query_info}>{marker}"
 
         return f"{topic or case_id or 'Unknown'}{marker}"
@@ -230,7 +230,6 @@ def format_topic_tree(tree):
         children = node.get("children", [])
         if not isinstance(children, list):
             return
-
         child_prefix = "" if root else prefix + ("   " if is_last else "│  ")
         for i, child in enumerate(children):
             walk(child, child_prefix, i == len(children) - 1)
@@ -275,25 +274,15 @@ class MemoryAgent:
 
     def call_llm(self, prompt, data):
         messages = build_messages(prompt, data)
-        output = (
-            single_inference(messages)
-            if self.mode == "single"
-            else parallel_inference([messages])[0]
-        )
+        output = single_inference(messages) if self.mode == "single" else parallel_inference([messages])[0]
         return parse_llm_output(output)
 
     def call_llm_batch(self, messages):
         if not messages:
             return []
-
         if len(messages) == 1:
-            output = (
-                single_inference(messages[0])
-                if self.mode == "single"
-                else parallel_inference(messages)[0]
-            )
+            output = single_inference(messages[0]) if self.mode == "single" else parallel_inference(messages)[0]
             return [parse_llm_output(output)]
-
         return [parse_llm_output(x) for x in parallel_inference(messages)]
 
     # ========================================================
@@ -303,18 +292,15 @@ class MemoryAgent:
     def update_issue(self, query_state):
         mode = query_state.get("query_mode", "none")
         query = str(query_state.get("query_text", "")).strip()
-
         if mode in {"rewrite", "refine"} and query:
             self.memory["issue_state"]["current_issue"] = query
             self.memory["issue_state"]["query_history"].append(query)
 
     def update_evidence(self, trigger_state, evidence, topic_structure):
         mode = trigger_state.get("evidence_mode", "no_evidence_needed")
-
         if mode == "retrieve_new_evidence":
             self.memory["evidence_state"]["active_cases"] = evidence
             self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
-
         elif mode == "reuse_existing_evidence":
             self.memory["evidence_state"]["active_cases"] = evidence
             if topic_structure is not None:
@@ -323,7 +309,6 @@ class MemoryAgent:
     def update_interaction(self, policy_state):
         interaction = self.memory["interaction_state"]
         label = str(policy_state.get("label", "")).strip()
-
         interaction["last_action"] = label
         interaction["last_information"] = policy_state.get("information")
         interaction["last_case_ids"] = normalize_case_ids(policy_state.get("case_id"))
@@ -355,9 +340,7 @@ class MemoryAgent:
     def build_trigger_input(self):
         return {
             "issue_state": self.memory["issue_state"],
-            "evidence_state": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
+            "evidence_state": {"active_cases": self.memory["evidence_state"]["active_cases"]},
             "dialog_state": self.memory["dialog_state"],
         }
 
@@ -374,9 +357,7 @@ class MemoryAgent:
         interaction = self.memory["interaction_state"]
         return {
             "issue_state": self.memory["issue_state"],
-            "evidence_state": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
+            "evidence_state": {"active_cases": self.memory["evidence_state"]["active_cases"]},
             "interaction_state": interaction,
             "dialog_state": self.memory["dialog_state"],
             "current": {
@@ -419,11 +400,11 @@ class MemoryAgent:
             "case_ids": case_ids,
             "depth": 0,
             "resolved_path": [],
+            "query_active": True,
         }]
 
         while frontier:
             active = []
-
             for task in frontier:
                 if task["depth"] >= self.max_topic_depth:
                     fallback_to_case_leaves(task["node"], task["case_ids"])
@@ -442,6 +423,7 @@ class MemoryAgent:
                     parent_topic=task["node"]["topic"],
                     depth=task["depth"],
                     resolved_path=task["resolved_path"],
+                    query_active=task["query_active"],
                 )
                 messages.append(build_messages(self.topic_prompt, data))
 
@@ -449,7 +431,7 @@ class MemoryAgent:
             results, retry_tasks = {}, []
 
             for i, (task, output) in enumerate(zip(active, outputs)):
-                split = normalize_split(output, task["case_ids"])
+                split = normalize_split(output, task["case_ids"], task["query_active"])
                 if split:
                     results[i] = split
                 else:
@@ -468,6 +450,7 @@ class MemoryAgent:
                         parent_topic=task["node"]["topic"],
                         depth=task["depth"],
                         resolved_path=task["resolved_path"],
+                        query_active=task["query_active"],
                     )
 
                     data["retry_instruction"] = (
@@ -476,7 +459,9 @@ class MemoryAgent:
                         "每个输入 case_id 必须且只能出现一次；"
                         "至少两个子主题；"
                         "最多一个 query_match=true；"
-                        "query_topic 非 null 时必须存在 query_match=true；"
+                        "query_topic 非 null 时必须存在且仅存在一个 query_match=true；"
+                        "query_topic 为 null 时不能存在 query_match=true；"
+                        "query_active=false 时 query_topic 必须为 null 且所有 query_match=false；"
                         "Query 分支允许 case_ids 为空，其他分支不能为空。"
                     )
 
@@ -486,14 +471,15 @@ class MemoryAgent:
                 next_retry = []
 
                 for item, output in zip(retry_tasks, outputs):
-                    split = normalize_split(output, item["task"]["case_ids"])
+                    task = item["task"]
+                    split = normalize_split(output, task["case_ids"], task["query_active"])
 
                     if split:
                         results[item["index"]] = split
                     elif item["attempt"] < self.max_topic_retry:
                         next_retry.append({
                             "index": item["index"],
-                            "task": item["task"],
+                            "task": task,
                             "attempt": item["attempt"] + 1,
                         })
 
@@ -547,6 +533,7 @@ class MemoryAgent:
                             "case_ids": ids,
                             "depth": task["depth"] + 1,
                             "resolved_path": path,
+                            "query_active": task["query_active"] and query_match,
                         })
 
             frontier = next_frontier
@@ -613,7 +600,6 @@ class MemoryAgent:
         if not user:
             raise ValueError("Current user message is empty")
 
-        # 1. Query
         previous_query = self.memory["issue_state"]["current_issue"]
 
         query_state = self.call_llm(
@@ -629,13 +615,11 @@ class MemoryAgent:
             and query != previous_query
         )
 
-        # 2. Trigger
         trigger_state = self.call_llm(
             self.trigger_prompt,
             self.build_trigger_input(),
         )
 
-        # 3. Evidence + Tree
         evidence_mode = trigger_state.get("evidence_mode")
 
         if evidence_mode == "retrieve_new_evidence":
@@ -649,23 +633,17 @@ class MemoryAgent:
             evidence = self.memory["evidence_state"]["active_cases"]
             topic_structure = self.memory["evidence_state"]["topic_structure"]
 
-            if (
-                evidence_mode == "reuse_existing_evidence"
-                and query_changed
-                and evidence
-            ):
+            if evidence_mode == "reuse_existing_evidence" and query_changed and evidence:
                 topic_structure = self.generate_topic_structure(query, evidence)
 
         self.update_evidence(trigger_state, evidence, topic_structure)
 
-        # 4. Policy
         policy_state = self.call_llm(
             self.policy_prompt,
             self.build_policy_input(user),
         )
         self.update_interaction(policy_state)
 
-        # 5. Response
         response_state = self.call_llm(
             self.response_prompt,
             self.build_response_input(user),
@@ -680,7 +658,6 @@ class MemoryAgent:
 
         self.update_dialogue(user, response)
         self.print_state(query_state, trigger_state, policy_state)
-
         return response
 
     def reset(self):
