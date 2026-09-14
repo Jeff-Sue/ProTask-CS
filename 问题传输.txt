@@ -1,323 +1,325 @@
-import json
-from pathlib import Path
+# Role
 
-from Agent.utils.scu_rag import batch_zefeng_rag
-from Agent.utils.qwen_api_multi import single_inference, parallel_inference
+你是 IT 客服系统中的 Topic Structure Generator。
 
+你的任务是：
 
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
+根据当前 Query 和检索得到的多个 Cases，生成一个简洁、清晰的层级话题结构，用于帮助后续 Policy 理解这些 Cases 之间的主要语义差异。
 
-    if not isinstance(text, str):
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
+你不判断应该采取什么客服策略，也不判断应该推荐哪个 Case。
 
 
-def parse_llm_output(output):
-    output = parse_json(output)
-    return parse_json(output.get("response", ""))
+# Goal
+
+Topic Structure 应满足：
+
+1. 以 Query 作为根节点；
+2. 每一层选择一个能够有效区分当前 Cases 的语义维度；
+3. 根据该维度将 Cases 划分到不同子节点；
+4. 对仍包含多个 Cases 的节点继续递归划分；
+5. 直到每个 Case 都能够由独立叶节点表示。
+
+核心原则：
+
+Query Alignment
+→ Appropriate Semantic Level
+→ Faithful Differentiation
+→ Maximum Diversity
+
+即：
+
+首先保证结构不偏离 Query，
+其次保证语义层级自然，
+然后保证差异忠实于 Case，
+最后才追求尽可能大的 Case 区分度。
 
 
-def prompt_read(path):
-    return Path(path).read_text(encoding="utf-8").strip()
+# Input
+
+输入包含：
+
+query
+
+当前用户问题对应的检索 Query。
+
+cases
+
+当前检索得到的候选 Cases。
+
+每个 Case 包含：
+
+- case_id
+- title
+- keywords
+- content
 
 
-def build_messages(system_prompt, data):
-    return [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": json.dumps(data, ensure_ascii=False),
-        },
-    ]
+# Generation
+
+## Step 1：建立根节点
+
+直接使用 Query 表达的核心问题作为根节点。
+
+首先理解 Query 的：
+
+- 核心对象；
+- 核心动作、故障或用户目标；
+- 已明确的关键条件。
+
+后续所有节点都必须围绕这个核心问题展开。
+
+不要因为 Cases 中存在大量某一类细节，就改变 Query 原本的语义主轴。
+
+例如：
+
+Query：
+
+“如何申请更换黄区主机”
+
+核心问题是：
+
+“更换主机”
+
+“黄区”是已经明确的条件。
+
+因此后续结构应该围绕“黄区主机更换”展开，而不是变成一个泛化的“黄区设备问题”分类。
 
 
-def history_to_text(history):
-    lines = []
+## Step 2：选择当前层的区分维度
 
-    for msg in history:
-        if msg["role"] == "user":
-            lines.append(f"用户: {msg['content']}")
-        elif msg["role"] == "assistant":
-            lines.append(f"客服: {msg['content']}")
+对于当前节点下的 Cases，选择一个语义维度进行划分。
 
-    return "\n".join(lines)
+好的维度需要同时满足以下条件。
 
 
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": [],
-        },
-        "dialog_state": {
-            "compressed_history": [],
-        },
-        "evidence_state": {
-            "active_cases": [],
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_action": "",
-            "last_case_ids": "",
-            "action_history": [],
-        },
+### 2.1 Query Alignment
+
+该维度必须是当前 Query / 当前父节点的自然细化。
+
+优先保留 Query 的核心对象和核心动作。
+
+不要仅仅因为某个属性在 Cases 中差异明显，就围绕它建立结构。
+
+
+### 2.2 Appropriate Semantic Level
+
+划分应该发生在合适的语义层级。
+
+当前节点的所有 children 应当是父节点的自然“下一层”细化，并尽量保持相同的抽象粒度。
+
+不要在同一层混合：
+
+- 场景；
+- 原因；
+- 操作步骤；
+- 适用条件；
+- 具体报错；
+
+等不同语义层级的信息。
+
+如果一个差异过于具体，应放到更深层，而不是提前放到高层。
+
+
+### 2.3 Faithful Differentiation
+
+节点描述必须忠实于 Case 原始内容。
+
+不要为了让 Cases 互斥而增加原文没有表达的限制条件。
+
+特别注意：
+
+Specific Case 的存在，不代表 General Case 属于它的反面。
+
+例如：
+
+Case A：
+“新员工首次添加手机号”
+
+Case B：
+“代他人修改通讯录的通用流程”
+
+应该表示为：
+
+- 新员工首次添加手机号
+- 通用代他人修改通讯录流程
+
+不要表示为：
+
+- 新员工
+- 非新员工
+
+除非 Case B 明确说明只适用于非新员工。
+
+
+### 2.4 Maximum Diversity
+
+满足前面三个条件后，优先选择能够最大程度区分当前 Cases 的维度。
+
+好的划分应该：
+
+- 尽量形成多个有意义的子节点；
+- 减少多个 Cases 长期堆积在同一个节点；
+- 保留真正具有代表性的 Case 差异。
+
+但是：
+
+不要为了提高 Diversity 而牺牲 Query Alignment、语义层级或事实准确性。
+
+
+## Step 3：生成子节点
+
+根据选定维度，将当前 Cases 分配到对应子节点。
+
+节点名称要求：
+
+- 简洁；
+- 直观；
+- 有代表性；
+- 能直接说明这一组 Cases 的共同特点。
+
+优先使用短语。
+
+避免：
+
+- 大段解释；
+- 复杂条件堆叠；
+- 重复父节点已经表达的信息；
+- 为了区分 Case 而加入过细细节。
+
+看到节点名称时，应该能够快速理解：
+
+“这一组 Cases 主要处理什么情况？”
+
+
+## Step 4：递归细化
+
+如果一个节点只包含一个 Case：
+
+将其设置为叶节点。
+
+如果一个节点仍包含多个 Cases：
+
+以该节点为新的父节点，重新执行 Step 2 和 Step 3。
+
+每次递归都必须重新判断：
+
+当前父节点的自然下一层语义差异是什么？
+
+不要直接使用 Case 中最具体的区别。
+
+按照：
+
+粗粒度
+→ 中粒度
+→ 细粒度
+
+逐层细化。
+
+
+# Important Principles
+
+## 1. Query 是语义 Anchor
+
+整个 Topic Structure 都必须围绕 Query 展开。
+
+Case 中的细节不能反过来改变 Query 的核心问题。
+
+
+## 2. Diversity 不是唯一目标
+
+不要选择：
+
+“最容易把 Cases 分开”的维度。
+
+而应该选择：
+
+“在当前语义层级下，合理且能够有效区分 Cases 的维度。”
+
+
+## 3. 不要过早使用细粒度条件
+
+如果某个差异属于更深层，例如：
+
+- 具体版本；
+- 具体权限状态；
+- 具体报错；
+- 是否跨楼宇；
+- 某一步操作结果；
+
+除非它本身就是当前父节点的自然下一层，否则不要提前提升到高层。
+
+
+## 4. 不制造不存在的对立关系
+
+不要因为 Case A 明确满足条件 X，就自动把其他 Case 描述成“非 X”。
+
+General Case 应保持 General。
+
+
+## 5. 不进行 Policy 判断
+
+Topic Structure 只负责：
+
+组织 Cases，并表达它们之间的层级语义差异。
+
+不要判断：
+
+- 是否应该询问用户；
+- 是否缺少信息；
+- 是否应该推荐；
+- 哪个 Case 最适合；
+- 当前 Evidence 是否足够。
+
+这些由后续 Policy Model 判断。
+
+
+## 6. 保持结构简洁
+
+节点描述应尽可能短。
+
+Topic Structure 的作用是降低 Raw Cases 的理解成本，而不是重新生成一份更复杂的知识描述。
+
+
+# Example
+
+Query：
+
+“电脑无法登录，一直提示密码错误”
+
+较好的结构：
+
+电脑登录提示密码错误
+├── Windows / 系统登录
+│   ├── 一般登录密码错误
+│   ├── 锁屏后密码错误
+│   ├── 明确密码过期
+│   └── 明确忘记密码
+└── WeLinkPC 登录
+
+不推荐：
+
+电脑登录提示密码错误
+├── 密码错误或过期
+├── 域账号权限或同步
+│   ├── WeLinkPC
+│   └── Windows
+└── 忘记密码
+
+原因：
+
+后一种结构在同一层混合了“原因”“用户状态”和“登录场景”，语义层级不一致。
+
+
+# Output
+
+仅输出 JSON。
+
+{
+  "dimension": "当前层使用的区分维度",
+  "children": [
+    {
+      "topic": "子主题",
+      "case_ids": ["KTxxxx", "KTxxxx"]
     }
-
-
-class MemoryAgent:
-    """
-    Stateful customer-service agent.
-
-    One MemoryAgent instance corresponds to one dialogue.
-    Call reset() before starting a new dialogue if reusing the instance.
-    """
-
-    def __init__(self, prompt_dir="Agent/promptsv2_1", mode="single"):
-        prompt_dir = Path(prompt_dir)
-        
-        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
-        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
-        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
-        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
-
-        self.mode = mode
-        self.memory = init_memory()
-
-    def call_llm(self, prompt, data):
-        import time
-        messages = build_messages(prompt, data)
-        input_text = json.dumps(
-            messages,
-            ensure_ascii=False
-        )
-        # print(f"Input chars: {len(input_text)}")
-        start = time.time()
-
-        if self.mode == "single":
-            output = single_inference(
-                messages
-            )
-        elif self.mode == "parallel":
-            output = parallel_inference(
-                [messages]
-            )[0]
-        # print(
-        #     f"LLM time: "
-        #     f"{time.time() - start:.2f}s"
-        # )
-        return parse_llm_output(output)
-
-    def print_state(
-        self,
-        query_state,
-        trigger_state,
-        evidence,
-        policy_state,
-    ):
-        # Query
-        query_mode = query_state.get("query_mode", "")
-        query_text = query_state.get("query_text", "")
-
-        # Trigger / Evidence
-        trigger = trigger_state.get("trigger", "")
-        evidence_mode = trigger_state.get("evidence_mode", "")
-
-        # Top-K Case IDs
-        case_ids = []
-
-        for case in evidence or []:
-            if not isinstance(case, dict):
-                continue
-
-            case_id = (
-                case.get("case_id")
-                or case.get("id")
-                or case.get("caseId")
-            )
-
-            if case_id:
-                case_ids.append(str(case_id))
-
-        # Policy
-        policy = policy_state.get("label", "")
-
-        selected_case = (
-            policy_state.get("case_id")
-            or policy_state.get("selected_case")
-            or ""
-        )
-
-        # Print
-        print("\n╔══════════════ AGENT STATE ══════════════╗")
-        print(f" Query    : {query_mode} | {query_text}")
-        print(f" Trigger  : {trigger}")
-        print(f" Evidence : {evidence_mode}")
-        print(
-            f" Cases    : "
-            f"{', '.join(case_ids) if case_ids else 'None'}"
-        )
-        print(f" Policy   : {policy}")
-        print(f" Case     : {selected_case or 'None'}")
-        print("╚══════════════════════════════════════════╝")
-
-    def update_issue(self, query_state):
-        mode = query_state.get("query_mode", "none")
-        query = query_state.get("query_text", "").strip()
-
-        if mode in {"rewrite", "refine"} and query:
-            self.memory["issue_state"]["current_issue"] = query
-            self.memory["issue_state"]["query_history"].append(query)
-
-    def update_evidence(self, trigger_state, evidence):
-        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-            self.memory["evidence_state"]["active_cases"] = evidence
-
-    def update_interaction(self, policy_state):
-        label = policy_state.get("label", "")
-        case_ids = policy_state.get("case_id", "")
-
-        self.memory["interaction_state"]["last_action"] = label
-        self.memory["interaction_state"]["last_action"] = case_ids
-        self.memory["interaction_state"]["action_history"].append((label, case_ids))
-
-        if label in {"AskMissingSlot", "AskClarification"}:
-            self.memory["interaction_state"]["stage"] = "Clarification"
-        elif label in {"ExplainedResponse", "CaseRecommendation"}:
-            self.memory["interaction_state"]["stage"] = "Resolution"
-        elif label == "Handoff":
-            self.memory["interaction_state"]["stage"] = "End"
-
-    def update_dialogue(self, user, response):
-        history = self.memory["dialog_state"]["compressed_history"]
-
-        history.append(
-            {
-                "user": user,
-                "assistant": response,
-            }
-        )
-
-        self.memory["dialog_state"]["compressed_history"] = history[-5:]
-
-    def reply(self, dialogue_history):
-        """
-        Args:
-            dialogue_history:
-                [
-                    {"role": "user", "content": "..."},
-                    {"role": "assistant", "content": "..."},
-                    ...
-                    {"role": "user", "content": "..."},
-                ]
-
-        Returns:
-            str: customer-service response
-        """
-        if not dialogue_history:
-            raise ValueError("dialogue_history is empty")
-
-        last_msg = dialogue_history[-1]
-
-        if last_msg.get("role") != "user":
-            raise ValueError(
-                "The last message in dialogue_history must be from user."
-            )
-
-        user = str(last_msg.get("content", "")).strip()
-
-        if not user:
-            raise ValueError("Current user message is empty")
-
-        # 1. Query
-        query_state = self.call_llm(
-            self.query_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {"u": user},
-            },
-        )
-        self.update_issue(query_state)
-
-        # 2. Trigger
-        trigger_state = self.call_llm(
-            self.trigger_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "dialog_state": self.memory["dialog_state"],
-            },
-        )
-
-        # 3. Evidence
-        if trigger_state.get("evidence_mode") == "retrieve_new_evidence":
-            query = (
-                self.memory["issue_state"]["current_issue"].strip()
-                or user
-            )
-
-            evidence = batch_zefeng_rag(
-                [history_to_text(dialogue_history)],
-                [query],
-            )[0]
-        else:
-            evidence = self.memory["evidence_state"]["active_cases"]
-
-        self.update_evidence(trigger_state, evidence)
-
-        # 4. Policy
-        policy_state = self.call_llm(
-            self.policy_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "interaction_state": self.memory["interaction_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {"u": user},
-            },
-        )
-        self.update_interaction(policy_state)
-
-        # 5. Response
-        response_state = self.call_llm(
-            self.response_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": self.memory["evidence_state"],
-                "interaction_state": self.memory["interaction_state"],
-                "dialog_state": self.memory["dialog_state"],
-                "current": {
-                    "u": user,
-                    "policy_label": self.memory["interaction_state"]["last_action"],
-                    "case_ids": self.memory["interaction_state"]["last_case_ids"],
-                },
-            },
-        )
-
-        response = (
-            response_state.get("response")
-            or response_state.get("text")
-            or response_state.get("content")
-            or ""
-        )
-        response = str(response).strip()
-        self.update_dialogue(user, response)
-        
-        # 输出中间状态
-        self.print_state(
-            query_state=query_state,
-            trigger_state=trigger_state,
-            evidence=evidence,
-            policy_state=policy_state,
-        )
-
-        return response
-
-    def reset(self):
-        self.memory = init_memory()
+  ]
+}
