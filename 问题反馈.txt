@@ -1,28 +1,82 @@
-如果某个 Dimension 会使同一个 Case 自然属于多个 Sibling Topics，说明该 Dimension 描述的是 Case 内部同时存在的属性，而不是 Cases 之间合适的区分维度。此时应放弃该 Dimension，重新选择其他 Case-level Dimension，而不是通过任意删除、复制或重新分配 Case 来满足互斥要求。
+User: 请问外协人员怎么共享一台机器。\n就是切换用户这里。\n需要找IT人员现场操作吗？
+Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:04<00:00,  4.80s/it]
+[TopicStructure] Round 0: 1 nodes
+[TopicStructure] Round 1: 1 nodes
 
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : rewrite | 外协人员共享机器的用户切换操作是否需要IT现场支持
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00248529, KT00006565, KT00171898, KT00332601, KT00354185
 
-if "duplicated case_ids" in item["error"]:
-    retry_instruction = (
-        f"上一次划分出现重复 Case：{item['error']}。"
-        "这通常说明当前 Dimension 不能形成互斥的 Case-level Partition。"
-        "不要通过任意删除或重新分配 Case 来修复。"
-        "请重新选择能够使每个 Case 自然且唯一归属的 Dimension。"
-        "如果不存在这样的自然划分，输出 splittable=false。"
-    )
-else:
-    retry_instruction = (
-        f"上一次输出未通过结构验证：{item['error']}。"
-        "请修正该结构问题并重新输出。"
-    )
+ Topic Tree
+ 外协人员共享机器的用户切换操作是否需要IT现场支持  <是否需要IT现场支持>
+ ├─ 需要IT现场支持  [KT00354185]
+ └─ 不需要IT现场支持  <共享机器类型或用户权限申请方式>
+    ├─ 资产共享操作指导  [KT00248529]
+    ├─ 便携机同时使用人管理  [KT00006565]
+    ├─ 外协员工权限申请流程  [KT00171898]
+    └─ 工号切换服务不支持外协员工  [KT00332601]
 
+ Policy   : CaseRecommendation
+ Info     : {'case_id': 'KT00248529'}
+╚══════════════════════════════════════════╝
 
-当 Policy 提供 case_id 时，可以将对应 Case 作为当前回复的知识依据。
+>>> AGENT RESPONSE
+外协人员共享机器的操作可以参考案例 KT00248529《资产共享操作指导》。具体步骤请查看文档：资产共享操作指导.docx。如果还有疑问，欢迎继续咨询。
 
-如果该 Case 尚未在当前对话中提供给用户，且提供 Case 有助于用户进一步查看或执行，应自然地提供对应 Case ID。对于 CaseRecommendation，原则上应在首次推荐时明确提供 Case ID。
+User: 是不是需要原本的人先登录进去。
+Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:05<00:00,  5.04s/it]
+[TopicStructure] Round 0: 1 nodes
+[TopicStructure] Round 1: 2 nodes
 
-如果同一个 Case 已经在前文明确提供，当前用户只是在继续确认、追问或反馈，则不要为了引用 Evidence 而重复 Case ID，也不要重复已经提供过的 Case 内容。直接回答当前新增问题。
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | 外协人员共享机器的用户切换操作是否需要原用户先登录
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00248529, KT00005754, KT00053256, KT00042899, KT00279158
 
-只有当用户再次需要案例、链接、详细步骤，或重新引用该 Case 对当前处理确有帮助时，才再次提供。
+ Topic Tree
+ 外协人员共享机器的用户切换操作是否需要原用户先登录  <用户切换是否需要原用户先登录>
+ ├─ 需要原用户先登录  <切换用户的方式>
+ │  ├─ 通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）  [KT00005754]
+ │  └─ 工号切换后重新登录（涉及XGate认证和网络环境）  [KT00042899]
+ └─ 不需要原用户先登录  <操作对象类型>
+    ├─ 资产共享相关操作  [KT00248529]
+    ├─ 本地管理员账号添加与切换  [KT00053256]
+    └─ 外协人员信息修改  [KT00279158]
 
+ Policy   : AskClarification
+ Info     : {'dimension': '切换用户的方式', 'candidate_values': ['通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）', '工号切换后重新登录（涉及XGate认证和网络环境）']}
+╚══════════════════════════════════════════╝
 
-对于针对上一轮内容的追问，只回答当前新增的信息需求；已经提供过的解决方案、步骤和 Case Reference 默认不重复。
+>>> AGENT RESPONSE
+您提到的切换用户，是通过系统界面直接切换（比如使用 Alt+Ctrl+Del 或 Win+L），还是需要工号切换后重新登录（涉及 XGate 认证和网络环境）呢？可以简单说明一下具体情况吗？
+
+User: 需要原本的人先登录进去吗
+Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:06<00:00,  6.50s/it]
+[TopicStructure] Round 0: 1 nodes
+[TopicStructure] Round 1: 2 nodes
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : reuse | 外协人员共享机器的用户切换操作是否需要原用户先登录
+ Trigger  : True
+ Evidence : retrieve_new_evidence
+ Cases    : KT00005754, KT00001086, KT00042899, KT00053256, KT00070250
+
+ Topic Tree
+ 外协人员共享机器的用户切换操作是否需要原用户先登录  <用户切换的触发方式>
+ ├─ 通过系统快捷键切换用户  [KT00005754]
+ ├─ 通过工号切换自动更新域账号  <登录方式>
+ │  ├─ 无线网络登录  [KT00042899]
+ │  └─ 有线网络登录  [KT00070250]
+ └─ 手动添加新管理员账号后切换  <账号类型>
+    ├─ 域账号  [KT00001086]
+    └─ 本地账号  [KT00053256]
+
+ Policy   : AskClarification
+ Info     : {'dimension': '切换用户的方式', 'candidate_values': ['通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）', '工号切换后重新登录（涉及XGate认证和网络环境）']}
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+您提到的切换用户，是通过系统界面直接切换（比如使用 Alt+Ctrl+Del 或 Win+L），还是需要工号切换后重新登录（涉及 XGate 认证和网络环境）呢？可以简单说明一下具体情况吗？
