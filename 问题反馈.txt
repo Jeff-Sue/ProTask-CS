@@ -1,561 +1,617 @@
-import copy
-import json
-import sys
-import uuid
-from pathlib import Path
+import html
 from typing import Any, Dict, List
-
-import gradio as gr
-
-
-# ============================================================
-# Project Path
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-
-# ============================================================
-# Agent
-# ============================================================
-
-from run import MemoryAgent
-from ui_render import (
-    render_chat,
-    render_state,
-    render_history,
-    render_session_info,
-    render_error,
-)
-from ui_style import CUSTOM_CSS
-
-
-# ============================================================
-# Config
-# ============================================================
-
-AGENT_PROMPT_DIR = ROOT_DIR / "Agent" / "promptsv2_3"
-
-DEFAULT_MODE = "single"
-DEFAULT_MAX_TOPIC_DEPTH = 8
-
-
-# ============================================================
-# Session
-# ============================================================
-
-def new_session() -> Dict[str, Any]:
-    """
-    一个浏览器 session 对应一个独立 MemoryAgent。
-
-    Project 不维护 Agent 内部 memory，
-    只维护：
-    - session id
-    - agent instance
-    - frontend dialogue history
-    - turn records
-    """
-
-    session_id = f"web_{uuid.uuid4().hex[:10]}"
-
-    agent = MemoryAgent(
-        prompt_dir=AGENT_PROMPT_DIR,
-        mode=DEFAULT_MODE,
-        max_topic_depth=DEFAULT_MAX_TOPIC_DEPTH,
-        show_state=False,
-    )
-
-    return {
-        "session_id": session_id,
-        "agent": agent,
-        "dialogue_history": [],
-        "turn_records": [],
-    }
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def safe_state_copy(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    last_turn_state 当前都是 JSON-compatible 数据，
-    这里 deepcopy 一份，避免后续 memory 更新影响历史记录。
-    """
+def esc(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""))
+
+
+def badge(text: Any, kind: str = "default") -> str:
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{esc(text)}'
+        f'</span>'
+    )
+
+
+def ms(value: Any) -> str:
     try:
-        return copy.deepcopy(state)
+        return f"{int(value):,} ms"
     except Exception:
-        return json.loads(
-            json.dumps(state, ensure_ascii=False, default=str)
-        )
-
-
-def get_latest_state(session: Dict[str, Any]) -> Dict[str, Any]:
-    records = session.get("turn_records", [])
-
-    if not records:
-        return {}
-
-    return records[-1].get("state", {})
+        return "0 ms"
 
 
 # ============================================================
-# Main Interaction
+# Chat
 # ============================================================
 
-def chat(
-    user_input: str,
-    session: Dict[str, Any],
-):
-    if session is None:
-        session = new_session()
+def render_chat(
+    history: List[Dict[str, str]],
+) -> str:
 
-    user_input = str(user_input or "").strip()
+    if not history:
+        return """
+        <div class="empty-chat">
 
-    if not user_input:
-        return (
-            "",
-            render_chat(session["dialogue_history"]),
-            render_state(get_latest_state(session)),
-            render_history(session["turn_records"]),
-            render_session_info(session),
-            session,
-        )
+            <div class="empty-icon">
+                ✦
+            </div>
 
-    agent: MemoryAgent = session["agent"]
+            <div class="empty-title">
+                开始新的 IT 支持会话
+            </div>
 
-    # --------------------------------------------------------
-    # 1. Add user message
-    # --------------------------------------------------------
+            <div class="empty-desc">
+                输入用户问题后，
+                Agent 将动态完成 Query、Retrieval、
+                Topic Analysis、Policy 和 Response。
+            </div>
 
-    dialogue_history = session["dialogue_history"] + [
-        {
-            "role": "user",
-            "content": user_input,
-        }
-    ]
+        </div>
+        """
 
-    # --------------------------------------------------------
-    # 2. Agent
-    # --------------------------------------------------------
+    blocks = []
 
-    try:
-        response = agent.reply(dialogue_history)
-        turn_state = safe_state_copy(agent.last_turn_state)
+    for msg in history:
 
-    except Exception as e:
-        error_message = str(e)
+        role = msg.get("role")
+        content = esc(msg.get("content", ""))
 
-        # 用户消息仍保留，但不伪造 assistant 回复
-        session["dialogue_history"] = dialogue_history
+        if role == "user":
 
-        return (
-            "",
-            render_chat(dialogue_history),
-            render_error(error_message),
-            render_history(session["turn_records"]),
-            render_session_info(session),
-            session,
-        )
+            blocks.append(
+                f"""
+                <div class="message-row user-row">
 
-    # --------------------------------------------------------
-    # 3. Add assistant message
-    # --------------------------------------------------------
+                    <div class="message-bubble user-message">
+                        <div class="message-role">
+                            User
+                        </div>
 
-    dialogue_history.append(
-        {
-            "role": "assistant",
-            "content": response,
-        }
-    )
+                        <div>
+                            {content}
+                        </div>
+                    </div>
 
-    session["dialogue_history"] = dialogue_history
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
 
-    # --------------------------------------------------------
-    # 4. Save turn record
-    # --------------------------------------------------------
-
-    turn_id = len(session["turn_records"]) + 1
-
-    session["turn_records"].append(
-        {
-            "turn_id": turn_id,
-            "user": user_input,
-            "assistant": response,
-            "state": turn_state,
-        }
-    )
-
-    # --------------------------------------------------------
-    # 5. Render
-    # --------------------------------------------------------
-
-    return (
-        "",
-        render_chat(dialogue_history),
-        render_state(turn_state),
-        render_history(session["turn_records"]),
-        render_session_info(session),
-        session,
-    )
-
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-    session = new_session()
-
-    return (
-        "",
-        render_chat([]),
-        render_state({}),
-        render_history([]),
-        render_session_info(session),
-        session,
-    )
-
-
-# ============================================================
-# Prefix
-# ============================================================
-
-def parse_prefix(prefix_text: str) -> List[Dict[str, str]]:
-    """
-    支持：
-
-    用户: xxx
-    客服: xxx
-
-    用户：xxx
-    客服：xxx
-    """
-
-    prefix_text = str(prefix_text or "").strip()
-
-    if not prefix_text:
-        return []
-
-    history = []
-
-    for raw_line in prefix_text.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("用户:"):
-            history.append({
-                "role": "user",
-                "content": line[len("用户:"):].strip(),
-            })
-
-        elif line.startswith("用户："):
-            history.append({
-                "role": "user",
-                "content": line[len("用户："):].strip(),
-            })
-
-        elif line.startswith("客服:"):
-            history.append({
-                "role": "assistant",
-                "content": line[len("客服:"):].strip(),
-            })
-
-        elif line.startswith("客服："):
-            history.append({
-                "role": "assistant",
-                "content": line[len("客服："):].strip(),
-            })
+                </div>
+                """
+            )
 
         else:
-            if not history:
-                raise ValueError(
-                    f"无法识别历史对话：{line}"
-                )
 
-            history[-1]["content"] += "\n" + line
+            blocks.append(
+                f"""
+                <div class="message-row">
 
-    return history
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
+
+                    <div class="message-bubble agent-message">
+                        <div class="message-role">
+                            IT Support
+                        </div>
+
+                        <div>
+                            {content}
+                        </div>
+                    </div>
+
+                </div>
+                """
+            )
+
+    return (
+        '<div class="chat-scroll">'
+        + "".join(blocks)
+        + "</div>"
+    )
 
 
-def load_prefix(
-    prefix_text: str,
-    session: Dict[str, Any],
-):
-    if session is None:
-        session = new_session()
+# ============================================================
+# Evidence
+# ============================================================
 
-    try:
-        history = parse_prefix(prefix_text)
+def render_cases(cases: List[Dict[str, Any]]) -> str:
 
-        if not history:
-            raise ValueError("请输入历史对话。")
-
-        # Prefix 只作为 dialogue history。
-        # 不重放 Agent，因此重新创建 Agent，保证内部 memory 为空。
-        new_agent = MemoryAgent(
-            prompt_dir=AGENT_PROMPT_DIR,
-            mode=DEFAULT_MODE,
-            max_topic_depth=DEFAULT_MAX_TOPIC_DEPTH,
-            show_state=False,
-        )
-
-        session["agent"] = new_agent
-        session["dialogue_history"] = history
-        session["turn_records"] = []
-
-        status = f"""
-        <div class="prefix-success">
-            历史对话已加载，共 {len(history)} 条消息。
-            下一条用户输入将基于该历史继续处理。
+    if not cases:
+        return """
+        <div class="empty-small">
+            No active evidence
         </div>
         """
 
-        return (
-            render_chat(history),
-            render_state({}),
-            render_history([]),
-            render_session_info(session),
-            session,
-            status,
+    items = []
+
+    for case in cases:
+
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or ""
         )
 
-    except Exception as e:
-        return (
-            render_chat(session["dialogue_history"]),
-            render_state(get_latest_state(session)),
-            render_history(session["turn_records"]),
-            render_session_info(session),
-            session,
+        title = case.get("title", "")
+
+        items.append(
             f"""
-            <div class="prefix-error">
-                加载失败：{str(e)}
+            <div class="case-item">
+
+                <div class="case-id">
+                    {esc(case_id)}
+                </div>
+
+                <div class="case-title">
+                    {esc(title)}
+                </div>
+
             </div>
-            """,
+            """
         )
 
+    return "".join(items)
+
 
 # ============================================================
-# UI
+# Topic Tree
 # ============================================================
 
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CUSTOM_CSS,
-    theme=gr.themes.Soft(
-        primary_hue="blue",
-        neutral_hue="slate",
-        radius_size="lg",
-    ),
-) as demo:
+def render_topic_tree(
+    tree: Dict[str, Any],
+) -> str:
 
-    session_state = gr.State(value=new_session())
-
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        """
-        <div class="hero">
-            <div>
-                <div class="hero-tag">
-                    Huawei IT Support · Agent Console
-                </div>
-
-                <div class="hero-title">
-                    IT 智能客服 Agent
-                </div>
-
-                <div class="hero-desc">
-                    Dynamic Query · Evidence Retrieval ·
-                    Topic Structure · Policy Decision · Response
-                </div>
-            </div>
-
-            <div class="hero-status">
-                <div class="status-dot"></div>
-                Agent Online
-            </div>
+    if not tree:
+        return """
+        <div class="empty-small">
+            No topic structure
         </div>
         """
+
+    def node(node_data, level=0):
+
+        topic = esc(
+            node_data.get("topic", "")
+        )
+
+        dimension = esc(
+            node_data.get("dimension", "")
+        )
+
+        case_ids = node_data.get(
+            "case_ids",
+            [],
+        )
+
+        leaf = node_data.get(
+            "leaf",
+            False,
+        )
+
+        children = node_data.get(
+            "children",
+            [],
+        )
+
+        case_text = ""
+
+        if case_ids:
+            case_text = (
+                '<span class="tree-case">'
+                + esc(", ".join(case_ids))
+                + "</span>"
+            )
+
+        dimension_text = ""
+
+        if dimension:
+            dimension_text = (
+                '<span class="tree-dimension">'
+                + dimension
+                + "</span>"
+            )
+
+        leaf_class = (
+            " tree-leaf"
+            if leaf
+            else ""
+        )
+
+        html_block = f"""
+        <div
+            class="tree-node{leaf_class}"
+            style="margin-left:{level * 18}px"
+        >
+
+            <span class="tree-dot"></span>
+
+            <span class="tree-topic">
+                {topic}
+            </span>
+
+            {dimension_text}
+            {case_text}
+
+        </div>
+        """
+
+        for child in children:
+            html_block += node(
+                child,
+                level + 1,
+            )
+
+        return html_block
+
+    return (
+        '<div class="topic-tree">'
+        + node(tree)
+        + "</div>"
     )
 
-    # ========================================================
-    # Main
-    # ========================================================
 
-    with gr.Row():
+# ============================================================
+# Current State
+# ============================================================
 
-        # ----------------------------------------------------
-        # Left: Conversation
-        # ----------------------------------------------------
+def render_state(
+    state: Dict[str, Any],
+) -> str:
 
-        with gr.Column(scale=7, min_width=620):
+    if not state:
+        return """
+        <div class="state-empty">
 
-            gr.HTML(
-                """
-                <div class="panel-title">
-                    Conversation
+            <div class="state-empty-title">
+                Waiting for interaction
+            </div>
+
+            <div class="state-empty-desc">
+                当前轮执行后，
+                Query、Trigger、Evidence、
+                Policy 和 Latency 将显示在这里。
+            </div>
+
+        </div>
+        """
+
+    query = state.get("query", {})
+    trigger = state.get("trigger", {})
+    evidence = state.get("evidence", {})
+    policy = state.get("policy", {})
+    latency = state.get("latency", {})
+
+    query_mode = query.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query.get(
+        "query_text",
+        "",
+    )
+
+    evidence_mode = trigger.get(
+        "evidence_mode",
+        "",
+    )
+
+    trigger_flag = trigger.get(
+        "trigger",
+        False,
+    )
+
+    policy_label = policy.get(
+        "label",
+        "",
+    )
+
+    information = policy.get(
+        "information",
+    )
+
+    active_cases = evidence.get(
+        "active_cases",
+        [],
+    )
+
+    topic_structure = evidence.get(
+        "topic_structure",
+        {},
+    )
+
+    return f"""
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Query
+        </div>
+
+        <div class="kv-row">
+            <span>Mode</span>
+            {badge(query_mode, "blue")}
+        </div>
+
+        <div class="state-text">
+            {esc(query_text) or "None"}
+        </div>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Evidence Decision
+        </div>
+
+        <div class="kv-row">
+            <span>Trigger</span>
+            {badge(
+                trigger_flag,
+                "green" if trigger_flag else "gray"
+            )}
+        </div>
+
+        <div class="kv-row">
+            <span>Mode</span>
+            {badge(evidence_mode, "blue")}
+        </div>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Active Cases
+        </div>
+
+        {render_cases(active_cases)}
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Topic Structure
+        </div>
+
+        {render_topic_tree(topic_structure)}
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Policy
+        </div>
+
+        <div class="policy-main">
+            {badge(policy_label, "green")}
+        </div>
+
+        <div class="state-label">
+            Information
+        </div>
+
+        <pre class="json-small">{esc(information)}</pre>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Latency
+        </div>
+
+        <div class="latency-total">
+            {ms(latency.get("total_ms", 0))}
+        </div>
+
+        <div class="latency-grid">
+
+            <div>
+                <span>Query</span>
+                <b>{ms(latency.get("query_ms", 0))}</b>
+            </div>
+
+            <div>
+                <span>Trigger</span>
+                <b>{ms(latency.get("trigger_ms", 0))}</b>
+            </div>
+
+            <div>
+                <span>RAG</span>
+                <b>{ms(latency.get("rag_ms", 0))}</b>
+            </div>
+
+            <div>
+                <span>Topic</span>
+                <b>{ms(latency.get("topic_ms", 0))}</b>
+            </div>
+
+            <div>
+                <span>Policy</span>
+                <b>{ms(latency.get("policy_ms", 0))}</b>
+            </div>
+
+            <div>
+                <span>Response</span>
+                <b>{ms(latency.get("response_ms", 0))}</b>
+            </div>
+
+        </div>
+
+    </div>
+
+    """
+
+
+# ============================================================
+# Turn History
+# ============================================================
+
+def render_history(
+    records: List[Dict[str, Any]],
+) -> str:
+
+    if not records:
+        return """
+        <div class="state-empty">
+            暂无运行轨迹
+        </div>
+        """
+
+    blocks = []
+
+    for record in reversed(records):
+
+        state = record.get(
+            "state",
+            {},
+        )
+
+        query = state.get(
+            "query",
+            {},
+        )
+
+        trigger = state.get(
+            "trigger",
+            {},
+        )
+
+        policy = state.get(
+            "policy",
+            {},
+        )
+
+        latency = state.get(
+            "latency",
+            {},
+        )
+
+        blocks.append(
+            f"""
+            <div class="history-item">
+
+                <div class="history-head">
+
+                    <b>
+                        Turn {record.get("turn_id")}
+                    </b>
+
+                    <span>
+                        {ms(latency.get("total_ms", 0))}
+                    </span>
+
                 </div>
-                """
-            )
 
-            chat_display = gr.HTML(
-                value=render_chat([]),
-                elem_classes=["chat-panel"],
-            )
+                <div class="history-user">
+                    {esc(record.get("user", ""))}
+                </div>
 
-            with gr.Row():
+                <div class="history-flow">
 
-                user_box = gr.Textbox(
-                    placeholder="请输入 IT 问题...",
-                    show_label=False,
-                    lines=3,
-                    scale=7,
-                )
+                    {badge(
+                        query.get("query_mode", ""),
+                        "blue"
+                    )}
 
-                send_btn = gr.Button(
-                    "发送",
-                    variant="primary",
-                    scale=1,
-                )
+                    <span>→</span>
 
-            with gr.Row():
+                    {badge(
+                        trigger.get("evidence_mode", ""),
+                        "gray"
+                    )}
 
-                reset_btn = gr.Button(
-                    "新建会话",
-                    variant="secondary",
-                )
+                    <span>→</span>
 
-            # ------------------------------------------------
-            # Prefix
-            # ------------------------------------------------
+                    {badge(
+                        policy.get("label", ""),
+                        "green"
+                    )}
 
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-            ):
+                </div>
 
-                prefix_box = gr.Textbox(
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                    lines=7,
-                    show_label=False,
-                )
+            </div>
+            """
+        )
 
-                load_prefix_btn = gr.Button(
-                    "加载历史",
-                )
-
-                prefix_status = gr.HTML()
-
-        # ----------------------------------------------------
-        # Right: Agent State
-        # ----------------------------------------------------
-
-        with gr.Column(scale=5, min_width=500):
-
-            session_info = gr.HTML(
-                value=render_session_info(
-                    new_session()
-                )
-            )
-
-            with gr.Tabs():
-
-                # --------------------------------------------
-                # Current State
-                # --------------------------------------------
-
-                with gr.Tab("当前决策"):
-
-                    state_display = gr.HTML(
-                        value=render_state({}),
-                        elem_classes=["state-panel"],
-                    )
-
-                # --------------------------------------------
-                # History
-                # --------------------------------------------
-
-                with gr.Tab("运行轨迹"):
-
-                    history_display = gr.HTML(
-                        value=render_history([]),
-                        elem_classes=["history-panel"],
-                    )
-
-    # ========================================================
-    # Events
-    # ========================================================
-
-    chat_outputs = [
-        user_box,
-        chat_display,
-        state_display,
-        history_display,
-        session_info,
-        session_state,
-    ]
-
-    send_btn.click(
-        fn=chat,
-        inputs=[
-            user_box,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
-
-    user_box.submit(
-        fn=chat,
-        inputs=[
-            user_box,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
-
-    reset_btn.click(
-        fn=reset_chat,
-        inputs=[],
-        outputs=chat_outputs,
-    )
-
-    load_prefix_btn.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_box,
-            session_state,
-        ],
-        outputs=[
-            chat_display,
-            state_display,
-            history_display,
-            session_info,
-            session_state,
-            prefix_status,
-        ],
-    )
+    return "".join(blocks)
 
 
 # ============================================================
-# Launch
+# Session
 # ============================================================
 
-if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
+def render_session_info(
+    session: Dict[str, Any],
+) -> str:
+
+    session_id = session.get(
+        "session_id",
+        "",
     )
+
+    turns = len(
+        session.get(
+            "turn_records",
+            [],
+        )
+    )
+
+    return f"""
+    <div class="session-bar">
+
+        <div>
+            <span class="status-dot"></span>
+            Running
+        </div>
+
+        <div>
+            Session
+            <b>{esc(session_id)}</b>
+        </div>
+
+        <div>
+            Turns
+            <b>{turns}</b>
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Error
+# ============================================================
+
+def render_error(message: str) -> str:
+
+    return f"""
+    <div class="error-card">
+
+        <div class="error-title">
+            当前轮执行失败
+        </div>
+
+        <div>
+            {esc(message)}
+        </div>
+
+    </div>
+    """
