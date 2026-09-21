@@ -1,14 +1,1 @@
-Interaction Progress
-
-Policy 应结合 interaction_state 和 dialogue_state 判断上一轮动作是否有效推进了当前问题。
-
-如果上一轮已经针对某个 Dimension 或信息进行了询问，而用户没有回答该询问，而是再次重复、重述或强调原来的问题，不要机械重复相同的询问。
-
-这种情况通常表示上一轮询问没有解决用户当前最关心的问题。应重新判断现有 Evidence 是否已经能够直接回答或推荐；如果仍然必须澄清，应选择能够真正推进问题的不同信息，而不是重复相同的 Dimension 和 Candidate Values。
-
-不要仅因为当前仍然缺少某项信息，就连续重复同一个 AskMissingSlot 或 AskClarification。
-
-
-
-
-如果当前 Policy 要求询问的信息与上一轮客服已经询问的内容实质相同，而用户没有回答该问题、只是重复或强调原需求，不要机械复述上一轮问题。应根据当前 Policy Information 和对话语境，用更直接、不同的方式帮助用户推进当前问题。
+Evidence Sufficiency 必须针对 Query 中的用户目标判断。共享对象、场景、症状或关键词，不代表 Evidence 能够支持该 Query。尤其不能用解决“问题原因/症状”的 Case，替代用户明确请求的目标操作。
