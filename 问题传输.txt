@@ -1,72 +1,74 @@
-User: 外协人员安装的手机welink链接在哪里呀。\n请问。
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:04<00:00,  4.45s/it]
+User: 您好，我想换一个主机，我现在这个主机无法支持双屏操作，用不了，我在U8 A208会议室。
+Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:03<00:00,  3.61s/it]
 [TopicStructure] Round 0: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00000795', 'KT00329408']
-output: {'dimension': '安装方式', 'children': [{'topic': '通过 his.huawei.com 官网下载安装', 'case_ids': ['KT00000795', 'KT00329408', 'KT00008018']}, {'topic': '通过二维码扫描下载安装', 'case_ids': ['KT00000795', 'KT00329408']}, {'topic': '安装失败或异常处理', 'case_ids': ['KT00007887']}, {'topic': '权限相关问题（非下载类）', 'case_ids': ['KT00326824']}]}
-[TopicStructure] Retry 1: 1 nodes
 [TopicStructure] Round 1: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00000795', 'KT00329408', 'KT00007887']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00000795', 'KT00329408', 'KT00007887']}, {'topic': 'iOS系统', 'case_ids': ['KT00000795', 'KT00329408', 'KT00007887']}]}
-[TopicStructure] Retry 1: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00000795', 'KT00329408']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00000795', 'KT00329408']}, {'topic': 'iOS系统', 'case_ids': ['KT00000795', 'KT00329408']}, {'topic': '通用安装问题与解决方案', 'case_ids': ['KT00007887']}]}
-[TopicStructure] Retry 2: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00329408']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00000795', 'KT00329408']}, {'topic': 'iOS系统', 'case_ids': ['KT00329408', 'KT00008018', 'KT00007887']}]}
-[TopicStructure Warning] failed split after retries: ['KT00000795', 'KT00329408', 'KT00008018', 'KT00007887']
 
 ╔══════════════ AGENT STATE ══════════════╗
- Query    : rewrite | 外协人员安装的手机Welink链接获取方式
+ Query    : rewrite | 更换支持双屏操作的主机 U8 A208会议室
  Trigger  : True
  Evidence : retrieve_new_evidence
- Cases    : KT00000795, KT00329408, KT00008018, KT00326824, KT00007887
+ Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
 
  Topic Tree
- 外协人员安装的手机Welink链接获取方式  <安装方式或权限申请类型>
- ├─ WeLink手机端下载与安装方法  <案例差异>
- │  ├─ [KT00000795]
- │  ├─ [KT00329408]
- │  ├─ [KT00008018]
- │  └─ [KT00007887]
- └─ 心声社区外协员工权限申请  [KT00326824]
+ 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
+ ├─ 便携机双屏设置  <双屏设置方式>
+ │  ├─ 通过系统显示设置界面操作  [KT00004341]
+ │  └─ 通过键盘快捷键操作  [KT00121279]
+ ├─ 安全PC双屏设置  [KT00013770]
+ ├─ Windows 10系统通用外接显示器设置  [KT00007297]
+ └─ WeLink视频会议双屏模式设置  [KT00210759]
 
  Policy   : CaseRecommendation
- Info     : {'case_id': 'KT00000795'}
+ Info     : {'case_id': 'KT00210759'}
 ╚══════════════════════════════════════════╝
 
 >>> AGENT RESPONSE
-外协人员安装WeLink手机端的链接可以参考案例 [KT00000795]，里面有详细的下载和安装指引。您可以通过访问 his.huawei.com 或扫描相关二维码进行下载，具体操作步骤也可以在该案例中查看。如有问题，欢迎随时联系IT支持。
+您好，关于双屏操作的问题，您可以参考案例 [KT00210759] 中的设置方法。在 WeLink 视频会议中，前提是已连接两个显示器，然后打开会议设置，勾选开启双屏模式，并根据需求调整屏幕设置。您先试一下这个方法看看是否能解决问题。
 
-User: 外协人员也是按照红welink是吗？
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:05<00:00,  5.03s/it]
-[TopicStructure] Round 0: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00329408', 'KT00000795', 'KT00007887']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00265124', 'KT00329408', 'KT00000795', 'KT00007887']}, {'topic': 'iOS系统', 'case_ids': ['KT00329408', 'KT00000795', 'KT00007887', 'KT00166506']}]}
-[TopicStructure] Retry 1: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00329408', 'KT00000795', 'KT00007887']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00265124', 'KT00329408', 'KT00000795', 'KT00007887']}, {'topic': 'iOS系统', 'case_ids': ['KT00329408', 'KT00000795', 'KT00007887', 'KT00166506']}]}
-[TopicStructure] Retry 2: 1 nodes
-[TopicStructure Invalid] duplicated case_ids: ['KT00329408', 'KT00000795', 'KT00007887']
-output: {'dimension': '操作系统类型', 'children': [{'topic': 'Android/HarmonyOS系统', 'case_ids': ['KT00265124', 'KT00329408', 'KT00000795', 'KT00007887']}, {'topic': 'iOS系统', 'case_ids': ['KT00329408', 'KT00000795', 'KT00007887', 'KT00166506']}]}
-[TopicStructure Warning] failed split after retries: ['KT00265124', 'KT00329408', 'KT00000795', 'KT00007887', 'KT00166506']
+User: 试了 没用  我想直接换个主机
 
 ╔══════════════ AGENT STATE ══════════════╗
- Query    : refine | 外协人员安装的手机Welink链接获取方式（是否与红Welink一致）
- Trigger  : True
- Evidence : retrieve_new_evidence
- Cases    : KT00265124, KT00329408, KT00000795, KT00007887, KT00166506
+ Query    : reuse | 更换支持双屏操作的主机 U8 A208会议室
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
 
  Topic Tree
- 外协人员安装的手机Welink链接获取方式（是否与红Welink一致）  <案例差异>
- ├─ [KT00265124]
- ├─ [KT00329408]
- ├─ [KT00000795]
- ├─ [KT00007887]
- └─ [KT00166506]
+ 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
+ ├─ 便携机双屏设置  <双屏设置方式>
+ │  ├─ 通过系统显示设置界面操作  [KT00004341]
+ │  └─ 通过键盘快捷键操作  [KT00121279]
+ ├─ 安全PC双屏设置  [KT00013770]
+ ├─ Windows 10系统通用外接显示器设置  [KT00007297]
+ └─ WeLink视频会议双屏模式设置  [KT00210759]
 
- Policy   : ExplainedResponse
- Info     : {'case_id': 'KT00000795'}
+ Policy   : AskClarification
+ Info     : {'dimension': '当前主机类型', 'candidate_values': ['便携机', '安全PC', 'Mini PC', 'HP高配PC', '联想高配PC']}
 ╚══════════════════════════════════════════╝
 
 >>> AGENT RESPONSE
-是的，外协人员也是使用红版WeLink。关于下载和安装红版WeLink手机端的具体操作，可以参考案例 [KT00000795]，里面有详细的指引。您可以通过访问 his.huawei.com 或扫描相关二维码进行下载。如有问题，欢迎随时联系IT支持。
+明白了，您是想直接更换一台支持双屏操作的主机。请问您当前使用的主机类型是什么？例如是便携机、安全PC、Mini PC、HP高配PC，还是联想高配PC？
+
+User: 安全PC
+
+╔══════════════ AGENT STATE ══════════════╗
+ Query    : refine | 更换支持双屏操作的主机 U8 A208会议室 当前使用安全PC
+ Trigger  : False
+ Evidence : reuse_existing_evidence
+ Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
+
+ Topic Tree
+ 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
+ ├─ 便携机双屏设置  <双屏设置方式>
+ │  ├─ 通过系统显示设置界面操作  [KT00004341]
+ │  └─ 通过键盘快捷键操作  [KT00121279]
+ ├─ 安全PC双屏设置  [KT00013770]
+ ├─ Windows 10系统通用外接显示器设置  [KT00007297]
+ └─ WeLink视频会议双屏模式设置  [KT00210759]
+
+ Policy   : CaseRecommendation
+ Info     : {'case_id': 'KT00013770'}
+╚══════════════════════════════════════════╝
+
+>>> AGENT RESPONSE
+好的，针对您当前使用的安全PC，我们推荐参考案例 [KT00013770]。该案例详细说明了安全PC与显示器的接口适配方式以及双屏配置方法，包括不同品牌PC的连接示意图和转接线使用建议。您可以根据自己的设备类型查看对应的解决方案，并到安全PC发放处登记领取所需的转接线或线缆。需要我进一步说明具体步骤吗？
