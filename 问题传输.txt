@@ -1,74 +1,35 @@
-User: 您好，我想换一个主机，我现在这个主机无法支持双屏操作，用不了，我在U8 A208会议室。
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:03<00:00,  3.61s/it]
+User: 人员实时支持
+Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:04<00:00,  4.42s/it]
 [TopicStructure] Round 0: 1 nodes
 [TopicStructure] Round 1: 1 nodes
+[TopicStructure Invalid] duplicated case_ids: ['KT00343240', 'KT00005718']
+output: {'dimension': '会议级别分类', 'children': [{'topic': '特级会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '关键会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '重要会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '普通会议', 'case_ids': ['KT00343240', 'KT00005718']}]}
+[TopicStructure] Retry 1: 1 nodes
+[TopicStructure Invalid] duplicated case_ids: ['KT00343240', 'KT00005718']
+output: {'dimension': '会议级别分类', 'children': [{'topic': '特级会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '关键会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '重要会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '普通会议', 'case_ids': ['KT00343240', 'KT00005718']}]}
+[TopicStructure] Retry 2: 1 nodes
+[TopicStructure Invalid] duplicated case_ids: ['KT00343240', 'KT00005718']
+output: {'dimension': '会议级别分类', 'children': [{'topic': '特级会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '关键会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '重要会议', 'case_ids': ['KT00343240', 'KT00005718']}, {'topic': '普通会议', 'case_ids': ['KT00343240', 'KT00005718']}]}
+[TopicStructure Warning] failed split after retries: ['KT00343240', 'KT00005718']
 
 ╔══════════════ AGENT STATE ══════════════╗
- Query    : rewrite | 更换支持双屏操作的主机 U8 A208会议室
+ Query    : refine | welink视频会议直播链接的人数限制及能否申请IT实时人员支持
  Trigger  : True
  Evidence : retrieve_new_evidence
- Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
+ Cases    : KT00008097, KT00343240, KT00001636, KT00005718, KT00062666
 
  Topic Tree
- 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
- ├─ 便携机双屏设置  <双屏设置方式>
- │  ├─ 通过系统显示设置界面操作  [KT00004341]
- │  └─ 通过键盘快捷键操作  [KT00121279]
- ├─ 安全PC双屏设置  [KT00013770]
- ├─ Windows 10系统通用外接显示器设置  [KT00007297]
- └─ WeLink视频会议双屏模式设置  [KT00210759]
-
- Policy   : CaseRecommendation
- Info     : {'case_id': 'KT00210759'}
-╚══════════════════════════════════════════╝
-
->>> AGENT RESPONSE
-您好，关于双屏操作的问题，您可以参考案例 [KT00210759] 中的设置方法。在 WeLink 视频会议中，前提是已连接两个显示器，然后打开会议设置，勾选开启双屏模式，并根据需求调整屏幕设置。您先试一下这个方法看看是否能解决问题。
-
-User: 试了 没用  我想直接换个主机
-
-╔══════════════ AGENT STATE ══════════════╗
- Query    : reuse | 更换支持双屏操作的主机 U8 A208会议室
- Trigger  : False
- Evidence : reuse_existing_evidence
- Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
-
- Topic Tree
- 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
- ├─ 便携机双屏设置  <双屏设置方式>
- │  ├─ 通过系统显示设置界面操作  [KT00004341]
- │  └─ 通过键盘快捷键操作  [KT00121279]
- ├─ 安全PC双屏设置  [KT00013770]
- ├─ Windows 10系统通用外接显示器设置  [KT00007297]
- └─ WeLink视频会议双屏模式设置  [KT00210759]
+ welink视频会议直播链接的人数限制及能否申请IT实时人员支持  <直播相关的功能类型>
+ ├─ 直播接入人数限制  [KT00008097]
+ ├─ 多讲师直播方案  [KT00001636]
+ ├─ 直播保障申请  <案例差异>
+ │  ├─ [KT00343240]
+ │  └─ [KT00005718]
+ └─ 超500人视频会议与直播联动  [KT00062666]
 
  Policy   : AskClarification
- Info     : {'dimension': '当前主机类型', 'candidate_values': ['便携机', '安全PC', 'Mini PC', 'HP高配PC', '联想高配PC']}
+ Info     : {'dimension': 'IT支撑的具体需求类型', 'candidate_values': ['直播技术支持', '会议扩容支持', '其他定制化服务']}
 ╚══════════════════════════════════════════╝
 
 >>> AGENT RESPONSE
-明白了，您是想直接更换一台支持双屏操作的主机。请问您当前使用的主机类型是什么？例如是便携机、安全PC、Mini PC、HP高配PC，还是联想高配PC？
-
-User: 安全PC
-
-╔══════════════ AGENT STATE ══════════════╗
- Query    : refine | 更换支持双屏操作的主机 U8 A208会议室 当前使用安全PC
- Trigger  : False
- Evidence : reuse_existing_evidence
- Cases    : KT00004341, KT00013770, KT00121279, KT00007297, KT00210759
-
- Topic Tree
- 更换支持双屏操作的主机 U8 A208会议室  <双屏设置的设备类型>
- ├─ 便携机双屏设置  <双屏设置方式>
- │  ├─ 通过系统显示设置界面操作  [KT00004341]
- │  └─ 通过键盘快捷键操作  [KT00121279]
- ├─ 安全PC双屏设置  [KT00013770]
- ├─ Windows 10系统通用外接显示器设置  [KT00007297]
- └─ WeLink视频会议双屏模式设置  [KT00210759]
-
- Policy   : CaseRecommendation
- Info     : {'case_id': 'KT00013770'}
-╚══════════════════════════════════════════╝
-
->>> AGENT RESPONSE
-好的，针对您当前使用的安全PC，我们推荐参考案例 [KT00013770]。该案例详细说明了安全PC与显示器的接口适配方式以及双屏配置方法，包括不同品牌PC的连接示意图和转接线使用建议。您可以根据自己的设备类型查看对应的解决方案，并到安全PC发放处登记领取所需的转接线或线缆。需要我进一步说明具体步骤吗？
+明白了，您需要的是人员实时支持。请问具体是希望IT团队在直播过程中提供现场协助，还是有其他特定的支持需求？可以简单描述一下场景或要求吗？
