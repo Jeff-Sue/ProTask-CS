@@ -1,65 +1,209 @@
-def stop_topic_refinement(node):
-    node["leaf"] = True
-    node["dimension"] = ""
-    node["children"] = []
+def generate_topic_structure(self, query, cases):
+    case_map = case_map_from_cases(cases)
+    case_ids = list(case_map)
+
+    root = {
+        "query": query,
+        "topic": query,
+        "case_ids": case_ids,
+        "leaf": len(case_ids) <= 1,
+        "children": [],
+    }
+
+    if not case_ids:
+        return root
+
+    if len(case_ids) == 1:
+        root["case_id"] = case_ids[0]
+        return root
+
+    frontier = [{
+        "node": root,
+        "case_ids": case_ids,
+        "depth": 0,
+        "parent_path": [],
+    }]
+
+    round_id = 0
+
+    while frontier:
+        print(f"[TopicStructure] Round {round_id}: {len(frontier)} nodes")
+
+        active_frontier = []
+
+        for task in frontier:
+            if task["depth"] >= self.max_topic_depth:
+                print(f"[TopicStructure Warning] max_depth reached: {task['case_ids']}")
+                stop_topic_refinement(task["node"])
+            else:
+                active_frontier.append(task)
+
+        if not active_frontier:
+            break
+
+        # ----------------------------------------------------
+        # First generation
+        # ----------------------------------------------------
+
+        messages = []
+
+        for task in active_frontier:
+            node_cases = [case_map[case_id] for case_id in task["case_ids"]]
+
+            split_input = build_topic_split_input(
+                query=query,
+                cases=node_cases,
+                parent_path=task["parent_path"],
+                depth=task["depth"],
+            )
+
+            messages.append(build_messages(self.topic_prompt, split_input))
+
+        outputs = self.call_llm_batch(messages)
+
+        valid_results = {}
+        retry_tasks = []
+
+        for idx, (task, output) in enumerate(zip(active_frontier, outputs)):
+            valid_split, error = normalize_split(output, task["case_ids"])
+
+            if valid_split:
+                valid_results[idx] = valid_split
+            else:
+                print(f"[TopicStructure Invalid] {error}")
+                print("output:", output, flush=True)
+                retry_tasks.append({
+                    "idx": idx,
+                    "task": task,
+                    "error": error,
+                })
+
+        # ----------------------------------------------------
+        # Retry invalid splits
+        # ----------------------------------------------------
+
+        for attempt in range(1, self.max_topic_retry + 1):
+            if not retry_tasks:
+                break
+
+            print(f"[TopicStructure] Retry {attempt}: {len(retry_tasks)} nodes")
+
+            retry_messages = []
+
+            for item in retry_tasks:
+                task = item["task"]
+                node_cases = [case_map[case_id] for case_id in task["case_ids"]]
+
+                split_input = build_topic_split_input(
+                    query=query,
+                    cases=node_cases,
+                    parent_path=task["parent_path"],
+                    depth=task["depth"],
+                )
+
+                if "duplicated case_ids" in item["error"]:
+                    retry_instruction = (
+                        f"上一次划分失败：{item['error']}。"
+                        "同一个 Case 被分配到多个 Sibling Topics，说明当前 Dimension "
+                        "可能描述的是 Case 内部同时存在的属性，而不能形成互斥的 Case-level Partition。"
+                        "不要通过任意删除、复制或重新分配 Case 来修复。"
+                        "请重新选择一个能够使每个 Case 自然且唯一归属于一个 Sibling Topic 的 Dimension。"
+                    )
+                else:
+                    retry_instruction = (
+                        f"上一次划分未通过结构验证：{item['error']}。"
+                        "请重新生成当前层划分，并确保所有输入 Case 被完整且唯一地分配。"
+                    )
+
+                split_input["retry_instruction"] = retry_instruction
+                retry_messages.append(build_messages(self.topic_prompt, split_input))
+
+            retry_outputs = self.call_llm_batch(retry_messages)
+            next_retry_tasks = []
+
+            for item, output in zip(retry_tasks, retry_outputs):
+                valid_split, error = normalize_split(output, item["task"]["case_ids"])
+
+                if valid_split:
+                    valid_results[item["idx"]] = valid_split
+                else:
+                    print(f"[TopicStructure Invalid] {error}")
+                    print("output:", output, flush=True)
+
+                    next_retry_tasks.append({
+                        "idx": item["idx"],
+                        "task": item["task"],
+                        "error": error,
+                    })
+
+            retry_tasks = next_retry_tasks
+
+        # ----------------------------------------------------
+        # Build next level
+        # ----------------------------------------------------
+
+        next_frontier = []
+
+        for idx, task in enumerate(active_frontier):
+            node = task["node"]
+            valid_split = valid_results.get(idx)
+
+            if not valid_split:
+                print(
+                    "[TopicStructure Warning] "
+                    f"stop refinement after retries: {task['case_ids']}"
+                )
+                stop_topic_refinement(node)
+                continue
+
+            node["leaf"] = False
+            node["dimension"] = valid_split["dimension"]
+            node["children"] = []
+
+            for child_info in valid_split["children"]:
+                child_case_ids = child_info["case_ids"]
+                child_topic = child_info["topic"]
+
+                child_node = {
+                    "topic": child_topic,
+                    "case_ids": child_case_ids,
+                    "leaf": len(child_case_ids) == 1,
+                    "children": [],
+                }
+
+                node["children"].append(child_node)
+
+                if len(child_case_ids) == 1:
+                    child_node["case_id"] = child_case_ids[0]
+                    continue
+
+                next_frontier.append({
+                    "node": child_node,
+                    "case_ids": child_case_ids,
+                    "depth": task["depth"] + 1,
+                    "parent_path": task["parent_path"] + [child_topic],
+                })
+
+        frontier = next_frontier
+        round_id += 1
+
+    return root
 
 
 
 
-def normalize_split(split_result, expected_case_ids):
-    if not isinstance(split_result, dict):
-        return None, "output is not a dict"
+def node_text(node):
+    topic = str(node.get("topic", "")).strip()
+    dimension = str(node.get("dimension", "")).strip()
+    case_ids = normalize_case_ids(node.get("case_ids"))
 
-    dimension = str(split_result.get("dimension", "")).strip()
-    children = split_result.get("children", [])
+    if node.get("leaf"):
+        if case_ids:
+            ids = ", ".join(case_ids)
+            return f"{topic}  [{ids}]" if topic and topic not in case_ids else f"[{ids}]"
+        return topic or "Unknown"
 
-    if not dimension:
-        return None, "missing dimension"
+    if dimension:
+        return f"{topic}  <{dimension}>"
 
-    if not isinstance(children, list) or len(children) < 2:
-        return None, "children must contain at least two groups"
-
-    expected_set = set(expected_case_ids)
-    normalized_children = []
-    observed = []
-
-    for child in children:
-        if not isinstance(child, dict):
-            return None, "child is not a dict"
-
-        topic = str(child.get("topic", "")).strip()
-        case_ids = child.get("case_ids", [])
-
-        if not topic:
-            return None, "child missing topic"
-
-        if not isinstance(case_ids, list) or not case_ids:
-            return None, f"invalid case_ids under topic: {topic}"
-
-        clean_ids = [str(case_id).strip() for case_id in case_ids if str(case_id).strip()]
-
-        unknown_ids = [case_id for case_id in clean_ids if case_id not in expected_set]
-        if unknown_ids:
-            return None, f"unknown case_ids: {unknown_ids}"
-
-        if len(clean_ids) != len(set(clean_ids)):
-            return None, f"duplicated case_ids inside child: {topic}"
-
-        normalized_children.append({
-            "topic": topic,
-            "case_ids": clean_ids,
-        })
-        observed.extend(clean_ids)
-
-    duplicated = list(dict.fromkeys(case_id for case_id in observed if observed.count(case_id) > 1))
-    if duplicated:
-        return None, f"duplicated case_ids: {duplicated}"
-
-    missing = [case_id for case_id in expected_case_ids if case_id not in observed]
-    if missing:
-        return None, f"missing case_ids: {missing}"
-
-    return {
-        "dimension": dimension,
-        "children": normalized_children,
-    }, ""
+    return topic or "Unknown"
