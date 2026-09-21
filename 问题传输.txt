@@ -1,827 +1,725 @@
-CSS = r"""
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --line: #e4e9f0;
-    --soft-line: #edf1f5;
-
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
-
-    --blue: #2563eb;
-    --blue-hover: #1d4ed8;
-    --blue-soft: #eff6ff;
-
-    --green: #16a34a;
-    --green-soft: #ecfdf3;
-
-    --red: #dc2626;
-    --red-soft: #fff1f2;
-
-    --gray-soft: #f7f8fa;
-
-    --shadow: 0 6px 24px rgba(15, 23, 42, 0.055);
-}
-
-
-/* =========================================================
-   PAGE
-========================================================= */
-
-html,
-body {
-    background: var(--bg) !important;
-}
-
-.gradio-container {
-    max-width: 1500px !important;
-    margin: 0 auto !important;
-    padding: 20px 24px 28px !important;
-}
-
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-.hero {
-    background: linear-gradient(135deg, #ffffff, #f8fbff);
-    border: 1px solid var(--line);
-    border-radius: 20px;
-
-    padding: 20px 24px;
-    margin-bottom: 14px;
-
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-
-    box-shadow: var(--shadow);
-}
-
-.hero-tag {
-    color: var(--blue);
-    font-size: 12px;
-    font-weight: 750;
-    margin-bottom: 5px;
-}
+import html
+import json
 
-.hero-title {
-    color: var(--text);
-    font-size: 26px;
-    line-height: 1.2;
-    font-weight: 800;
-}
 
-.hero-desc {
-    color: var(--muted);
-    font-size: 13px;
-    margin-top: 6px;
-}
+# ============================================================
+# Utils
+# ============================================================
 
-.hero-status {
-    color: var(--text2);
-    font-size: 13px;
-    white-space: nowrap;
-}
+def esc(value):
+    if value is None:
+        return ""
+    return html.escape(str(value))
 
-.status-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
 
-    border-radius: 50%;
-    background: #22c55e;
+def normalize_case_ids(value):
+    if value is None:
+        return []
 
-    margin-right: 7px;
-}
+    if isinstance(value, str):
+        value = [value]
 
+    if not isinstance(value, list):
+        return []
 
-/* =========================================================
-   VIEW SWITCH
-========================================================= */
+    return list(
+        dict.fromkeys(
+            str(x).strip()
+            for x in value
+            if str(x).strip()
+        )
+    )
 
-.view-switch-row {
-    margin-bottom: 12px !important;
-    gap: 8px !important;
-}
 
-.view-btn button {
-    min-height: 40px !important;
-    border-radius: 11px !important;
-    font-size: 14px !important;
-    font-weight: 700 !important;
-}
+def get_case_id(case):
+    if not isinstance(case, dict):
+        return ""
 
-.view-active button {
-    background: var(--blue) !important;
-    color: white !important;
-    border-color: var(--blue) !important;
-}
+    return str(
+        case.get("case_id")
+        or case.get("id")
+        or case.get("caseId")
+        or ""
+    ).strip()
 
 
-/* =========================================================
-   PANEL
-========================================================= */
+def get_case_title(case):
+    if not isinstance(case, dict):
+        return ""
 
-.panel-header {
-    margin-bottom: 9px;
-}
+    for key in (
+        "title",
+        "case_title",
+        "name",
+        "question",
+        "problem",
+        "content",
+        "text",
+    ):
+        value = case.get(key)
 
-.panel-title {
-    font-size: 16px;
-    font-weight: 800;
-    color: var(--text);
-}
+        if value:
+            text = str(value).strip()
 
-.panel-subtitle {
-    margin-top: 3px;
-    color: var(--muted);
-    font-size: 12px;
-}
+            if len(text) > 100:
+                text = text[:100] + "..."
 
+            return text
 
-/*
-Important:
-The HTML component itself is the only visual panel.
-No extra nested border/card.
-*/
+    return ""
 
-.chat-panel {
-    height: 610px;
 
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 18px;
+def get_latency_value(latency, *keys):
+    if not isinstance(latency, dict):
+        return None
 
-    padding: 18px;
+    for key in keys:
+        if key in latency:
+            return latency[key]
 
-    overflow-y: auto;
+    return None
 
-    box-shadow: var(--shadow);
-}
 
-.state-panel {
-    height: 610px;
+def fmt_seconds(value):
+    if value is None:
+        return "-"
 
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 18px;
+    try:
+        return f"{float(value):.2f}s"
+    except Exception:
+        return esc(value)
 
-    padding: 16px;
 
-    overflow-y: auto;
+# ============================================================
+# Header
+# ============================================================
 
-    box-shadow: var(--shadow);
-}
+def render_header():
+    return """
+    <div class="hero">
+        <div>
+            <div class="hero-tag">
+                Huawei IT Support · Agent Console
+            </div>
 
+            <div class="hero-title">
+                IT 智能客服 Agent
+            </div>
 
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
+            <div class="hero-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+        </div>
+
+        <div class="hero-status">
+            <span class="status-dot"></span>
+            Agent Online
+        </div>
+    </div>
+    """
 
-.empty-chat {
-    height: 560px;
+
+# ============================================================
+# Chat
+# ============================================================
 
-    display: flex;
-    flex-direction: column;
+def render_empty_chat():
+    return """
+    <div class="empty-chat">
+        <div class="empty-icon">✦</div>
 
-    justify-content: center;
-    align-items: center;
+        <div class="empty-title">
+            开始新的 IT 支持会话
+        </div>
+
+        <div class="empty-desc">
+            输入 IT 问题后，智能客服将根据当前对话状态
+            检索相关案例并生成回复。
+        </div>
+    </div>
+    """
+
 
-    text-align: center;
-}
+def render_chat(history):
+    if not history:
+        return render_empty_chat()
 
-.empty-icon {
-    width: 52px;
-    height: 52px;
+    parts = ['<div class="chat-scroll">']
 
-    border-radius: 15px;
+    for message in history:
+        role = message.get("role", "")
+        content = esc(message.get("content", ""))
 
-    display: flex;
-    justify-content: center;
-    align-items: center;
+        if role == "user":
+            parts.append(
+                f"""
+                <div class="message-row user-row">
 
-    background: var(--blue-soft);
-    color: var(--blue);
+                    <div class="message-bubble user-message">
+                        <div class="message-role">用户</div>
+                        {content}
+                    </div>
 
-    font-size: 23px;
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
 
-    margin-bottom: 15px;
-}
+                </div>
+                """
+            )
 
-.empty-title {
-    font-size: 19px;
-    font-weight: 800;
-    color: var(--text);
-}
+        elif role == "assistant":
+            parts.append(
+                f"""
+                <div class="message-row agent-row">
 
-.empty-desc {
-    margin-top: 7px;
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
 
-    max-width: 420px;
+                    <div class="message-bubble agent-message">
+                        <div class="message-role">IT 智能客服</div>
+                        {content}
+                    </div>
 
-    font-size: 14px;
-    line-height: 1.7;
+                </div>
+                """
+            )
 
-    color: var(--muted);
-}
+    parts.append("</div>")
 
+    return "".join(parts)
 
-/* =========================================================
-   CHAT
-========================================================= */
 
-.chat-scroll {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-}
+# ============================================================
+# Session
+# ============================================================
 
-.message-row {
-    width: 100%;
+def render_session_bar(state):
+    session_id = esc(state.get("session_id", "-"))
+    turn_count = len(state.get("trace", []))
 
-    display: flex;
-    gap: 10px;
+    return f"""
+    <div class="session-bar">
 
-    align-items: flex-start;
-}
+        <div>
+            <span class="status-dot"></span>
+            Running
+        </div>
 
-.user-row {
-    justify-content: flex-end;
-}
+        <div>
+            Session
+            <b>{session_id}</b>
+        </div>
 
-.agent-row {
-    justify-content: flex-start;
-}
+        <div>
+            Turns
+            <b>{turn_count}</b>
+        </div>
 
-.avatar {
-    width: 36px;
-    height: 36px;
+    </div>
+    """
 
-    flex-shrink: 0;
 
-    border-radius: 50%;
+# ============================================================
+# Topic Tree
+# ============================================================
 
-    display: flex;
-    justify-content: center;
-    align-items: center;
+def render_topic_tree(tree):
+    if not tree:
+        return """
+        <div class="state-text">
+            None
+        </div>
+        """
 
-    font-size: 11px;
-    font-weight: 800;
-}
+    parts = ['<div class="topic-tree">']
 
-.user-avatar {
-    background: #dbeafe;
-    color: #1d4ed8;
-}
+    def walk(node, depth=0):
+        topic = esc(node.get("topic", ""))
+        dimension = esc(node.get("dimension", ""))
 
-.agent-avatar {
-    background: #eef1f5;
-    color: #344054;
-}
+        case_ids = normalize_case_ids(
+            node.get("case_ids")
+        )
 
-.message-bubble {
-    max-width: 76%;
+        leaf = bool(node.get("leaf"))
 
-    padding: 12px 15px;
+        cls = "tree-node tree-leaf" if leaf else "tree-node"
 
-    border-radius: 16px;
+        margin = depth * 18
 
-    font-size: 16px;
-    line-height: 1.65;
+        dimension_html = ""
 
-    white-space: pre-wrap;
-    word-break: break-word;
-}
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
+            )
 
-.user-message {
-    background: var(--blue);
-    color: white;
+        case_html = ""
 
-    border-bottom-right-radius: 5px;
-}
+        if leaf and case_ids:
+            case_html = (
+                f'<span class="tree-case">'
+                f'[{esc(", ".join(case_ids))}]'
+                f'</span>'
+            )
+
+        parts.append(
+            f"""
+            <div class="{cls}"
+                 style="margin-left:{margin}px">
+
+                <span class="tree-dot"></span>
+
+                <span class="tree-topic">
+                    {topic or "Unknown"}
+                </span>
+
+                {dimension_html}
+                {case_html}
+
+            </div>
+            """
+        )
+
+        for child in node.get("children", []) or []:
+            walk(child, depth + 1)
+
+    walk(tree)
+
+    parts.append("</div>")
+
+    return "".join(parts)
+
+
+# ============================================================
+# Evidence
+# ============================================================
+
+def render_cases(cases):
+    if not cases:
+        return """
+        <div class="state-text">
+            None
+        </div>
+        """
+
+    parts = []
+
+    for case in cases:
+        cid = esc(get_case_id(case))
+        title = esc(get_case_title(case))
+
+        parts.append(
+            f"""
+            <div class="case-item">
+
+                <div class="case-id">
+                    {cid or "Unknown Case"}
+                </div>
+
+                <div class="case-title">
+                    {title or "No preview"}
+                </div>
+
+            </div>
+            """
+        )
+
+    return "".join(parts)
+
+
+# ============================================================
+# Latency
+# ============================================================
+
+def render_latency(latency):
+    latency = latency or {}
+
+    total = get_latency_value(
+        latency,
+        "total",
+        "total_time",
+        "total_latency",
+    )
+
+    items = [
+        (
+            "Query",
+            get_latency_value(
+                latency,
+                "query",
+                "query_time",
+            ),
+        ),
+        (
+            "Trigger",
+            get_latency_value(
+                latency,
+                "trigger",
+                "trigger_time",
+            ),
+        ),
+        (
+            "RAG",
+            get_latency_value(
+                latency,
+                "rag",
+                "rag_time",
+                "retrieval",
+                "retrieval_time",
+            ),
+        ),
+        (
+            "Topic",
+            get_latency_value(
+                latency,
+                "topic",
+                "topic_time",
+                "topic_structure",
+                "topic_structure_time",
+            ),
+        ),
+        (
+            "Policy",
+            get_latency_value(
+                latency,
+                "policy",
+                "policy_time",
+            ),
+        ),
+        (
+            "Response",
+            get_latency_value(
+                latency,
+                "response",
+                "response_time",
+            ),
+        ),
+    ]
+
+    item_html = []
+
+    for name, value in items:
+        item_html.append(
+            f"""
+            <div class="latency-item">
+                <span>{name}</span>
+                <b>{fmt_seconds(value)}</b>
+            </div>
+            """
+        )
+
+    return f"""
+    <div class="latency-total">
+        {fmt_seconds(total)}
+    </div>
+
+    <div class="latency-grid">
+        {''.join(item_html)}
+    </div>
+    """
+
+
+# ============================================================
+# Current State
+# ============================================================
+
+def render_current_state(state):
+    current = state.get("current_turn")
+
+    if not current:
+        return """
+        <div class="state-empty">
+
+            <div class="state-empty-title">
+                Waiting for interaction
+            </div>
+
+            <div class="state-empty-desc">
+                当前轮执行后，Query、Trigger、Evidence、
+                Topic Structure、Policy 和 Latency
+                将显示在这里。
+            </div>
+
+        </div>
+        """
+
+    query_state = current.get("query_state", {}) or {}
+    trigger_state = current.get("trigger_state", {}) or {}
+    policy_state = current.get("policy_state", {}) or {}
+
+    memory = current.get("memory", {}) or {}
+
+    evidence_state = memory.get(
+        "evidence_state",
+        {}
+    ) or {}
+
+    active_cases = evidence_state.get(
+        "active_cases",
+        []
+    ) or []
+
+    topic_structure = evidence_state.get(
+        "topic_structure",
+        {}
+    ) or {}
+
+    latency = current.get("latency", {}) or {}
+
+    query_mode = esc(
+        query_state.get("query_mode", "-")
+    )
+
+    query_text = esc(
+        query_state.get("query_text", "")
+    )
+
+    trigger = esc(
+        trigger_state.get("trigger", "-")
+    )
+
+    evidence_mode = esc(
+        trigger_state.get("evidence_mode", "-")
+    )
+
+    policy = esc(
+        policy_state.get("label", "-")
+    )
+
+    information = policy_state.get("information")
+
+    if information is None:
+        information_text = "None"
+    elif isinstance(information, (dict, list)):
+        information_text = esc(
+            json.dumps(
+                information,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        information_text = esc(information)
+
+    return f"""
+    <div class="state-section">
+
+        <div class="section-title">
+            Query
+        </div>
+
+        <div class="kv-row">
+            <span>Mode</span>
+            <span class="badge badge-blue">
+                {query_mode}
+            </span>
+        </div>
+
+        <div class="state-label">
+            Query Text
+        </div>
+
+        <div class="state-text">
+            {query_text or "None"}
+        </div>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Evidence Decision
+        </div>
+
+        <div class="kv-row">
+            <span>Trigger</span>
+            <b>{trigger}</b>
+        </div>
+
+        <div class="kv-row">
+            <span>Mode</span>
+            <span class="badge badge-green">
+                {evidence_mode}
+            </span>
+        </div>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Retrieved Cases
+        </div>
+
+        {render_cases(active_cases)}
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Topic Structure
+        </div>
+
+        {render_topic_tree(topic_structure)}
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Policy
+        </div>
+
+        <div class="kv-row">
+            <span>Action</span>
+
+            <span class="badge badge-blue">
+                {policy}
+            </span>
+        </div>
+
+        <div class="state-label">
+            Information
+        </div>
+
+        <div class="state-text">
+            {information_text}
+        </div>
+
+    </div>
+
+
+    <div class="state-section">
+
+        <div class="section-title">
+            Latency
+        </div>
 
-.agent-message {
-    background: #f8fafc;
-    color: var(--text);
+        {render_latency(latency)}
+
+    </div>
+    """
 
-    border: 1px solid var(--soft-line);
-
-    border-bottom-left-radius: 5px;
-}
-
-.message-role {
-    margin-bottom: 4px;
-
-    font-size: 11px;
-    font-weight: 750;
-
-    opacity: .68;
-}
-
-
-/* =========================================================
-   INPUT
-========================================================= */
-
-.chat-input-row {
-    margin-top: 10px !important;
-    gap: 8px !important;
-    align-items: stretch !important;
-}
-
-.chat-input textarea {
-    min-height: 52px !important;
-    max-height: 130px !important;
-
-    padding: 13px 14px !important;
-
-    font-size: 16px !important;
-    line-height: 1.5 !important;
-
-    border-radius: 14px !important;
-}
-
-.send-btn button {
-    min-height: 52px !important;
-
-    border-radius: 14px !important;
-
-    font-size: 15px !important;
-    font-weight: 750 !important;
-}
-
-.secondary-btn button {
-    border-radius: 11px !important;
-}
-
-
-/* =========================================================
-   SESSION BAR
-========================================================= */
-
-.session-bar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-
-    gap: 18px;
-
-    margin-bottom: 10px;
-
-    padding: 10px 13px;
-
-    background: white;
-
-    border: 1px solid var(--line);
-    border-radius: 12px;
-
-    color: var(--muted);
-
-    font-size: 12px;
-}
-
-.session-bar b {
-    color: var(--text2);
-    margin-left: 4px;
-}
-
-
-/* =========================================================
-   DEVELOPER STATE
-========================================================= */
-
-.state-section {
-    padding: 13px 14px;
-
-    margin-bottom: 11px;
-
-    border: 1px solid var(--soft-line);
-    border-radius: 14px;
-
-    background: white;
-}
-
-.section-title {
-    margin-bottom: 10px;
-
-    font-size: 14px;
-    font-weight: 800;
-
-    color: var(--text);
-}
-
-.kv-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-
-    gap: 14px;
-
-    margin: 7px 0;
-
-    font-size: 12px;
-
-    color: var(--muted);
-}
-
-.kv-row b {
-    color: var(--text2);
-    text-align: right;
-}
-
-.state-label {
-    margin-top: 10px;
-    margin-bottom: 5px;
-
-    font-size: 11px;
-    font-weight: 650;
-
-    color: var(--muted);
-}
-
-.state-text {
-    padding: 9px 10px;
-
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    color: var(--text2);
-
-    font-size: 13px;
-    line-height: 1.55;
-
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-
-/* =========================================================
-   BADGES
-========================================================= */
-
-.badge {
-    display: inline-flex;
-    align-items: center;
-
-    padding: 4px 9px;
-
-    border-radius: 999px;
-
-    font-size: 11px;
-    font-weight: 750;
-}
-
-.badge-blue {
-    background: var(--blue-soft);
-    color: #1d4ed8;
-}
-
-.badge-green {
-    background: var(--green-soft);
-    color: #15803d;
-}
-
-.badge-gray {
-    background: #f2f4f7;
-    color: #475467;
-}
-
-
-/* =========================================================
-   CASES
-========================================================= */
-
-.case-item {
-    padding: 9px 10px;
-
-    margin-bottom: 7px;
-
-    background: #fafbfc;
-
-    border: 1px solid var(--soft-line);
-    border-radius: 10px;
-}
-
-.case-id {
-    color: var(--blue);
-
-    font-size: 11px;
-    font-weight: 800;
-}
-
-.case-title {
-    margin-top: 3px;
-
-    color: var(--text2);
-
-    font-size: 12px;
-    line-height: 1.5;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-    padding: 2px 0;
-}
-
-.tree-node {
-    padding: 5px 6px;
-
-    color: var(--text2);
-
-    font-size: 12px;
-    line-height: 1.5;
-}
-
-.tree-dot {
-    display: inline-block;
-
-    width: 6px;
-    height: 6px;
-
-    margin-right: 7px;
-
-    background: #94a3b8;
-
-    border-radius: 50%;
-}
-
-.tree-leaf .tree-dot {
-    background: #22c55e;
-}
-
-.tree-topic {
-    font-weight: 650;
-}
-
-.tree-dimension {
-    margin-left: 6px;
-
-    padding: 2px 5px;
-
-    background: var(--blue-soft);
-
-    border-radius: 5px;
-
-    color: var(--blue);
-
-    font-size: 10px;
-}
-
-.tree-case {
-    margin-left: 6px;
-
-    color: var(--muted);
-
-    font-size: 10px;
-}
-
-
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-total {
-    margin-bottom: 10px;
-
-    color: var(--blue);
-
-    font-size: 26px;
-    font-weight: 850;
-}
-
-.latency-grid {
-    display: grid;
-
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-
-    gap: 6px;
-}
-
-.latency-item {
-    display: flex;
-    justify-content: space-between;
-
-    gap: 8px;
-
-    padding: 8px 9px;
-
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    font-size: 11px;
-}
-
-.latency-item span {
-    color: var(--muted);
-}
-
-.latency-item b {
-    color: var(--text2);
-}
-
-
-/* =========================================================
-   TRACE
-========================================================= */
-
-.trace-item {
-    padding: 11px 12px;
-
-    margin-bottom: 9px;
-
-    background: white;
-
-    border: 1px solid var(--soft-line);
-    border-radius: 12px;
-}
-
-.trace-head {
-    display: flex;
-    justify-content: space-between;
-
-    gap: 10px;
-
-    margin-bottom: 7px;
-
-    font-size: 12px;
-
-    color: var(--muted);
-}
-
-.trace-head b {
-    color: var(--text);
-}
-
-.trace-user {
-    margin-bottom: 8px;
-
-    color: var(--text2);
-
-    font-size: 13px;
-}
-
-.trace-flow {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-
-    gap: 5px;
-}
-
-.flow-arrow {
-    color: #98a2b3;
-    font-size: 11px;
-}
-
-
-/* =========================================================
-   EMPTY STATE / ERROR
-========================================================= */
-
-.state-empty {
-    min-height: 520px;
-
-    display: flex;
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-.state-empty-title {
-    margin-bottom: 6px;
-
-    color: var(--text);
-
-    font-weight: 800;
-}
-
-.state-empty-desc {
-    max-width: 320px;
-
-    font-size: 12px;
-    line-height: 1.6;
-}
-
-.error-card {
-    padding: 13px;
-
-    background: var(--red-soft);
-
-    border: 1px solid #fecdd3;
-    border-radius: 11px;
-
-    color: #be123c;
-}
-
-.error-title {
-    margin-bottom: 5px;
-
-    font-weight: 800;
-}
-
-
-/* =========================================================
-   PREFIX
-========================================================= */
-
-.prefix-box {
-    margin-top: 8px;
-}
-
-.prefix-status {
-    padding: 9px 10px;
-
-    border-radius: 9px;
-
-    font-size: 12px;
-}
-
-.prefix-success {
-    background: var(--green-soft);
-    color: #027a48;
-
-    border: 1px solid #abefc6;
-}
-
-.prefix-error {
-    background: var(--red-soft);
-    color: #be123c;
-
-    border: 1px solid #fecdd3;
-}
-
-
-/* =========================================================
-   GRADIO CLEANUP
-========================================================= */
-
-footer {
-    display: none !important;
-}
-
-
-/*
-Critical: allow developer columns to stay side-by-side.
-Only collapse on genuinely small screens.
-*/
-
-.dev-main-row {
-    flex-wrap: nowrap !important;
-    gap: 14px !important;
-}
-
-.dev-chat-column,
-.dev-state-column {
-    min-width: 0 !important;
-}
-
-
-/* =========================================================
-   RESPONSIVE
-========================================================= */
-
-@media (max-width: 900px) {
-
-    .gradio-container {
-        padding: 12px !important;
-    }
-
-    .hero {
-        flex-direction: column;
-        align-items: flex-start;
-
-        gap: 12px;
-    }
-
-    .dev-main-row {
-        flex-wrap: wrap !important;
-    }
-
-    .chat-panel,
-    .state-panel {
-        height: 520px;
-    }
-
-    .message-bubble {
-        max-width: 88%;
-    }
-
-    .latency-grid {
-        grid-template-columns: 1fr;
-    }
-}
-"""
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(state):
+    trace = state.get("trace", [])
+
+    if not trace:
+        return """
+        <div class="state-empty">
+            <div class="state-empty-title">
+                暂无运行轨迹
+            </div>
+        </div>
+        """
+
+    parts = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
+    ):
+        query = item.get("query_state", {}) or {}
+        trigger = item.get("trigger_state", {}) or {}
+        policy = item.get("policy_state", {}) or {}
+        latency = item.get("latency", {}) or {}
+
+        user = esc(item.get("user", ""))
+
+        query_mode = esc(
+            query.get("query_mode", "-")
+        )
+
+        evidence_mode = esc(
+            trigger.get("evidence_mode", "-")
+        )
+
+        policy_label = esc(
+            policy.get("label", "-")
+        )
+
+        total = get_latency_value(
+            latency,
+            "total",
+            "total_time",
+            "total_latency",
+        )
+
+        turn_id = item.get(
+            "turn_id",
+            len(trace) - index + 1,
+        )
+
+        parts.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+                    <b>Turn {esc(turn_id)}</b>
+                    <span>{fmt_seconds(total)}</span>
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+
+                    <span class="badge badge-blue">
+                        {query_mode}
+                    </span>
+
+                    <span class="flow-arrow">→</span>
+
+                    <span class="badge badge-green">
+                        {evidence_mode}
+                    </span>
+
+                    <span class="flow-arrow">→</span>
+
+                    <span class="badge badge-gray">
+                        {policy_label}
+                    </span>
+
+                </div>
+
+            </div>
+            """
+        )
+
+    return "".join(parts)
+
+
+# ============================================================
+# Prefix Status
+# ============================================================
+
+def render_prefix_status(message, success=True):
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
+    )
+
+    return f"""
+    <div class="prefix-box">
+        <div class="prefix-status {cls}">
+            {esc(message)}
+        </div>
+    </div>
+    """
