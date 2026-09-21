@@ -1,1 +1,65 @@
-Evidence Sufficiency 必须针对 Query 中的用户目标判断。共享对象、场景、症状或关键词，不代表 Evidence 能够支持该 Query。尤其不能用解决“问题原因/症状”的 Case，替代用户明确请求的目标操作。
+def stop_topic_refinement(node):
+    node["leaf"] = True
+    node["dimension"] = ""
+    node["children"] = []
+
+
+
+
+def normalize_split(split_result, expected_case_ids):
+    if not isinstance(split_result, dict):
+        return None, "output is not a dict"
+
+    dimension = str(split_result.get("dimension", "")).strip()
+    children = split_result.get("children", [])
+
+    if not dimension:
+        return None, "missing dimension"
+
+    if not isinstance(children, list) or len(children) < 2:
+        return None, "children must contain at least two groups"
+
+    expected_set = set(expected_case_ids)
+    normalized_children = []
+    observed = []
+
+    for child in children:
+        if not isinstance(child, dict):
+            return None, "child is not a dict"
+
+        topic = str(child.get("topic", "")).strip()
+        case_ids = child.get("case_ids", [])
+
+        if not topic:
+            return None, "child missing topic"
+
+        if not isinstance(case_ids, list) or not case_ids:
+            return None, f"invalid case_ids under topic: {topic}"
+
+        clean_ids = [str(case_id).strip() for case_id in case_ids if str(case_id).strip()]
+
+        unknown_ids = [case_id for case_id in clean_ids if case_id not in expected_set]
+        if unknown_ids:
+            return None, f"unknown case_ids: {unknown_ids}"
+
+        if len(clean_ids) != len(set(clean_ids)):
+            return None, f"duplicated case_ids inside child: {topic}"
+
+        normalized_children.append({
+            "topic": topic,
+            "case_ids": clean_ids,
+        })
+        observed.extend(clean_ids)
+
+    duplicated = list(dict.fromkeys(case_id for case_id in observed if observed.count(case_id) > 1))
+    if duplicated:
+        return None, f"duplicated case_ids: {duplicated}"
+
+    missing = [case_id for case_id in expected_case_ids if case_id not in observed]
+    if missing:
+        return None, f"missing case_ids: {missing}"
+
+    return {
+        "dimension": dimension,
+        "children": normalized_children,
+    }, ""
