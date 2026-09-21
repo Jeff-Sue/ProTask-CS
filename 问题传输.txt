@@ -1,1253 +1,1244 @@
-import html
-import json
-import uuid
-from typing import Any, Dict, List
-
-import gradio as gr
-
-from run import DynamicMultiTurnRuntime
-
-
-# ==================== Runtime ====================
-
-def new_runtime() -> DynamicMultiTurnRuntime:
-    session_id = f"gradio_{uuid.uuid4().hex[:8]}"
-    return DynamicMultiTurnRuntime(
-        dialogue_id=session_id,
-        retrieval_top_k=5,
-        save_history_path=f"saves/gradio_runtime_{session_id}.json",
-        verbose=False,
-    )
-
-
-# ==================== Data Utils ====================
-
-def dataclass_to_dict(obj: Any) -> Any:
-    if isinstance(obj, list):
-        return [dataclass_to_dict(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: dataclass_to_dict(v) for k, v in obj.items()}
-    if hasattr(obj, "__dict__"):
-        return {k: dataclass_to_dict(v) for k, v in obj.__dict__.items()}
-    return obj
-
-
-def short_case_list(cases: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, str]]:
-    output = []
-    for c in cases[:max_items]:
-        output.append({
-            "case_id": str(c.get("case_id", "")),
-            "title": str(c.get("title", "")),
-        })
-    return output
-
-
-def build_state_sections(result) -> Dict[str, Any]:
-    evidence_state = result.state_snapshot.get("evidence_state", {})
-
-    evidence_used = dataclass_to_dict(result.retrieval_output)
-    active_evidence = dataclass_to_dict(evidence_state.get("active_evidence", []))
-    last_retrieved = dataclass_to_dict(evidence_state.get("last_retrieved_cases", []))
-
-    return {
-        "turn_id": result.turn_id,
-        "query": dataclass_to_dict(result.query_state),
-        "trigger": dataclass_to_dict(result.trigger_state),
-        "policy": dataclass_to_dict(result.policy_state),
-        "evidence": {
-            "evidence_used_this_turn": evidence_used,
-            "active_evidence": active_evidence,
-            "last_retrieved_cases": last_retrieved,
-            "evidence_source_query": evidence_state.get("evidence_source_query", ""),
-        },
-        "latency": dataclass_to_dict(result.latency),
-    }
-
-
-# ==================== Render ====================
-
-def render_chat(chat_history: List[Dict[str, str]]) -> str:
-    if not chat_history:
-        return """
-        <div class="empty-chat">
-            <div class="empty-chat-icon">✦</div>
-            <div class="empty-chat-title">欢迎使用华为 IT 动态多轮客服助手</div>
-            <div class="empty-chat-subtitle">
-                请输入一个 IT 问题开始对话，例如：VPN 登录提示账号无权限
-            </div>
-        </div>
-        """
-
-    bubbles = []
-    for msg in chat_history:
-        role = msg["role"]
-        content = html.escape(msg["content"])
-
-        if role == "user":
-            bubbles.append(f"""
-            <div class="msg-row user-row">
-                <div class="msg-avatar user-avatar">U</div>
-                <div class="bubble user-bubble">
-                    <div class="msg-meta">用户</div>
-                    <div class="msg-content">{content}</div>
-                </div>
-            </div>
-            """)
-        else:
-            bubbles.append(f"""
-            <div class="msg-row assistant-row">
-                <div class="msg-avatar assistant-avatar">AI</div>
-                <div class="bubble assistant-bubble">
-                    <div class="msg-meta">客服助手</div>
-                    <div class="msg-content">{content}</div>
-                </div>
-            </div>
-            """)
-
-    return f"""
-    <div class="chat-scroll">
-        {''.join(bubbles)}
-    </div>
-    """
-
-
-def badge(text: Any, kind: str = "default") -> str:
-    text = html.escape(str(text))
-    return f'<span class="badge badge-{kind}">{text}</span>'
-
-
-def render_list_block(items: List[Dict[str, Any]], empty_text: str = "无") -> str:
-    if not items:
-        return f'<div class="mini-empty">{html.escape(empty_text)}</div>'
-
-    cards = []
-    for item in items[:3]:
-        case_id = html.escape(str(item.get("case_id", "")))
-        title = html.escape(str(item.get("title", "")))
-        cards.append(f"""
-        <div class="mini-item">
-            <div class="mini-id">{case_id or "未命名案例"}</div>
-            <div class="mini-title">{title or "无标题"}</div>
-        </div>
-        """)
-    return "".join(cards)
-
-
-def render_state_cards(state: Dict[str, Any]) -> str:
-    if not state:
-        return """
-        <div class="state-empty">
-            <div class="state-empty-title">当前暂无状态</div>
-            <div class="state-empty-desc">
-                当你发送第一条消息后，这里会展示当前轮的 Query、Trigger、Policy、Evidence 和 Latency。
-            </div>
-        </div>
-        """
-
-    query = state.get("query", {})
-    trigger = state.get("trigger", {})
-    policy = state.get("policy", {})
-    evidence = state.get("evidence", {})
-    latency = state.get("latency", {})
-
-    query_mode = query.get("query_mode", "")
-    trigger_flag = trigger.get("trigger", "")
-    evidence_mode = trigger.get("evidence_mode", "")
-    policy_label = policy.get("label", "")
-
-    trigger_kind = "success" if trigger_flag is True else "muted"
-    evidence_kind = {
-        "retrieve_new_evidence": "warning",
-        "reuse_existing_evidence": "info",
-        "no_evidence_needed": "muted",
-    }.get(evidence_mode, "default")
-
-    policy_zh = {
-        "AskMissingSlot": "请求补充信息",
-        "AskClarification": "请求澄清",
-        "ExplainedResponse": "解释性回复",
-        "CaseRecommendation": "案例推荐",
-        "Handoff": "转交处理",
-        "ProcessAcknowledgement": "流程确认",
-    }.get(policy_label, policy_label)
-
-    active_evidence = evidence.get("active_evidence", [])
-    used_evidence = evidence.get("evidence_used_this_turn", [])
-    last_retrieved = evidence.get("last_retrieved_cases", [])
-
-    active_short = short_case_list(active_evidence)
-    used_short = short_case_list(used_evidence)
-    last_short = short_case_list(last_retrieved)
-
-    total_ms = latency.get("total_ms", 0)
-
-    return f"""
-    <div class="state-panel">
-
-        <div class="section-card">
-            <div class="section-head">
-                <div class="section-index">01</div>
-                <div class="section-title-wrap">
-                    <div class="section-title">Query Update</div>
-                    <div class="section-subtitle">本轮 query 改写与状态更新</div>
-                </div>
-            </div>
-            <div class="kv-line">
-                <span class="kv-key">Mode</span>
-                <span class="kv-value">{badge(query_mode or "unknown", "info")}</span>
-            </div>
-            <div class="text-block">
-                <div class="text-label">Query</div>
-                <div class="text-value">{html.escape(str(query.get("query_text", ""))) or "无"}</div>
-            </div>
-            <div class="reason-box">{html.escape(str(query.get("reason", "")) or "无")}</div>
-        </div>
-
-        <div class="section-card">
-            <div class="section-head">
-                <div class="section-index">02</div>
-                <div class="section-title-wrap">
-                    <div class="section-title">Trigger Decision</div>
-                    <div class="section-subtitle">是否需要触发 retrieval 与 evidence 策略</div>
-                </div>
-            </div>
-            <div class="dual-grid">
-                <div class="info-chip">
-                    <div class="info-chip-label">Trigger</div>
-                    <div class="info-chip-value">{badge(trigger_flag, trigger_kind)}</div>
-                </div>
-                <div class="info-chip">
-                    <div class="info-chip-label">Evidence Mode</div>
-                    <div class="info-chip-value">{badge(evidence_mode or "unknown", evidence_kind)}</div>
-                </div>
-            </div>
-            <div class="reason-box">{html.escape(str(trigger.get("reason", "")) or "无")}</div>
-        </div>
-
-        <div class="section-card">
-            <div class="section-head">
-                <div class="section-index">03</div>
-                <div class="section-title-wrap">
-                    <div class="section-title">Policy Decision</div>
-                    <div class="section-subtitle">本轮策略动作与决策原因</div>
-                </div>
-            </div>
-            <div class="kv-line">
-                <span class="kv-key">Policy</span>
-                <span class="kv-value">{badge(policy_label or "unknown", "success")}</span>
-            </div>
-            <div class="text-block">
-                <div class="text-label">中文动作</div>
-                <div class="text-value">{html.escape(str(policy_zh or "无"))}</div>
-            </div>
-            <div class="reason-box">{html.escape(str(policy.get("reason", "")) or "无")}</div>
-        </div>
-
-        <div class="section-card">
-            <div class="section-head">
-                <div class="section-index">04</div>
-                <div class="section-title-wrap">
-                    <div class="section-title">Evidence State</div>
-                    <div class="section-subtitle">本轮使用、缓存中保留、最近检索到的 evidence</div>
-                </div>
-            </div>
-
-            <div class="text-block">
-                <div class="text-label">Source Query</div>
-                <div class="text-value">{html.escape(str(evidence.get("evidence_source_query", ""))) or "无"}</div>
-            </div>
-
-            <div class="mini-section">
-                <div class="mini-section-title">本轮使用 Evidence</div>
-                {render_list_block(used_short, "本轮未使用 evidence")}
-            </div>
-
-            <div class="mini-section">
-                <div class="mini-section-title">Active Evidence</div>
-                {render_list_block(active_short, "当前没有 active evidence")}
-            </div>
-
-            <div class="mini-section">
-                <div class="mini-section-title">Last Retrieved Cases</div>
-                {render_list_block(last_short, "最近没有检索结果")}
-            </div>
-        </div>
-
-        <div class="section-card">
-            <div class="section-head">
-                <div class="section-index">05</div>
-                <div class="section-title-wrap">
-                    <div class="section-title">Latency</div>
-                    <div class="section-subtitle">本轮链路耗时拆解</div>
-                </div>
-            </div>
-
-            <div class="latency-total">
-                <span class="latency-total-num">{total_ms}</span>
-                <span class="latency-total-unit">ms</span>
-            </div>
-
-            <div class="latency-grid">
-                <div class="latency-item"><span>Query</span><b>{latency.get("query_ms", 0)} ms</b></div>
-                <div class="latency-item"><span>Retrieval</span><b>{latency.get("retrieval_ms", 0)} ms</b></div>
-                <div class="latency-item"><span>Trigger</span><b>{latency.get("trigger_ms", 0)} ms</b></div>
-                <div class="latency-item"><span>Policy</span><b>{latency.get("policy_ms", 0)} ms</b></div>
-                <div class="latency-item"><span>Response</span><b>{latency.get("response_ms", 0)} ms</b></div>
-            </div>
-        </div>
-
-    </div>
-    """
-
-
-def render_full_json(state: Dict[str, Any]) -> Dict[str, Any]:
-    return state or {}
-
-
-# ==================== Main Interaction ====================
-
-def chat(user_input: str, chat_history: List[Dict[str, str]], runtime: DynamicMultiTurnRuntime):
-    if runtime is None:
-        runtime = new_runtime()
-
-    if chat_history is None:
-        chat_history = []
-
-    if not user_input or not user_input.strip():
-        return (
-            "",
-            render_chat(chat_history),
-            runtime,
-            chat_history,
-            render_state_cards({}),
-            {},
-        )
-
-    user_input = user_input.strip()
-    result = runtime.step(user_input)
-
-    chat_history = chat_history + [
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": result.response},
-    ]
-
-    state = build_state_sections(result)
-
-    return (
-        "",
-        render_chat(chat_history),
-        runtime,
-        chat_history,
-        render_state_cards(state),
-        render_full_json(state),
-    )
-
-
-def reset_chat():
-    runtime = new_runtime()
-    chat_history = []
-    state = {}
-
-    return (
-        render_chat(chat_history),
-        runtime,
-        chat_history,
-        render_state_cards(state),
-        render_full_json(state),
-    )
-
-
-def runtime_turns_to_chat_history(runtime: DynamicMultiTurnRuntime) -> List[Dict[str, str]]:
-    """
-    将 runtime.state.turns 转换为前端 HTML 渲染使用的 chat_history。
-    """
-    return [
-        {"role": turn.role, "content": turn.text}
-        for turn in runtime.state.turns
-    ]
-
-
-def load_prefix_from_text(
-    prefix_text: str,
-    runtime: DynamicMultiTurnRuntime,
-):
-    """
-    从网页文本框加载历史 prefix。
-
-    输入格式示例：
-    用户: 我的 VPN 登录不了
-    客服: 请问有什么具体报错？
-    用户: 提示账号无权限
-    """
-    if runtime is None:
-        runtime = new_runtime()
-
-    if not prefix_text or not prefix_text.strip():
-        status_html = """
-        <div class="prefix-status prefix-error">
-            请输入历史对话。格式示例：用户: ... / 客服: ...
-        </div>
-        """
-        return (
-            render_chat([]),
-            runtime,
-            [],
-            render_state_cards({}),
-            {},
-            status_html,
-        )
-
-    try:
-        runtime.load_dialogue_prefix_text(prefix_text, reset_state=True)
-        chat_history = runtime_turns_to_chat_history(runtime)
-
-        status_html = f"""
-        <div class="prefix-status prefix-success">
-            已加载历史对话：共 {len(runtime.state.turns)} 条消息，
-            已完成客服轮数 {runtime.state.current_turn_id}。
-            现在可以在左侧输入下一轮用户问题，观察系统回复。
-        </div>
-        """
-
-        return (
-            render_chat(chat_history),
-            runtime,
-            chat_history,
-            render_state_cards({}),
-            {},
-            status_html,
-        )
-
-    except Exception as e:
-        status_html = f"""
-        <div class="prefix-status prefix-error">
-            加载失败：{html.escape(str(e))}
-        </div>
-        """
-        return (
-            render_chat([]),
-            runtime,
-            [],
-            render_state_cards({}),
-            {},
-            status_html,
-        )
-
-
-
-# ==================== CSS ====================
-
-CUSTOM_CSS = """
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --panel-soft: #fafbfc;
-    --line: #e6eaf0;
-    --line-soft: #eef2f6;
-    --text: #0f1728;
-    --text-2: #344054;
-    --text-3: #667085;
-    --blue: #2563eb;
-    --blue-soft: #eff6ff;
-    --green: #16a34a;
-    --green-soft: #effdf3;
-    --amber: #d97706;
-    --amber-soft: #fffbeb;
-    --shadow: 0 10px 30px rgba(15, 23, 40, 0.06);
-    --radius-xl: 24px;
-    --radius-lg: 18px;
-    --radius-md: 14px;
-    --radius-sm: 12px;
-}
-
-html, body {
-    background: var(--bg) !important;
-}
-
-body {
-    color: var(--text);
-}
-
-.gradio-container {
-    max-width: 1320px !important;
-    margin: 0 auto !important;
-    padding-top: 20px !important;
-    padding-bottom: 28px !important;
-}
-
-#hero {
-    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
-    border: 1px solid var(--line);
-    border-radius: 28px;
-    padding: 26px 30px;
-    box-shadow: var(--shadow);
-    margin-bottom: 18px;
-}
-
-.hero-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-}
-
-.hero-title-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-.hero-badge {
-    width: fit-content;
-    padding: 6px 10px;
-    background: var(--blue-soft);
-    color: var(--blue);
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-}
-
-.hero-title {
-    font-size: 30px;
-    font-weight: 800;
-    color: var(--text);
-    line-height: 1.2;
-}
-
-.hero-desc {
-    font-size: 14px;
-    color: var(--text-3);
-    line-height: 1.7;
-    max-width: 780px;
-}
-
-.hero-side {
-    min-width: 220px;
-    display: flex;
-    justify-content: flex-end;
-}
-
-.hero-metrics {
-    background: #f8fafc;
-    border: 1px solid var(--line-soft);
-    border-radius: 18px;
-    padding: 12px 14px;
-    min-width: 200px;
-}
-
-.hero-metrics-title {
-    font-size: 12px;
-    color: var(--text-3);
-    margin-bottom: 8px;
-}
-
-.hero-metrics-item {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-    color: var(--text-2);
-    margin-top: 4px;
-}
-
-.main-card {
-    background: transparent;
-}
-
-.chat-shell, .state-shell {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 24px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-}
-
-.panel-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 22px;
-    border-bottom: 1px solid var(--line-soft);
-    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
-}
-
-.panel-title-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.panel-title {
-    font-size: 18px;
-    font-weight: 700;
-    color: var(--text);
-}
-
-.panel-subtitle {
-    font-size: 13px;
-    color: var(--text-3);
-}
-
-.panel-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 999px;
-    background: #22c55e;
-    box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.12);
-    margin-right: 6px;
-}
-
-.chat-box {
-    height: 640px;
-    overflow-y: auto;
-    background: linear-gradient(180deg, #fcfdff 0%, #f8fbff 100%);
-    padding: 22px;
-}
-
-.chat-scroll {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.empty-chat {
-    height: 580px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-3);
-    text-align: center;
-    padding: 0 40px;
-}
-
-.empty-chat-icon {
-    width: 52px;
-    height: 52px;
-    border-radius: 16px;
-    background: var(--blue-soft);
-    color: var(--blue);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    margin-bottom: 16px;
-    font-weight: 700;
-}
-
-.empty-chat-title {
-    font-size: 22px;
-    font-weight: 800;
-    color: var(--text);
-    margin-bottom: 10px;
-}
-
-.empty-chat-subtitle {
-    font-size: 14px;
-    line-height: 1.8;
-    max-width: 520px;
-}
-
-.msg-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    width: 100%;
-}
-
-.user-row {
-    justify-content: flex-end;
-}
-
-.assistant-row {
-    justify-content: flex-start;
-}
-
-.user-row .bubble {
-    order: 1;
-}
-
-.user-row .msg-avatar {
-    order: 2;
-}
-
-.assistant-row .bubble {
-    order: 2;
-}
-
-.assistant-row .msg-avatar {
-    order: 1;
-}
-
-.msg-avatar {
-    width: 34px;
-    height: 34px;
-    border-radius: 999px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    font-weight: 800;
-    flex-shrink: 0;
-    margin-top: 2px;
-}
-
-.user-avatar {
-    background: #dbeafe;
-    color: #1d4ed8;
-}
-
-.assistant-avatar {
-    background: #e8ecf3;
-    color: #334155;
-}
-
-.bubble {
-    max-width: 76%;
-    border-radius: 18px;
-    padding: 12px 14px;
-    line-height: 1.7;
-    font-size: 14px;
-    word-break: break-word;
-}
-
-.user-bubble {
-    background: linear-gradient(180deg, #2b6ef3 0%, #2563eb 100%);
-    color: white;
-    border-bottom-right-radius: 8px;
-    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.18);
-}
-
-.assistant-bubble {
-    background: #ffffff;
-    color: var(--text);
-    border: 1px solid var(--line-soft);
-    border-bottom-left-radius: 8px;
-}
-
-.msg-meta {
-    font-size: 12px;
-    opacity: 0.78;
-    margin-bottom: 4px;
-    font-weight: 600;
-}
-
-.msg-content {
-    white-space: pre-wrap;
-}
-
-.input-area {
-    padding: 16px 18px 18px 18px;
-    border-top: 1px solid var(--line-soft);
-    background: #ffffff;
-}
-
-.state-html {
-    height: 640px;
-    overflow-y: auto;
-    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
-    padding: 18px;
-}
-
-.state-empty {
-    min-height: 560px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    text-align: center;
-    color: var(--text-3);
-    padding: 0 24px;
-}
-
-.state-empty-title {
-    font-size: 20px;
-    font-weight: 800;
-    color: var(--text);
-    margin-bottom: 10px;
-}
-
-.state-empty-desc {
-    font-size: 14px;
-    line-height: 1.8;
-}
-
-.state-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-}
-
-.section-card {
-    border: 1px solid var(--line-soft);
-    border: 18px;
-    background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
-    padding: 16px;
-}
-
-.section-head {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 14px;
-}
-
-.section-index {
-    width: 38px;
-    height: 38px;
-    border-radius: 12px;
-    background: #f2f6ff;
-    color: var(--blue);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    font-size: 13px;
-    flex-shrink: 0;
-}
-
-.section-title-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-}
-
-.section-title {
-    font-size: 16px;
-    font-weight: 800;
-    color: var(--text);
-}
-
-.section-subtitle {
-    font-size: 12px;
-    color: var(--text-3);
-}
-
-.kv-line {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin: 10px 0;
-}
-
-.kv-key {
-    font-size: 13px;
-    color: var(--text-3);
-}
-
-.kv-value {
-    color: var(--text);
-}
-
-.text-block {
-    margin-top: 12px;
-    padding: 12px 13px;
-    border-radius: 14px;
-    background: #f8fafc;
-    border: 1px solid var(--line-soft);
-}
-
-.text-label {
-    font-size: 12px;
-    color: var(--text-3);
-    margin-bottom: 6px;
-}
-
-.text-value {
-    font-size: 14px;
-    color: var(--text);
-    line-height: 1.6;
-    word-break: break-word;
-}
-
-.reason-box {
-    margin-top: 12px;
-    padding: 12px 13px;
-    border-radius: 14px;
-    background: #fcfcfd;
-    border: 1px dashed #d8e0ea;
-    color: #475467;
-    font-size: 13px;
-    line-height: 1.7;
-    word-break: break-word;
-}
-
-.dual-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-}
-
-.info-chip {
-    padding: 12px;
-    border-radius: 14px;
-    background: #f8fafc;
-    border: 1px solid var(--line-soft);
-}
-
-.info-chip-label {
-    font-size: 12px;
-    color: var(--text-3);
-    margin-bottom: 8px;
-}
-
-.info-chip-value {
-    font-size: 14px;
-    color: var(--text);
-}
-
-.badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 700;
-    border 1px solid transparent;
-}
-
-.badge-default {
-    background: #f3f4f6;
-    color: #475467;
-}
-
-.badge-info {
-    background: #eff6ff;
-    color: #1d4ed8;
-    border-color: #dbeafe;
-}
-
-.badge-success {
-    background: #effdf3;
-    color: #15803d;
-    border-color: #c7f0d5;
-}
-
-.badge-warning {
-    background: #fff7ed;
-    color: #c2410c;
-    border-color: #fed7aa;
-}
-
-.badge-muted {
-    background: #f3f4f6;
-    color: #667085;
-    border-color: #e5e7eb;
-}
-
-.mini-section {
-    margin-top: 14px;
-}
-
-.mini-section-title {
-    font-size: 12px;
-    color: var(--text-3);
-    margin-bottom: 8px;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-}
-
-.mini-item {
-    padding: 10px 12px;
-    border: 1px solid var(--line-soft);
-    background: #fbfcfe;
-    border-radius: 12px;
-    margin-bottom: 8px;
-}
-
-.mini-id {
-    font-size: 12px;
-    color: var(--blue);
-    font-weight: 700;
-    margin-bottom: 4px;
-}
-
-.mini-title {
-    font-size: 13px;
-    color: var(--text-2);
-    line-height: 1.5;
-}
-
-.mini-empty {
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: #f8fafc;
-    color: var(--text-3);
-    font-size: 13px;
-    border: 1px dashed #d8e0ea;
-}
-
-.latency-total {
-    display: flex;
-    align-items: baseline;
-    gap: 6px;
-    margin: 4px 0 14px 0;
-}
-
-.latency-total-num {
-    font-size: 34px;
-    font-weight: 800;
-    color: var(--blue);
-    line-height: 1;
-}
-
-.latency-total-unit {
-    font-size: 14px;
-    color: var(--text-3);
-    font-weight: 700;
-}
-
-.latency-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-}
-
-.latency-item {
-    border: 1px solid var(--line-soft);
-    border-radius: 14px;
-    padding: 12px;
-    background: #f8fafc;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.latency-item span {
-    font-size: 12px;
-    color: var(--text-3);
-}
-
-.latency-item b {
-    font-size: 14px;
-    color: var(--text);
-}
-
-button.primary,
-button[variant="primary"] {
-    border-radius: 14px !important;
-}
-
-
-.prefix-status {
-    border-radius: 14px;
-    padding: 12px 14px;
-    font-size: 13px;
-    line-height: 1.7;
-    margin-top: 10px;
-}
-
-.prefix-success {
-    background: #effdf3;
-    border: 1px solid #abefc6;
-    color: #027a48;
-}
-
-.prefix-error {
-    background: #fff1f3;
-    border: 1px solid #fecdd6;
-    color: #be123c;
-}
-
-.prefix-help {
-    color: var(--text-3);
-    font-size: 13px;
-    line-height: 1.7;
-    margin-bottom: 10px;
-}
-
-
-footer {
-    display: none !important;
-}
-
-@media (max-width: 1100px) {
-    .hero-top {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
-    .hero-side {
-        width: 100%;
-        justify-content: flex-start;
-    }
-
-    .bubble {
-        max-width: 88%;
-    }
-
-    .dual-grid,
-    .latency-grid {
-        grid-template-columns: 1fr;
-    }
-}
+"""
+动态多轮 LLM-prompt Runtime 环境
+
+核心机制：
+1. 动态维护 dialogue_state，而不是每轮重新构造 gold prefix；
+2. 使用 active_evidence 是否为空决定链路：
+   - active_evidence 为空：Query -> Retrieval -> Trigger(use) -> Policy -> Guard -> Response
+   - active_evidence 非空：Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence -> Policy -> Guard -> Response
+3. prompt 文件必须放在当前脚本同级目录下的 prompts/ 文件夹中；
+4. 支持 json_repair 修复 LLM 输出 JSON；
+5. 支持非 debug 模式屏蔽底层 tqdm / print / 全部耗时输出；
+6. 支持连续澄清保护机制，避免无限 AskClarification / AskMissingSlot。
 """
 
+from __future__ import annotations
 
-# ==================== Gradio App ====================
+import contextlib
+import json
+import logging
+import os
+import re
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-with gr.Blocks(
-    title="华为 IT 动态多轮客服助手",
-    css=CUSTOM_CSS,
-    theme=gr.themes.Soft(
-        primary_hue="blue",
-        neutral_hue="slate",
-        radius_size="lg",
-    ),
-) as demo:
-    runtime_state = gr.State(value=new_runtime())
-    chat_history_state = gr.State(value=[])
+# ==================== 可选依赖：json_repair ====================
 
-    gr.HTML("""
-    <div id="hero">
-        <div class="hero-top">
-            <div class="hero-title-wrap">
-                <div class="hero-badge">Huawei IT Support Assistant</div>
-                <div class="hero-title">华为 IT 动态多轮客服助手</div>
-                <div class="hero-desc">
-                    面向多轮 IT 支持场景的动态客服系统，支持 Query Update、Evidence Trigger、Policy Decision 与 Response Generation 的可解释闭环。
-                </div>
-            </div>
-            <div class="hero-side">
-                <div class="hero-metrics">
-                    <div class="hero-metrics-title">系统能力</div>
-                    <div class="hero-metrics-item"><span>多轮状态跟踪</span><b>Enabled</b></div>
-                    <div class="hero-metrics-item"><span>动态证据复用</span><b>Enabled</b></div>
-                    <div class="hero-metrics-item"><span>策略可解释性</span><b>Enabled</b></div>
-                </div>
-            </div>
-        </div>
-    </div>
-    """)
+try:
+    from json_repair import repair_json  # type: ignore
+except Exception:
+    repair_json = None
 
-    with gr.Row(elem_classes=["main-card"]):
-        with gr.Column(scale=7, min_width=680):
-            with gr.Group(elem_classes=["chat-shell"]):
-                gr.HTML("""
-                <div class="panel-header">
-                    <div class="panel-title-wrap">
-                        <div class="panel-title">对话面板</div>
-                        <div class="panel-subtitle">与系统进行多轮交互，左侧展示完整对话过程</div>
-                    </div>
-                    <div class="panel-dot"></div>
-                </div>
-                """)
+# ==================== 输出控制 ====================
 
-                chat_display = gr.HTML(
-                    value=render_chat([]),
-                    elem_classes=["chat-box"],
+@contextlib.contextmanager
+def suppress_stdout_stderr(enabled: bool = True):
+    """
+    非 debug 模式下屏蔽底层 LLM/RAG 函数里的 print、tqdm、耗时输出等。
+    这类输出通常不是 logging，因此单纯设置 logging level 无法关闭。
+    """
+    if not enabled:
+        yield
+        return
+
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
+# ==================== 可选：接入你原工程里的 LLM / RAG ====================
+
+try:
+    import sys
+    sys.path.append(str(Path(__file__).parent.parent.parent))
+    from utils.qwen_api import parallel_inference_without_extra_information  # type: ignore
+    from utils.scu_rag import rag  # type: ignore
+except Exception:
+    parallel_inference_without_extra_information = None
+    rag = None
+
+# ==================== 日志配置 ====================
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ==================== 枚举约束 ====================
+
+ALLOWED_QUERY_MODES = {"none", "reuse", "refine", "rewrite"}
+
+ALLOWED_EVIDENCE_MODES = {
+    "no_evidence_needed",
+    "retrieve_new_evidence",
+    "reuse_existing_evidence",
+}
+
+ALLOWED_POLICY_LABELS = {
+    "AskMissingSlot",
+    "AskClarification",
+    "ExplainedResponse",
+    "CaseRecommendation",
+    "Handoff",
+    "ProcessAcknowledgement",
+}
+
+CLARIFICATION_POLICIES = {"AskClarification", "AskMissingSlot"}
+
+# ==================== 数据结构 ====================
+
+@dataclass
+class DialogueTurn:
+    role: str  # "user" | "assistant"
+    text: str
+
+
+@dataclass
+class RetrievalCase:
+    case_id: str
+    title: str
+    content: str
+
+
+@dataclass
+class QueryState:
+    query_mode: str = "none"
+    query_text: str = ""
+    reason: str = ""
+
+
+@dataclass
+class TriggerState:
+    trigger: bool = False
+    evidence_mode: str = "no_evidence_needed"
+    reason: str = ""
+
+
+@dataclass
+class PolicyState:
+    label: str = "ProcessAcknowledgement"
+    reason: str = ""
+
+
+@dataclass
+class EvidenceState:
+    """
+    active_evidence 是当前已经被 Trigger 判断为可用的知识。
+    本脚本只用 active_evidence 是否为空来决定动态链路。
+    """
+    active_evidence: List[RetrievalCase] = field(default_factory=list)
+    evidence_source_query: str = ""
+    last_retrieved_cases: List[RetrievalCase] = field(default_factory=list)
+
+
+@dataclass
+class DialogueState:
+    dialogue_id: str
+    turns: List[DialogueTurn] = field(default_factory=list)
+    current_turn_id: int = 0
+    query_state: QueryState = field(default_factory=QueryState)
+    trigger_state: TriggerState = field(default_factory=TriggerState)
+    policy_state: PolicyState = field(default_factory=PolicyState)
+    evidence_state: EvidenceState = field(default_factory=EvidenceState)
+    clarification_streak: int = 0
+
+
+@dataclass
+class Latency:
+    query_ms: int = 0
+    retrieval_ms: int = 0
+    trigger_ms: int = 0
+    policy_ms: int = 0
+    response_ms: int = 0
+    total_ms: int = 0
+
+
+@dataclass
+class ClarificationGuardInfo:
+    enabled: bool
+    limit: int
+    before_streak: int
+    after_streak: int
+    applied: bool
+    original_label: str
+    final_label: str
+    reason: str = ""
+
+
+@dataclass
+class TurnResult:
+    dialogue_id: str
+    turn_id: int
+    user_input: str
+    query_state: QueryState
+    evidence_used_this_turn: List[RetrievalCase]
+    trigger_state: TriggerState
+    policy_state: PolicyState
+    response: str
+    latency: Latency
+    clarification_guard: ClarificationGuardInfo
+    state_snapshot: Dict[str, Any]
+
+    @property
+    def retrieval_output(self) -> List[RetrievalCase]:
+        """
+        向后兼容旧版 web_gradio.py。
+        语义上这里更准确叫 evidence_used_this_turn。
+        """
+        return self.evidence_used_this_turn
+
+
+# ==================== Prompt 管理 ====================
+
+# prompt 文件放在当前脚本同级目录下的 prompts/ 文件夹中。
+# 例如：
+# dynamic_multiturn_runtime.py
+# prompts/
+#   dynamic_query.prompt
+#   dynamic_trigger_use.prompt
+#   dynamic_trigger_retrieval.prompt
+#   dynamic_policy.prompt
+#   dynamic_response.prompt
+PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
+
+PROMPT_FILES = {
+    "query": "dynamic_query.prompt",
+    "trigger_use": "dynamic_trigger_use.prompt",
+    "trigger_retrieval": "dynamic_trigger_retrieval.prompt",
+    "policy": "dynamic_policy.prompt",
+    "response": "dynamic_response.prompt",
+}
+
+
+def load_prompt(prompt_name: str, prompt_dir: Path = PROMPT_DIR) -> str:
+    """
+    从当前脚本同级 prompts/ 目录读取动态多轮 prompt。
+    不再使用内置 DEFAULT_PROMPT；如果文件不存在，直接报错，避免误用旧 prompt。
+    """
+    if prompt_name not in PROMPT_FILES:
+        raise KeyError(f"Unknown prompt name: {prompt_name}")
+
+    file_name = PROMPT_FILES[prompt_name]
+    path = prompt_dir / file_name
+
+    if not path.exists():
+        required = "\n".join(f"- {name}" for name in PROMPT_FILES.values())
+        raise FileNotFoundError(
+            f"Prompt file not found: {path}\n"
+            f"Please put the following prompt files under: {prompt_dir}\n"
+            f"{required}"
+        )
+
+    with open(path, "r", encoding="utf-8") as f:
+        prompt = f.read().strip()
+
+    if not prompt:
+        raise ValueError(f"Prompt file is empty: {path}")
+
+    return prompt
+
+
+QUERY_PROMPT = load_prompt("query")
+TRIGGER_USE_PROMPT = load_prompt("trigger_use")
+TRIGGER_RETRIEVAL_PROMPT = load_prompt("trigger_retrieval")
+POLICY_PROMPT = load_prompt("policy")
+RESPONSE_PROMPT = load_prompt("response")
+
+# ==================== 文本格式化 ====================
+
+def format_dialogue_history(turns: Sequence[DialogueTurn]) -> str:
+    if not turns:
+        return "无"
+    role_map = {"user": "用户", "assistant": "客服"}
+    return "\n".join(f"{role_map.get(t.role, t.role)}：{t.text}" for t in turns)
+
+
+def parse_dialogue_prefix_text(prefix_text: str) -> List[Dict[str, str]]:
+    """
+    将文本格式的历史对话 prefix 解析为 turns。
+
+    支持格式：
+    用户: xxx
+    客服: xxx
+    用户：xxx
+    客服：xxx
+
+    也支持英文角色：
+    user: xxx
+    assistant: xxx
+
+    多行内容规则：
+    - 以 用户:/客服:/user:/assistant: 开头的行会开启一个新 turn；
+    - 不以上述前缀开头的非空行，会追加到上一条 turn 的 text 中。
+    """
+    if not prefix_text or not prefix_text.strip():
+        return []
+
+    role_map = {
+        "用户": "user",
+        "客服": "assistant",
+        "user": "user",
+        "assistant": "assistant",
+    }
+
+    turns: List[Dict[str, str]] = []
+    current_role: Optional[str] = None
+    current_lines: List[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_role, current_lines
+        if current_role is not None:
+            text = "\n".join(line.strip() for line in current_lines).strip()
+            if text:
+                turns.append({"role": current_role, "text": text})
+        current_role = None
+        current_lines = []
+
+    for line_no, raw_line in enumerate(prefix_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        matched = False
+        for speaker, role in role_map.items():
+            for sep in [":", "："]:
+                prefix = f"{speaker}{sep}"
+                if line.startswith(prefix):
+                    flush_current()
+                    current_role = role
+                    content = line[len(prefix):].strip()
+                    current_lines = [content] if content else []
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if not matched:
+            if current_role is None:
+                raise ValueError(
+                    f"第 {line_no} 行无法解析：{line}\n"
+                    "请使用格式：用户: ... 或 客服: ..."
                 )
+            current_lines.append(line)
 
-                with gr.Group(elem_classes=["input-area"]):
-                    with gr.Row():
-                        user_box = gr.Textbox(
-                            placeholder="请输入用户问题，例如：VPN 登录提示账号无权限",
-                            show_label=False,
-                            scale=6,
-                            lines=3,
-                        )
-                        send_btn = gr.Button("发送", scale=1, variant="primary")
+    flush_current()
 
-                    reset_btn = gr.Button("清空并重新开始")
+    if not turns:
+        raise ValueError("未解析到任何有效对话轮次。")
 
-                    with gr.Accordion("加载历史对话 Prefix", open=False):
-                        gr.HTML("""
-                        <div class="prefix-help">
-                            输入已有历史对话，系统会将其作为 dialogue history 加载。
-                            格式示例：<br>
-                            用户: 我的 VPN 登录不了<br>
-                            客服: 请问有什么具体报错？<br>
-                            用户: 提示账号无权限 <br>
-                            客服: 请问您是否已经申请了VPN权限？
-                        </div>
-                        """)
-                        prefix_box = gr.Textbox(
-                            placeholder=(
-                                "用户: 我的 VPN 登录不了\n"
-                                "客服: 请问有什么具体报错？\n"
-                                "用户: 提示账号无权限"
-                            ),
-                            show_label=False,
-                            lines=8,
-                        )
-                        load_prefix_btn = gr.Button("加载为历史对话", variant="secondary")
-                        prefix_status = gr.HTML(value="")
+    return turns
 
-        with gr.Column(scale=5, min_width=520):
-            with gr.Group(elem_classes=["state-shell"]):
-                gr.HTML("""
-                <div class="panel-header">
-                    <div class="panel-title-wrap">
-                        <div class="panel-title">当前轮状态</div>
-                        <div class="panel-subtitle">系统内部决策链路与证据状态展示</div>
-                    </div>
-                </div>
-                """)
 
-                state_cards = gr.HTML(
-                    value=render_state_cards({}),
-                    elem_classes=["state-html"],
+def format_cases(cases: Sequence[RetrievalCase]) -> str:
+    if not cases:
+        return "无"
+    parts = []
+    for i, c in enumerate(cases, start=1):
+        parts.append(
+            f"{i}. case_id: {c.case_id}\n"
+            f"   title: {c.title}\n"
+            f"   content: {c.content}"
+        )
+    return "\n".join(parts)
+
+
+def format_query_state(query_state: QueryState) -> str:
+    return (
+        f"query_mode: {query_state.query_mode}\n"
+        f"query_text: {query_state.query_text}\n"
+        f"reason: {query_state.reason}"
+    )
+
+
+def format_trigger_state(trigger_state: TriggerState) -> str:
+    return (
+        f"trigger: {str(trigger_state.trigger).lower()}\n"
+        f"evidence_mode: {trigger_state.evidence_mode}\n"
+        f"reason: {trigger_state.reason}"
+    )
+
+
+def format_policy_state(policy_state: PolicyState) -> str:
+    return f"label: {policy_state.label}\nreason: {policy_state.reason}"
+
+
+# ==================== LLM 调用层 ====================
+
+def _extract_text_from_parallel_result(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        for key in ["content", "text", "response", "output"]:
+            if key in result and isinstance(result[key], str):
+                return result[key]
+    if isinstance(result, list) and result:
+        first = result[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, dict):
+            for key in ["content", "text", "response", "output"]:
+                if key in first and isinstance(first[key], str):
+                    return first[key]
+    raise ValueError(f"Unrecognized LLM result format: {type(result)} -> {result}")
+
+
+def call_llm_text(messages: List[Dict[str, str]], quiet: bool = True) -> str:
+    """
+    默认接入原工程 parallel_inference_without_extra_information。
+    如果你本地没有 parallel_inference_without_extra_information，请替换这里。
+
+    quiet=True 时会屏蔽 parallel_inference_without_extra_information 内部的 tqdm/print/耗时输出。
+    """
+    if parallel_inference_without_extra_information is None:
+        raise RuntimeError(
+            "parallel_inference_without_extra_information is unavailable. "
+            "Please replace call_llm_text with your own local/API LLM call."
+        )
+
+    item = {"messages": messages}
+    with suppress_stdout_stderr(enabled=quiet):
+        result = parallel_inference_without_extra_information([item])
+    return _extract_text_from_parallel_result(result).strip()
+
+
+def strip_code_fence(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            first = lines[0].strip().lower()
+            if first in {"```", "```json", "```javascript", "```js"}:
+                return "\n".join(lines[1:-1]).strip()
+    return text
+
+
+def extract_json_object(text: str) -> str:
+    """
+    尽量从 LLM 输出中抽取最外层 JSON object。
+    可处理：
+    - 前后夹杂说明文字
+    - ```json fenced block
+    - 多余空白
+    """
+    text = strip_code_fence(text).strip()
+
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1].strip()
+
+    return text
+
+
+def save_json_decode_error(raw_text: str, cleaned_text: str, error: Exception) -> None:
+    error_dir = Path("json_decode_errors")
+    error_dir.mkdir(exist_ok=True)
+    timestamp = int(time.time() * 1000)
+    path = error_dir / f"json_error_{timestamp}.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("==== JSON DECODE ERROR ====\n")
+        f.write(str(error))
+        f.write("\n\n==== RAW TEXT ====\n")
+        f.write(raw_text)
+        f.write("\n\n==== CLEANED TEXT ====\n")
+        f.write(cleaned_text)
+    logger.error("Bad JSON saved to %s", path)
+
+
+def call_llm_json(messages: List[Dict[str, str]], quiet: bool = True) -> Dict[str, Any]:
+    raw_text = call_llm_text(messages, quiet=quiet)
+    cleaned = extract_json_object(raw_text)
+
+    try:
+        return json.loads(cleaned)
+    except Exception as first_error:
+        if repair_json is not None:
+            try:
+                repaired = repair_json(cleaned)
+                if isinstance(repaired, str):
+                    return json.loads(repaired)
+                if isinstance(repaired, dict):
+                    return repaired
+            except Exception as repair_error:
+                save_json_decode_error(raw_text, cleaned, repair_error)
+                raise repair_error
+
+        save_json_decode_error(raw_text, cleaned, first_error)
+        raise first_error
+
+
+# ==================== Retriever ====================
+
+def default_retriever(query_text: str, dialogue_history: str) -> List[Dict[str, str]]:
+    """
+    默认调用原工程 rag。
+    返回格式需要兼容：
+    [
+      {"case_id": "...", "title": "...", "content": "..."},
+      ...
+    ]
+    """
+    if rag is None:
+        logger.warning("rag is unavailable. Return empty evidence.")
+        return []
+    return rag(query_text, dialogue_history, "true")
+
+
+def normalize_cases(raw_cases: Sequence[Dict[str, Any]], top_k: int = 5) -> List[RetrievalCase]:
+    cases: List[RetrievalCase] = []
+    for case in list(raw_cases)[:top_k]:
+        cases.append(
+            RetrievalCase(
+                case_id=str(case.get("case_id", case.get("caseId", ""))),
+                title=str(case.get("title", "")),
+                content=str(case.get("content", "")),
+            )
+        )
+    return cases
+
+
+# ==================== 输出解析与校验 ====================
+
+def parse_query_state(raw: Dict[str, Any]) -> QueryState:
+    state = QueryState(
+        query_mode=str(raw.get("query_mode", "none")),
+        query_text=str(raw.get("query_text", "") or ""),
+        reason=str(raw.get("reason", "") or ""),
+    )
+    if state.query_mode not in ALLOWED_QUERY_MODES:
+        raise ValueError(f"Invalid query_mode: {state.query_mode}")
+    if state.query_mode == "none" and state.query_text.strip():
+        raise ValueError("query_mode=none 时 query_text 必须为空")
+    if state.query_mode != "none" and not state.query_text.strip():
+        raise ValueError("query_mode 非 none 时 query_text 不能为空")
+    return state
+
+
+def parse_trigger_state(raw: Dict[str, Any], active_evidence_empty: bool) -> TriggerState:
+    trigger = raw.get("trigger", False)
+    if not isinstance(trigger, bool):
+        raise ValueError(f"trigger must be bool, got: {trigger}")
+
+    state = TriggerState(
+        trigger=trigger,
+        evidence_mode=str(raw.get("evidence_mode", "no_evidence_needed")),
+        reason=str(raw.get("reason", "") or ""),
+    )
+    if state.evidence_mode not in ALLOWED_EVIDENCE_MODES:
+        raise ValueError(f"Invalid evidence_mode: {state.evidence_mode}")
+    if not state.trigger and state.evidence_mode != "no_evidence_needed":
+        raise ValueError("trigger=False 时 evidence_mode 必须是 no_evidence_needed")
+    if state.trigger and state.evidence_mode == "no_evidence_needed":
+        raise ValueError("trigger=True 时 evidence_mode 不能是 no_evidence_needed")
+
+    if active_evidence_empty and state.evidence_mode == "reuse_existing_evidence":
+        raise ValueError("active_evidence 为空时不能输出 reuse_existing_evidence")
+
+    return state
+
+
+def parse_policy_state(raw: Dict[str, Any]) -> PolicyState:
+    state = PolicyState(
+        label=str(raw.get("label", "ProcessAcknowledgement")),
+        reason=str(raw.get("reason", "") or ""),
+    )
+    if state.label not in ALLOWED_POLICY_LABELS:
+        raise ValueError(f"Invalid policy label: {state.label}")
+    return state
+
+
+# ==================== 动态 Runtime ====================
+
+class DynamicMultiTurnRuntime:
+    def __init__(
+        self,
+        dialogue_id: str = "dynamic_dialogue",
+        retriever: Callable[[str, str], List[Dict[str, str]]] = default_retriever,
+        retrieval_top_k: int = 5,
+        save_history_path: Optional[str] = None,
+        verbose: bool = False,
+        clarification_limit: int = 3,
+        enable_clarification_guard: bool = True,
+    ) -> None:
+        self.state = DialogueState(dialogue_id=dialogue_id)
+        self.retriever = retriever
+        self.retrieval_top_k = retrieval_top_k
+        self.save_history_path = save_history_path
+        self.verbose = verbose
+        self.clarification_limit = clarification_limit
+        self.enable_clarification_guard = enable_clarification_guard
+        self.turn_results: List[TurnResult] = []
+
+    # ---------- 对外主入口 ----------
+
+    def step(self, user_input: str) -> TurnResult:
+        """
+        动态多轮环境的一轮执行。
+        输入用户新 utterance，输出当前轮系统回复和完整模块状态。
+        """
+        total_start = time.time()
+        self.state.current_turn_id += 1
+        turn_id = self.state.current_turn_id
+        if self.verbose:
+            logger.info("Processing dynamic turn %s", turn_id)
+
+        # 0. 追加用户输入
+        self.state.turns.append(DialogueTurn(role="user", text=user_input))
+
+        # 1. Query Update
+        query_state, query_ms = self.run_query_update(user_input=user_input)
+        self.state.query_state = query_state
+
+        retrieval_ms = 0
+        response_cases: List[RetrievalCase] = []
+
+        # query_mode=none 时，不走检索，也不激活 evidence
+        if query_state.query_mode == "none":
+            trigger_state = TriggerState(
+                trigger=False,
+                evidence_mode="no_evidence_needed",
+                reason="当前用户输入未形成业务检索意图。",
+            )
+            trigger_ms = 0
+            self.state.trigger_state = trigger_state
+
+        else:
+            # 2. 根据 active_evidence 是否为空决定链路
+            if not self.state.evidence_state.active_evidence:
+                # Cold-start: Query -> Retrieval -> Trigger(use)
+                # retrieved_cases 先只作为 Trigger 的判断输入；只有 Trigger=true 时才进入 Policy/Response。
+                retrieved_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
+                self.state.evidence_state.last_retrieved_cases = retrieved_cases
+
+                trigger_state, trigger_ms = self.run_trigger_use(
+                    retrieved_cases=retrieved_cases,
                 )
+                self.state.trigger_state = trigger_state
 
-                with gr.Accordion("查看完整 JSON 状态", open=False):
-                    state_json = gr.JSON(value={}, label=None)
+                # Trigger 判断新检索 evidence 可用，则写入 active_evidence，并作为本轮可用 evidence。
+                if trigger_state.trigger and trigger_state.evidence_mode == "retrieve_new_evidence":
+                    self.state.evidence_state.active_evidence = retrieved_cases
+                    self.state.evidence_state.evidence_source_query = query_state.query_text
+                    response_cases = retrieved_cases
+                else:
+                    # 和 dynamic_trigger_use.prompt 对齐：trigger=false 时，本轮不使用 retrieved evidence。
+                    response_cases = []
 
-    send_btn.click(
-        fn=chat,
-        inputs=[user_box, chat_history_state, runtime_state],
-        outputs=[
-            user_box,
-            chat_display,
-            runtime_state,
-            chat_history_state,
-            state_cards,
-            state_json,
-        ],
+            else:
+                # Stateful: Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence
+                trigger_state, trigger_ms = self.run_trigger_retrieval()
+                self.state.trigger_state = trigger_state
+
+                if trigger_state.evidence_mode == "retrieve_new_evidence":
+                    response_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
+                    self.state.evidence_state.last_retrieved_cases = response_cases
+                    self.state.evidence_state.active_evidence = response_cases
+                    self.state.evidence_state.evidence_source_query = query_state.query_text
+
+                elif trigger_state.evidence_mode == "reuse_existing_evidence":
+                    response_cases = list(self.state.evidence_state.active_evidence)
+                    retrieval_ms = 0
+
+                elif trigger_state.evidence_mode == "no_evidence_needed":
+                    response_cases = []
+                    retrieval_ms = 0
+
+                else:
+                    raise ValueError(f"Unexpected evidence_mode: {trigger_state.evidence_mode}")
+
+        # 3. Policy
+        policy_state, policy_ms = self.run_policy(response_cases=response_cases)
+
+        # 4. Clarification Guard：Policy 后、Response 前
+        policy_state, response_cases, guard_info = self.apply_clarification_guard(
+            policy_state=policy_state,
+            response_cases=response_cases,
+        )
+        self.state.policy_state = policy_state
+
+        # 5. Response
+        response, response_ms = self.run_response(response_cases=response_cases)
+
+        # 6. 追加客服回复
+        self.state.turns.append(DialogueTurn(role="assistant", text=response))
+
+        total_ms = int((time.time() - total_start) * 1000)
+        latency = Latency(
+            query_ms=query_ms,
+            retrieval_ms=retrieval_ms,
+            trigger_ms=trigger_ms,
+            policy_ms=policy_ms,
+            response_ms=response_ms,
+            total_ms=total_ms,
+        )
+
+        result = TurnResult(
+            dialogue_id=self.state.dialogue_id,
+            turn_id=turn_id,
+            user_input=user_input,
+            query_state=query_state,
+            evidence_used_this_turn=response_cases,
+            trigger_state=self.state.trigger_state,
+            policy_state=policy_state,
+            response=response,
+            latency=latency,
+            clarification_guard=guard_info,
+            state_snapshot=self.snapshot_state(),
+        )
+
+        self.turn_results.append(result)
+        self._autosave()
+        return result
+
+    # ---------- Clarification Guard ----------
+
+    def apply_clarification_guard(
+        self,
+        policy_state: PolicyState,
+        response_cases: List[RetrievalCase],
+    ) -> Tuple[PolicyState, List[RetrievalCase], ClarificationGuardInfo]:
+        """
+        连续澄清保护机制：
+        - 统计连续 AskClarification / AskMissingSlot；
+        - 达到 clarification_limit 时，不允许继续追问；
+        - 强制进入 ExplainedResponse 或 Handoff；
+        - 如果已有 active_evidence 但本轮 response_cases 为空，可复用 active_evidence 推进解释。
+        """
+        before = self.state.clarification_streak
+        original_label = policy_state.label
+
+        if not self.enable_clarification_guard:
+            # guard 关闭时，仍正常维护 streak，方便观测
+            after = before + 1 if policy_state.label in CLARIFICATION_POLICIES else 0
+            self.state.clarification_streak = after
+            return policy_state, response_cases, ClarificationGuardInfo(
+                enabled=False,
+                limit=self.clarification_limit,
+                before_streak=before,
+                after_streak=after,
+                applied=False,
+                original_label=original_label,
+                final_label=policy_state.label,
+                reason="连续澄清保护机制已关闭。",
+            )
+
+        if policy_state.label in CLARIFICATION_POLICIES:
+            candidate_streak = before + 1
+        else:
+            candidate_streak = 0
+
+        if candidate_streak < self.clarification_limit:
+            self.state.clarification_streak = candidate_streak
+            return policy_state, response_cases, ClarificationGuardInfo(
+                enabled=True,
+                limit=self.clarification_limit,
+                before_streak=before,
+                after_streak=candidate_streak,
+                applied=False,
+                original_label=original_label,
+                final_label=policy_state.label,
+                reason="未达到连续澄清保护阈值。",
+            )
+
+        # 达到阈值：不允许继续 AskClarification / AskMissingSlot
+        applied = True
+        forced_cases = response_cases
+
+        if response_cases:
+            forced_policy = PolicyState(
+                label="ExplainedResponse",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
+                    "需基于本轮可用 evidence 给出阶段性解释或处理建议。"
+                ),
+            )
+        elif self.state.evidence_state.active_evidence:
+            forced_cases = list(self.state.evidence_state.active_evidence)
+            forced_policy = PolicyState(
+                label="ExplainedResponse",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
+                    "需复用已有 active_evidence 推进处理。"
+                ),
+            )
+        else:
+            forced_policy = PolicyState(
+                label="Handoff",
+                reason=(
+                    f"已连续 {candidate_streak} 轮澄清/补槽仍无法形成可用处理方案，"
+                    "需转交人工或后台进一步处理。"
+                ),
+            )
+
+        # 强制推进后，重置 streak
+        self.state.clarification_streak = 0
+
+        return forced_policy, forced_cases, ClarificationGuardInfo(
+            enabled=True,
+            limit=self.clarification_limit,
+            before_streak=before,
+            after_streak=0,
+            applied=applied,
+            original_label=original_label,
+            final_label=forced_policy.label,
+            reason=forced_policy.reason,
+        )
+
+    # ---------- 各模块 ----------
+
+    def run_query_update(self, user_input: str) -> Tuple[QueryState, int]:
+        start = time.time()
+        user_prompt = f"""
+下面是当前动态多轮客服对话状态。
+
+【完整对话历史】
+{format_dialogue_history(self.state.turns)}
+
+【上一轮 query 状态】
+{format_query_state(self.state.query_state)}
+
+【用户最新输入】
+{user_input}
+
+请输出当前轮 query 状态 JSON。
+""".strip()
+
+        messages = [
+            {"role": "system", "content": QUERY_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = call_llm_json(messages, quiet=not self.verbose)
+        output = parse_query_state(raw)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return output, elapsed_ms
+
+    def run_retrieval(self, query_text: str) -> Tuple[List[RetrievalCase], int]:
+        start = time.time()
+        dialogue_history = format_dialogue_history(self.state.turns)
+        with suppress_stdout_stderr(enabled=not self.verbose):
+            raw_cases = self.retriever(query_text, dialogue_history)
+        cases = normalize_cases(raw_cases, top_k=self.retrieval_top_k)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return cases, elapsed_ms
+
+    def run_trigger_use(self, retrieved_cases: List[RetrievalCase]) -> Tuple[TriggerState, int]:
+        """
+        active_evidence 为空时使用。
+        此时 Retrieval 已经发生，Trigger 判断 retrieved evidence 是否可用。
+        """
+        start = time.time()
+        user_prompt = f"""
+下面是当前动态多轮客服对话状态。
+
+【完整对话历史】
+{format_dialogue_history(self.state.turns)}
+
+【当前 query 状态】
+{format_query_state(self.state.query_state)}
+
+【当前新检索 retrieved evidence】
+{format_cases(retrieved_cases)}
+
+【当前 active evidence】
+无
+
+请判断 retrieved evidence 是否可用于当前轮客服回复，并输出 Trigger JSON。
+""".strip()
+
+        messages = [
+            {"role": "system", "content": TRIGGER_USE_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = call_llm_json(messages, quiet=not self.verbose)
+        output = parse_trigger_state(raw, active_evidence_empty=True)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return output, elapsed_ms
+
+    def run_trigger_retrieval(self) -> Tuple[TriggerState, int]:
+        """
+        active_evidence 非空时使用。
+        Trigger 基于 previous active_evidence 判断复用、重新检索或不使用 evidence。
+        """
+        start = time.time()
+        user_prompt = f"""
+下面是当前动态多轮客服对话状态。
+
+【完整对话历史】
+{format_dialogue_history(self.state.turns)}
+
+【当前 query 状态】
+{format_query_state(self.state.query_state)}
+
+【已有 active evidence】
+{format_cases(self.state.evidence_state.active_evidence)}
+
+【active evidence 来源 query】
+{self.state.evidence_state.evidence_source_query or "无"}
+
+请判断当前轮是否需要使用知识、复用已有 evidence 或重新检索，并输出 Trigger JSON。
+""".strip()
+
+        messages = [
+            {"role": "system", "content": TRIGGER_RETRIEVAL_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = call_llm_json(messages, quiet=not self.verbose)
+        output = parse_trigger_state(raw, active_evidence_empty=False)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return output, elapsed_ms
+
+    def run_policy(self, response_cases: List[RetrievalCase]) -> Tuple[PolicyState, int]:
+        start = time.time()
+        user_prompt = f"""
+下面是当前动态多轮客服对话状态。
+
+【完整对话历史】
+{format_dialogue_history(self.state.turns)}
+
+【当前 query 状态】
+{format_query_state(self.state.query_state)}
+
+【当前 trigger 状态】
+{format_trigger_state(self.state.trigger_state)}
+
+【本轮可用于决策的 evidence】
+{format_cases(response_cases)}
+
+请判断当前轮客服最应该采取的 policy，并输出 Policy JSON。
+""".strip()
+
+        messages = [
+            {"role": "system", "content": POLICY_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = call_llm_json(messages, quiet=not self.verbose)
+        output = parse_policy_state(raw)
+        elapsed_ms = int((time.time() - start) * 1000)
+        return output, elapsed_ms
+
+    def run_response(self, response_cases: List[RetrievalCase]) -> Tuple[str, int]:
+        start = time.time()
+        user_prompt = f"""
+下面是当前动态多轮客服对话状态。
+
+【完整对话历史】
+{format_dialogue_history(self.state.turns)}
+
+【当前 query 状态】
+{format_query_state(self.state.query_state)}
+
+【当前 trigger 状态】
+{format_trigger_state(self.state.trigger_state)}
+
+【当前 policy 状态】
+{format_policy_state(self.state.policy_state)}
+
+【本轮可用于回复的 evidence】
+{format_cases(response_cases)}
+
+请生成当前轮客服回复。
+""".strip()
+
+        messages = [
+            {"role": "system", "content": RESPONSE_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = call_llm_text(messages, quiet=not self.verbose).strip()
+        elapsed_ms = int((time.time() - start) * 1000)
+        return response, elapsed_ms
+
+    # ---------- 状态与保存 ----------
+
+    def snapshot_state(self) -> Dict[str, Any]:
+        return {
+            "dialogue_id": self.state.dialogue_id,
+            "current_turn_id": self.state.current_turn_id,
+            "dialogue_history": [asdict(t) for t in self.state.turns],
+            "query_state": asdict(self.state.query_state),
+            "trigger_state": asdict(self.state.trigger_state),
+            "policy_state": asdict(self.state.policy_state),
+            "evidence_state": asdict(self.state.evidence_state),
+            "clarification_streak": self.state.clarification_streak,
+            "clarification_guard": {
+                "enabled": self.enable_clarification_guard,
+                "limit": self.clarification_limit,
+            },
+        }
+
+    def load_dialogue_prefix(
+        self,
+        turns: List[Dict[str, str]],
+        reset_state: bool = True,
+        dialogue_id: Optional[str] = None,
+    ) -> None:
+        """
+        直接加载历史 prefix，不重放模块。
+
+        适用场景：
+        - 已有前 n 轮真实对话；
+        - 不希望模型重新生成历史客服回复；
+        - 只想把这些历史作为 dialogue_history，
+          然后调用 step(current_user_input) 观察第 n+1 轮表现。
+
+        turns 格式：
+        [
+            {"role": "user", "text": "..."},
+            {"role": "assistant", "text": "..."},
+            ...
+        ]
+
+        注意：
+        - 该方法只写入历史文本；
+        - 不会重建 query_state / trigger_state / policy_state / active_evidence；
+        - current_turn_id 会按历史中 assistant 轮数设置；
+        - clarification_streak 会重置为 0，因为没有重放 policy，无法可靠恢复历史 streak。
+        """
+        target_dialogue_id = dialogue_id or self.state.dialogue_id
+
+        if reset_state:
+            self.reset(dialogue_id=target_dialogue_id)
+
+        normalized_turns: List[DialogueTurn] = []
+        for idx, turn in enumerate(turns):
+            role = str(turn.get("role", "")).strip()
+            text = str(turn.get("text", "") or "")
+
+            if role not in {"user", "assistant"}:
+                raise ValueError(
+                    f"Invalid role at turns[{idx}]: {role}. "
+                    "Expected 'user' or 'assistant'."
+                )
+            if not text.strip():
+                raise ValueError(f"Empty text at turns[{idx}]")
+
+            normalized_turns.append(DialogueTurn(role=role, text=text))
+
+        self.state.turns = normalized_turns
+
+        # current_turn_id 表示已经完成/经历过的客服目标轮数。
+        # 在动态 step() 中，每次新用户输入会 +1，所以这里设置为历史 assistant 数量。
+        self.state.current_turn_id = sum(
+            1 for turn in self.state.turns if turn.role == "assistant"
+        )
+
+        # 直接加载 prefix 不重建中间状态，因此清空这些状态，避免沿用旧对话状态。
+        self.state.query_state = QueryState()
+        self.state.trigger_state = TriggerState()
+        self.state.policy_state = PolicyState()
+        self.state.evidence_state = EvidenceState()
+        self.state.clarification_streak = 0
+
+        # 直接加载 prefix 后，旧 turn_results 不再对应当前状态。
+        self.turn_results = []
+        self._autosave()
+
+    def load_dialogue_prefix_text(
+        self,
+        prefix_text: str,
+        reset_state: bool = True,
+        dialogue_id: Optional[str] = None,
+    ) -> None:
+        """
+        从“用户:/客服:”文本格式直接加载历史 prefix，不重放模块。
+
+        示例：
+        用户: 我的 VPN 登录不了
+        客服: 请问有什么具体报错？
+        用户: 提示账号无权限
+
+        加载后可继续调用：
+        result = runtime.step("我已经申请过权限了")
+        """
+        turns = parse_dialogue_prefix_text(prefix_text)
+        self.load_dialogue_prefix(
+            turns=turns,
+            reset_state=reset_state,
+            dialogue_id=dialogue_id,
+        )
+
+    def reset(self, dialogue_id: Optional[str] = None) -> None:
+        dialogue_id = dialogue_id or self.state.dialogue_id
+        self.state = DialogueState(dialogue_id=dialogue_id)
+        self.turn_results = []
+
+    def save(self, output_path: str) -> None:
+        data = [asdict(r) for r in self.turn_results]
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Dynamic runtime results saved to %s", output_path)
+
+    def _autosave(self) -> None:
+        if self.save_history_path:
+            self.save(self.save_history_path)
+
+
+# ==================== 命令行交互环境 ====================
+
+def print_turn_result(result: TurnResult) -> None:
+    print("\n" + "=" * 80)
+    print(f"Turn {result.turn_id}")
+    print("-" * 80)
+    print(f"用户输入：{result.user_input}")
+    print("\n[Query]")
+    print(json.dumps(asdict(result.query_state), ensure_ascii=False, indent=2))
+    print("\n[Trigger]")
+    print(json.dumps(asdict(result.trigger_state), ensure_ascii=False, indent=2))
+    print("\n[Policy]")
+    print(json.dumps(asdict(result.policy_state), ensure_ascii=False, indent=2))
+    print("\n[Clarification Guard]")
+    print(json.dumps(asdict(result.clarification_guard), ensure_ascii=False, indent=2))
+    print("\n[Evidence Used This Turn]")
+    print(json.dumps([asdict(c) for c in result.evidence_used_this_turn], ensure_ascii=False, indent=2))
+    print("\n[Active Evidence]")
+    active_evidence = result.state_snapshot["evidence_state"]["active_evidence"]
+    print(json.dumps(active_evidence, ensure_ascii=False, indent=2))
+    print("\n[Response]")
+    print(result.response)
+    print("\n[Latency]")
+    print(json.dumps(asdict(result.latency), ensure_ascii=False, indent=2))
+    print("=" * 80 + "\n")
+
+
+def print_chat_response(result: TurnResult) -> None:
+    """正常对话界面：只显示客服回复。"""
+    print(f"客服：{result.response}\n")
+
+
+def interactive_main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Dynamic multi-turn IT customer-service runtime")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="显示 Query/Trigger/Policy/Evidence/Latency 等完整中间状态。默认只显示对话内容。",
+    )
+    parser.add_argument(
+        "--save-path",
+        default="dynamic_runtime_output.json",
+        help="运行日志保存路径。默认 dynamic_runtime_output.json。",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="RAG 返回案例数量。默认 5。",
+    )
+    parser.add_argument(
+        "--clarification-limit",
+        type=int,
+        default=3,
+        help="连续澄清保护阈值。默认 3，即第 3 次连续 AskClarification/AskMissingSlot 时强制推进。",
+    )
+    parser.add_argument(
+        "--disable-clarification-guard",
+        action="store_true",
+        help="关闭连续澄清保护机制。",
+    )
+    parser.add_argument(
+        "--prefix-path",
+        default="",
+        help=(
+            "可选：加载一个 JSON prefix 文件作为初始历史。"
+            "文件格式为 turns 列表，或包含 turns 字段的对象。"
+        ),
+    )
+    args = parser.parse_args()
+
+    logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
+
+    runtime = DynamicMultiTurnRuntime(
+        dialogue_id="interactive_dialogue",
+        retrieval_top_k=args.top_k,
+        save_history_path=args.save_path,
+        verbose=args.debug,
+        clarification_limit=args.clarification_limit,
+        enable_clarification_guard=not args.disable_clarification_guard,
     )
 
-    user_box.submit(
-        fn=chat,
-        inputs=[user_box, chat_history_state, runtime_state],
-        outputs=[
-            user_box,
-            chat_display,
-            runtime_state,
-            chat_history_state,
-            state_cards,
-            state_json,
-        ],
+    if args.prefix_path:
+        with open(args.prefix_path, "r", encoding="utf-8") as f:
+            prefix_data = json.load(f)
+
+        if isinstance(prefix_data, dict) and "turns" in prefix_data:
+            prefix_turns = prefix_data["turns"]
+        elif isinstance(prefix_data, list):
+            prefix_turns = prefix_data
+        else:
+            raise ValueError(
+                "prefix JSON must be a list of turns or a dict with key 'turns'."
+            )
+
+        runtime.load_dialogue_prefix(prefix_turns, reset_state=True)
+        print(f"已加载 prefix：{args.prefix_path}")
+        print(f"当前历史轮数：{len(runtime.state.turns)}，已完成客服轮数：{runtime.state.current_turn_id}")
+
+    print("动态多轮 IT 客服 Runtime 已启动。")
+    if args.debug:
+        print("当前模式：debug，中间状态会显示。输入 /exit 退出，/reset 重置对话，/state 查看状态，/load_prefix <path> 加载历史，/debug 关闭调试显示。")
+    else:
+        print("当前模式：chat，只显示正常对话。输入 /exit 退出，/reset 重置对话，/state 查看状态，/load_prefix <path> 加载历史，/debug 打开调试显示。")
+
+    print(
+        f"连续澄清保护：{'开启' if runtime.enable_clarification_guard else '关闭'}，"
+        f"阈值={runtime.clarification_limit}"
     )
 
-    reset_btn.click(
-        fn=reset_chat,
-        inputs=[],
-        outputs=[
-            chat_display,
-            runtime_state,
-            chat_history_state,
-            state_cards,
-            state_json,
-        ],
-    )
+    while True:
+        user_input = input("用户：").strip()
+        if not user_input:
+            continue
+        if user_input == "/exit":
+            runtime.save(args.save_path)
+            print(f"已退出，并保存到 {args.save_path}")
+            break
+        if user_input == "/reset":
+            runtime.reset(dialogue_id="interactive_dialogue")
+            print("对话已重置。")
+            continue
+        if user_input == "/state":
+            print(json.dumps(runtime.snapshot_state(), ensure_ascii=False, indent=2))
+            continue
+        if user_input.startswith("/load_prefix "):
+            prefix_path = user_input.replace("/load_prefix ", "", 1).strip().strip('"')
+            try:
+                with open(prefix_path, "r", encoding="utf-8") as f:
+                    prefix_data = json.load(f)
+                if isinstance(prefix_data, dict) and "turns" in prefix_data:
+                    prefix_turns = prefix_data["turns"]
+                elif isinstance(prefix_data, list):
+                    prefix_turns = prefix_data
+                else:
+                    raise ValueError("prefix JSON must be a list or a dict with key 'turns'.")
+                runtime.load_dialogue_prefix(prefix_turns, reset_state=True)
+                print(f"已加载 prefix：{prefix_path}")
+                print(f"当前历史轮数：{len(runtime.state.turns)}，已完成客服轮数：{runtime.state.current_turn_id}")
+            except Exception as e:
+                print(f"加载 prefix 失败：{e}")
+            continue
+        if user_input == "/debug":
+            runtime.verbose = not runtime.verbose
+            args.debug = runtime.verbose
+            logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
+            print(f"已切换到 {'debug' if args.debug else 'chat'} 模式。")
+            continue
 
-    load_prefix_btn.click(
-        fn=load_prefix_from_text,
-        inputs=[prefix_box, runtime_state],
-        outputs=[
-            chat_display,
-            runtime_state,
-            chat_history_state,
-            state_cards,
-            state_json,
-            prefix_status,
-        ],
-    )
+        try:
+            result = runtime.step(user_input)
+            if args.debug:
+                print_turn_result(result)
+            else:
+                print_chat_response(result)
+        except Exception as e:
+            logger.exception("Turn failed")
+            print(f"当前轮执行失败：{e}")
+
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="10.67.43.9",
-        server_port=7860,
-        share=False,
-    )
+    interactive_main()
