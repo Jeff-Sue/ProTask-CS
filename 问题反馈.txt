@@ -1,890 +1,641 @@
-CUSTOM_CSS = """
-
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --line: #e6eaf0;
-    --soft-line: #eef2f6;
-
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
-
-    --blue: #2563eb;
-    --blue-soft: #eff6ff;
-
-    --green: #16a34a;
-    --green-soft: #effdf3;
-
-    --gray-soft: #f2f4f7;
-
-    --shadow:
-        0 8px 30px
-        rgba(15, 23, 42, 0.06);
-}
-
-
-html,
-body {
-    background: var(--bg) !important;
-}
-
-
-.gradio-container {
-    max-width: 1450px !important;
-    margin: auto !important;
-    padding: 24px !important;
-}
-
-
-/* =========================================================
-   HERO
-========================================================= */
-
-.hero {
-
-    background:
-        linear-gradient(
-            135deg,
-            #ffffff,
-            #f7faff
-        );
-
-    border: 1px solid var(--line);
-
-    border-radius: 24px;
-
-    padding: 24px 28px;
-
-    margin-bottom: 18px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    box-shadow: var(--shadow);
-}
-
-
-.hero-tag {
-
-    color: var(--blue);
-
-    font-size: 12px;
-
-    font-weight: 700;
-
-    margin-bottom: 8px;
-}
-
-
-.hero-title {
-
-    font-size: 28px;
-
-    font-weight: 800;
-
-    color: var(--text);
-}
-
-
-.hero-desc {
-
-    margin-top: 7px;
-
-    color: var(--muted);
-
-    font-size: 13px;
-}
-
-
-.hero-status {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 8px;
-
-    font-size: 13px;
-
-    color: var(--text2);
-}
-
-
-.status-dot {
-
-    width: 8px;
-
-    height: 8px;
-
-    display: inline-block;
-
-    border-radius: 50%;
-
-    background: #22c55e;
-
-    margin-right: 5px;
-}
-
-
-/* =========================================================
-   PANELS
-========================================================= */
-
-.panel-title {
-
-    font-size: 16px;
-
-    font-weight: 750;
-
-    color: var(--text);
-
-    margin-bottom: 10px;
-}
-
-
-.chat-panel,
-.state-panel,
-.history-panel {
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 20px;
-
-    box-shadow: var(--shadow);
-}
-
-
-.chat-panel {
-
-    height: 650px;
-
-    overflow-y: auto;
-
-    padding: 20px;
-}
-
-
-.state-panel,
-.history-panel {
-
-    height: 690px;
-
-    overflow-y: auto;
-
-    padding: 16px;
-}
-
-
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
-
-.empty-chat {
-
-    height: 580px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.empty-icon {
-
-    width: 52px;
-
-    height: 52px;
-
-    border-radius: 16px;
-
-    background: var(--blue-soft);
-
-    color: var(--blue);
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    font-size: 22px;
-
-    margin-bottom: 16px;
-}
-
-
-.empty-title {
-
-    font-size: 20px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 8px;
-}
-
-
-.empty-desc {
-
-    max-width: 450px;
-
-    line-height: 1.7;
-
-    font-size: 13px;
-}
-
-
-/* =========================================================
-   CHAT
-========================================================= */
-
-.chat-scroll {
-
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 16px;
-}
-
-
-.message-row {
-
-    display: flex;
-
-    gap: 10px;
-
-    align-items: flex-start;
-}
-
-
-.user-row {
-
-    justify-content: flex-end;
-}
-
-
-.avatar {
-
-    width: 34px;
-
-    height: 34px;
-
-    flex-shrink: 0;
-
-    border-radius: 50%;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    font-size: 11px;
-
-    font-weight: 800;
-}
-
-
-.user-avatar {
-
-    background: #dbeafe;
-
-    color: #1d4ed8;
-}
-
-
-.agent-avatar {
-
-    background: #e9edf3;
-
-    color: #344054;
-}
-
-
-.message-bubble {
-
-    max-width: 76%;
-
-    padding: 12px 14px;
-
-    border-radius: 17px;
-
-    font-size: 14px;
-
-    line-height: 1.65;
-
-    white-space: pre-wrap;
-}
-
-
-.user-message {
-
-    background: var(--blue);
-
-    color: white;
-
-    border-bottom-right-radius: 6px;
-}
-
-
-.agent-message {
-
-    background: white;
-
-    color: var(--text);
-
-    border: 1px solid var(--soft-line);
-
-    border-bottom-left-radius: 6px;
-}
-
-
-.message-role {
-
-    font-size: 11px;
-
-    font-weight: 700;
-
-    opacity: .7;
-
-    margin-bottom: 4px;
-}
-
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-.session-bar {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 18px;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 14px;
-
-    padding: 10px 14px;
-
-    margin-bottom: 10px;
-
-    font-size: 12px;
-
-    color: var(--muted);
-}
-
-
-.session-bar b {
-
-    color: var(--text2);
-
-    margin-left: 4px;
-}
-
-
-/* =========================================================
-   STATE
-========================================================= */
-
-.state-section {
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 16px;
-
-    padding: 14px;
-
-    margin-bottom: 12px;
-
-    background: #fff;
-}
-
-
-.section-title {
-
-    font-size: 14px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 12px;
-}
-
-
-.kv-row {
-
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-
-    margin: 7px 0;
-
-    font-size: 12px;
-
-    color: var(--muted);
-}
-
-
-.state-text {
-
-    background: #f8fafc;
-
-    padding: 10px 12px;
-
-    border-radius: 10px;
-
-    margin-top: 9px;
-
-    font-size: 13px;
-
-    color: var(--text2);
-}
-
-
-.state-label {
-
-    font-size: 11px;
-
-    color: var(--muted);
-
-    margin-top: 12px;
-
-    margin-bottom: 5px;
-}
-
-
-/* =========================================================
-   BADGES
-========================================================= */
-
-.badge {
-
-    display: inline-flex;
-
-    padding: 4px 9px;
-
-    border-radius: 999px;
-
-    font-size: 11px;
-
-    font-weight: 700;
-}
-
-
-.badge-blue {
-
-    background: var(--blue-soft);
-
-    color: #1d4ed8;
-}
-
-
-.badge-green {
-
-    background: var(--green-soft);
-
-    color: #15803d;
-}
-
-
-.badge-gray {
-
-    background: var(--gray-soft);
-
-    color: #475467;
-}
-
-
-.badge-default {
-
-    background: #f2f4f7;
-
-    color: #475467;
-}
-
-
-/* =========================================================
-   CASE
-========================================================= */
-
-.case-item {
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 11px;
-
-    padding: 9px 10px;
-
-    margin-bottom: 7px;
-
-    background: #fafbfc;
-}
-
-
-.case-id {
-
-    color: var(--blue);
-
-    font-size: 11px;
-
-    font-weight: 750;
-}
-
-
-.case-title {
-
-    font-size: 12px;
-
-    color: var(--text2);
-
-    margin-top: 3px;
-}
-
-
-.empty-small {
-
-    padding: 10px;
-
-    background: #f8fafc;
-
-    border-radius: 10px;
-
-    color: var(--muted);
-
-    font-size: 12px;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-
-    padding: 5px 0;
-}
-
-
-.tree-node {
-
-    position: relative;
-
-    padding: 6px 7px;
-
-    font-size: 12px;
-
-    color: var(--text2);
-}
-
-
-.tree-dot {
-
-    display: inline-block;
-
-    width: 6px;
-
-    height: 6px;
-
-    background: #94a3b8;
-
-    border-radius: 50%;
-
-    margin-right: 7px;
-}
-
-
-.tree-topic {
-
-    font-weight: 600;
-}
-
-
-.tree-dimension {
-
-    margin-left: 7px;
-
-    color: var(--blue);
-
-    font-size: 10px;
-
-    background: var(--blue-soft);
-
-    padding: 2px 5px;
-
-    border-radius: 5px;
-}
-
-
-.tree-case {
-
-    margin-left: 7px;
-
-    color: var(--muted);
-
-    font-size: 10px;
-}
-
-
-.tree-leaf .tree-dot {
-
-    background: #22c55e;
-}
-
-
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-total {
-
-    font-size: 28px;
-
-    font-weight: 800;
-
-    color: var(--blue);
-
-    margin-bottom: 12px;
-}
-
-
-.latency-grid {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(2, 1fr);
-
-    gap: 7px;
-}
-
-
-.latency-grid > div {
-
-    background: #f8fafc;
-
-    border-radius: 10px;
-
-    padding: 9px;
-
-    display: flex;
-
-    justify-content: space-between;
-
-    font-size: 11px;
-}
-
-
-.latency-grid span {
-
-    color: var(--muted);
-}
-
-
-.latency-grid b {
-
-    color: var(--text2);
-}
-
-
-/* =========================================================
-   HISTORY
-========================================================= */
-
-.history-item {
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 14px;
-
-    padding: 12px;
-
-    margin-bottom: 10px;
-
-    background: white;
-}
-
-
-.history-head {
-
-    display: flex;
-
-    justify-content: space-between;
-
-    font-size: 12px;
-
-    color: var(--muted);
-}
-
-
-.history-head b {
-
-    color: var(--text);
-}
-
-
-.history-user {
-
-    font-size: 13px;
-
-    color: var(--text2);
-
-    margin: 9px 0;
-}
-
-
-.history-flow {
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 5px;
-
-    flex-wrap: wrap;
-}
-
-
-/* =========================================================
-   OTHER
-========================================================= */
-
-.state-empty {
-
-    min-height: 400px;
-
-    display: flex;
-
-    align-items: center;
-
-    justify-content: center;
-
-    flex-direction: column;
-
-    color: var(--muted);
-}
-
-
-.state-empty-title {
-
-    color: var(--text);
-
-    font-weight: 800;
-
-    margin-bottom: 7px;
-}
-
-
-.state-empty-desc {
-
-    font-size: 12px;
-}
-
-
-.json-small {
-
-    background: #f8fafc;
-
-    padding: 9px;
-
-    border-radius: 9px;
-
-    font-size: 11px;
-
-    white-space: pre-wrap;
-}
-
-
-.error-card {
-
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 14px;
-
-    border-radius: 12px;
-}
-
-
-.error-title {
-
-    font-weight: 800;
-
-    margin-bottom: 6px;
-}
-
-
-.prefix-success {
-
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
-
-    color: #027a48;
-
-    padding: 10px;
-
-    border-radius: 10px;
-}
-
-
-.prefix-error {
-
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 10px;
-
-    border-radius: 10px;
-}
-
-
-footer {
-    display: none !important;
-}
-
-
-@media (max-width: 1050px) {
-
-    .hero {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 14px;
-    }
-
-    .message-bubble {
-        max-width: 88%;
-    }
-
-}
-
-"""
+import html
+import json
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def escape(value):
+    if value is None:
+        return ""
+    return html.escape(str(value))
+
+
+def json_text(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception:
+        return str(value)
+
+
+def badge(text, kind="gray"):
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{escape(text)}'
+        f'</span>'
+    )
+
+
+# ============================================================
+# Header
+# ============================================================
+
+def render_header():
+    return """
+    <div class="app-header">
+        <div>
+            <div class="header-eyebrow">
+                Huawei IT Support · Agent Console
+            </div>
+
+            <div class="header-title">
+                IT 智能客服 Agent
+            </div>
+
+            <div class="header-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+        </div>
+
+        <div class="online-status">
+            <span class="online-dot"></span>
+            Agent Online
+        </div>
+    </div>
+    """
+
+
+# ============================================================
+# Session
+# ============================================================
+
+def render_session(session_id, turns):
+    return f"""
+    <div class="session-inline">
+        <span class="running-dot"></span>
+        <span>Running</span>
+
+        <span class="session-divider">·</span>
+
+        <span>
+            Session
+            <b>{escape(session_id)}</b>
+        </span>
+
+        <span class="session-divider">·</span>
+
+        <span>
+            Turn
+            <b>{turns}</b>
+        </span>
+    </div>
+    """
+
+
+# ============================================================
+# Chat
+# ============================================================
+
+def render_empty_chat(user_mode=False):
+    if user_mode:
+        title = "您好，有什么可以帮您？"
+        desc = "请描述您遇到的 IT 问题，我会尽力协助您解决。"
+    else:
+        title = "开始新的 IT 支持会话"
+        desc = (
+            "输入用户问题后，Agent 将执行 Query、Retrieval、"
+            "Topic Analysis、Policy 和 Response。"
+        )
+
+    return f"""
+    <div class="chat-surface">
+        <div class="empty-chat">
+            <div class="empty-symbol">✦</div>
+            <div class="empty-title">{title}</div>
+            <div class="empty-desc">{desc}</div>
+        </div>
+    </div>
+    """
+
+
+def render_chat(history, user_mode=False):
+    if not history:
+        return render_empty_chat(user_mode=user_mode)
+
+    rows = []
+
+    for message in history:
+        role = message.get("role")
+        content = escape(message.get("content", ""))
+
+        if role == "user":
+            rows.append(
+                f"""
+                <div class="message-row user-row">
+                    <div class="message-wrap user-wrap">
+                        <div class="message-role">用户</div>
+                        <div class="message-bubble user-message">
+                            {content}
+                        </div>
+                    </div>
+
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
+                </div>
+                """
+            )
+
+        elif role == "assistant":
+            rows.append(
+                f"""
+                <div class="message-row agent-row">
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
+
+                    <div class="message-wrap">
+                        <div class="message-role">智能客服</div>
+                        <div class="message-bubble agent-message">
+                            {content}
+                        </div>
+                    </div>
+                </div>
+                """
+            )
+
+    return f"""
+    <div class="chat-surface">
+        <div class="chat-scroll">
+            {''.join(rows)}
+        </div>
+    </div>
+    """
+
+
+# ============================================================
+# Topic Tree
+# ============================================================
+
+def render_topic_tree(tree):
+    if not tree:
+        return """
+        <div class="empty-small">
+            暂无 Topic Structure
+        </div>
+        """
+
+    def walk(node, depth=0):
+        topic = escape(node.get("topic", ""))
+        dimension = escape(node.get("dimension", ""))
+
+        case_ids = node.get("case_ids") or []
+
+        if isinstance(case_ids, str):
+            case_ids = [case_ids]
+
+        case_text = ", ".join(
+            escape(x) for x in case_ids
+        )
+
+        leaf = bool(node.get("leaf"))
+
+        node_class = (
+            "tree-node tree-leaf"
+            if leaf
+            else "tree-node"
+        )
+
+        margin = depth * 18
+
+        dimension_html = ""
+
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
+            )
+
+        case_html = ""
+
+        if case_text:
+            case_html = (
+                f'<span class="tree-case">'
+                f'{case_text}'
+                f'</span>'
+            )
+
+        current = f"""
+        <div
+            class="{node_class}"
+            style="margin-left:{margin}px"
+        >
+            <span class="tree-dot"></span>
+            <span class="tree-topic">{topic}</span>
+            {dimension_html}
+            {case_html}
+        </div>
+        """
+
+        children = node.get("children") or []
+
+        return current + "".join(
+            walk(child, depth + 1)
+            for child in children
+        )
+
+    return f"""
+    <div class="topic-tree">
+        {walk(tree)}
+    </div>
+    """
+
+
+# ============================================================
+# Evidence
+# ============================================================
+
+def render_cases(cases):
+    if not cases:
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
+
+    items = []
+
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or ""
+        )
+
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or ""
+        )
+
+        title = str(title)
+
+        if len(title) > 110:
+            title = title[:110] + "..."
+
+        items.append(
+            f"""
+            <div class="case-item">
+                <div class="case-id">
+                    {escape(case_id)}
+                </div>
+
+                <div class="case-title">
+                    {escape(title)}
+                </div>
+            </div>
+            """
+        )
+
+    return "".join(items)
+
+
+# ============================================================
+# Latency
+# ============================================================
+
+def render_latency(latency):
+    latency = latency or {}
+
+    total = latency.get("total", 0)
+
+    def get_time(*names):
+        for name in names:
+            if name in latency:
+                return latency[name]
+        return 0
+
+    query = get_time("query")
+    trigger = get_time("trigger")
+    rag = get_time("rag", "retrieval")
+    topic = get_time("topic", "topic_structure")
+    policy = get_time("policy")
+    response = get_time("response")
+
+    return f"""
+    <div class="latency-total">
+        {float(total):.2f}
+        <span>s</span>
+    </div>
+
+    <div class="latency-grid">
+        <div>
+            <span>Query</span>
+            <b>{float(query):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Trigger</span>
+            <b>{float(trigger):.2f}s</b>
+        </div>
+
+        <div>
+            <span>RAG</span>
+            <b>{float(rag):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Topic</span>
+            <b>{float(topic):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Policy</span>
+            <b>{float(policy):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Response</span>
+            <b>{float(response):.2f}s</b>
+        </div>
+    </div>
+    """
+
+
+# ============================================================
+# Decision
+# ============================================================
+
+def render_decision(snapshot):
+    if not snapshot:
+        return """
+        <div class="decision-surface">
+            <div class="decision-empty">
+                <div class="decision-empty-title">
+                    Waiting for interaction
+                </div>
+
+                <div class="decision-empty-desc">
+                    当前轮执行后，Query、Trigger、Evidence、
+                    Topic、Policy 和 Latency 将显示在这里。
+                </div>
+            </div>
+        </div>
+        """
+
+    query_state = snapshot.get("query_state", {})
+    trigger_state = snapshot.get("trigger_state", {})
+    policy_state = snapshot.get("policy_state", {})
+
+    evidence_state = snapshot.get(
+        "evidence_state",
+        {},
+    )
+
+    active_cases = evidence_state.get(
+        "active_cases",
+        [],
+    )
+
+    topic_structure = evidence_state.get(
+        "topic_structure",
+        {},
+    )
+
+    latency = snapshot.get("latency", {})
+
+    query_mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query_state.get(
+        "query_text",
+        "",
+    )
+
+    trigger = trigger_state.get(
+        "trigger",
+        "",
+    )
+
+    evidence_mode = trigger_state.get(
+        "evidence_mode",
+        "",
+    )
+
+    policy = policy_state.get(
+        "label",
+        "",
+    )
+
+    information = policy_state.get(
+        "information",
+    )
+
+    return f"""
+    <div class="decision-surface">
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Query
+            </div>
+
+            <div class="decision-line">
+                {badge(query_mode, "blue")}
+            </div>
+
+            <div class="decision-text">
+                {escape(query_text) or "None"}
+            </div>
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Trigger
+            </div>
+
+            <div class="decision-row">
+                <span>Trigger</span>
+                {badge(trigger, "green")}
+            </div>
+
+            <div class="decision-row">
+                <span>Evidence Mode</span>
+                {badge(evidence_mode, "gray")}
+            </div>
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Evidence
+            </div>
+
+            {render_cases(active_cases)}
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Topic Structure
+            </div>
+
+            {render_topic_tree(topic_structure)}
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Policy
+            </div>
+
+            <div class="decision-line">
+                {badge(policy, "blue")}
+            </div>
+
+            <div class="sub-label">
+                Information
+            </div>
+
+            <pre class="json-view">{escape(json_text(information))}</pre>
+        </div>
+
+
+        <div class="decision-section latency-section">
+            <div class="section-heading">
+                Latency
+            </div>
+
+            {render_latency(latency)}
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(trace):
+    if not trace:
+        return """
+        <div class="trace-surface">
+            <div class="decision-empty">
+                暂无运行轨迹
+            </div>
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
+    ):
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
+        )
+
+        user = escape(
+            item.get("user", "")
+        )
+
+        query = item.get(
+            "query_state",
+            {},
+        )
+
+        trigger = item.get(
+            "trigger_state",
+            {},
+        )
+
+        policy = item.get(
+            "policy_state",
+            {},
+        )
+
+        latency = item.get(
+            "latency",
+            {},
+        )
+
+        total = latency.get(
+            "total",
+            0,
+        )
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+                    <b>Turn {turn}</b>
+                    <span>{float(total):.2f}s</span>
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+                    {badge(
+                        query.get("query_mode", "none"),
+                        "blue"
+                    )}
+
+                    <span class="flow-arrow">→</span>
+
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            ""
+                        ),
+                        "gray"
+                    )}
+
+                    <span class="flow-arrow">→</span>
+
+                    {badge(
+                        policy.get("label", ""),
+                        "green"
+                    )}
+                </div>
+
+            </div>
+            """
+        )
+
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
+    """
+
+
+# ============================================================
+# Prefix
+# ============================================================
+
+def render_prefix_result(
+    success,
+    message,
+):
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
+    )
+
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
