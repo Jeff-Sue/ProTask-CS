@@ -1,309 +1,1253 @@
-Role
-
-你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
-
-你的任务是：在已有 Topic Structure 的当前节点下，根据当前 Query 和 Cases，继续向下生成一层 Topic 划分。
-
-你每次只生成当前节点的直接下一层结构，不生成完整 Topic Tree。
-
-⸻
-
-Objective
-
-根据 query、parent_path 和当前 cases，识别这些 Cases 在当前语义范围内最主要的下一层差异，并形成一层清晰的 Case Partition。
-
-Topic Structure 用于表示：
-
-不同 Cases 围绕当前 Query 存在哪些层级语义差异。
-
-它组织的是 Cases 之间的差异，而不是单个 Case 内部的知识结构。
-
-⸻
-
-Input
-
-输入包含以下字段：
-
-1. query
-
-当前用户问题对应的检索 Query。
-
-query 是整个 Topic Structure 的全局语义 Anchor。
-
-⸻
-
-2. parent_path
-
-已有 Topic Structure 中，从上层到当前节点的完整 Topic Path。
-
-例如：
-
-[“登录场景”, “Windows 登录”, “密码问题”]
-
-最后一个 Topic 表示当前需要继续细化的节点。
-
-第一层划分时，parent_path 可以为空。
-
-query 和 parent_path 共同限定当前层的语义范围。
-
-⸻
-
-3. depth
-
-当前 Topic Structure 的递归深度。
-
-⸻
-
-4. cases
-
-当前节点下需要进一步区分的 Cases。
-
-每个 Case 包含：
-
-* case_id
-* title
-* keywords
-* content
-
-生成 Topic 划分时综合使用 Case 中提供的信息。
-
-⸻
-
-Decision Space
-
-每次只判断当前节点是否存在一个合理的下一层 Case Partition。
-
-如果存在，则生成：
-
-Parent → Dimension → Sibling Topics → Case Assignments
-
-你只需要决定：
-
-1. Dimension
-    当前层用于区分 Cases 的一个共同语义维度。
-2. Sibling Topics
-    该 Dimension 下用于区分 Cases 的并列语义取值。
-3. Case Assignments
-    根据 Sibling Topics，为每个 Case 指定其唯一所属的 Topic。
-
-只生成当前层，不继续生成任何 Sibling Topic 的下一层结构。
-
-如果当前 Cases 之间不存在一个可靠、自然且符合当前 Query / Path 的下一层划分，则停止继续细化，输出 split = false。
-
-⸻
-
-Decision Rules
-
-Step 1: Anchor
-
-根据 query 和 parent_path 确定当前层的语义范围。
-
-当前划分必须：
-
-* 围绕 Query 的核心问题；
-* 是当前 Topic Path 的自然下一层细化；
-* 只处理当前输入 Cases 之间尚未区分的差异。
-
-不要重复上层已经完成的划分，也不要被 Case 中与当前语义范围无关的细节带离当前 Topic。
-
-⸻
-
-Step 2: Compare Cases
-
-比较当前 Cases，识别它们之间真正存在的 Case-level Differences。
-
-Case-level Difference 描述：
-
-不同 Cases 之间有什么不同。
-
-而不是：
-
-一个 Case 内部包含哪些内容。
-
-只有能够使不同 Cases 形成不同语义组的差异，才适合作为当前层的划分依据。
-
-⸻
-
-Step 3: Select the Dimension
-
-从 Case-level Differences 中选择最适合作为当前下一层的一个 Dimension。
-
-如果存在多个合法 Dimension，按照以下优先级选择：
-
-1. Query / Path Alignment
-    与当前 Query 和 Topic Path 的语义范围一致。
-2. Appropriate Semantic Level
-    是当前节点自然的下一层差异，不跳过明显的较高层差异直接进入过细的信息。
-3. Faithful Case Partition
-    能够根据 Cases 实际表达的信息形成清晰、可靠的分组。
-4. Diversity
-    在以上条件均满足时，优先选择能够更有效区分当前 Cases 的 Dimension。
-
-如果不存在能够使当前 Cases 形成至少两个可靠 Case Groups 的合法 Dimension，则输出 split = false。
-
-⸻
-
-Step 4: Assign Cases
-
-根据选定的 Dimension 确定 Sibling Topics，并为每个输入 Case 指定其唯一所属的 Topic。
-
-所有 Sibling Topics 必须属于同一个 Dimension，并处于相近的语义层级。
-
-每个 Case 必须且只能分配到一个 Sibling Topic。
-
-按照输入 Cases 逐个进行 Assignment，不遗漏任何 Case，也不要重复输出同一个 case_id。
-
-完成当前层划分后停止，不继续向下生成结构。
-
-⸻
-
-Constraints
-
-生成的 Topic 划分必须同时满足以下要求。
-
-1. Query / Path Alignment
-
-Dimension 必须是当前 Query 和 Topic Path 下自然的下一层细化。
-
-不要偏离当前问题，也不要重新使用上层已经完成的差异。
-
-⸻
-
-2. Single Semantic Axis
-
-每一层只能使用一个明确的语义 Dimension。
-
-所有 Sibling Topics 必须是该 Dimension 下的并列语义取值。
-
-不要在同一层混合不同性质的差异。
-
-⸻
-
-3. Case-level Difference
-
-划分依据必须能够区分不同 Cases。
-
-不要把单个 Case 内部包含的多个步骤、地点、选项、结果或其他内容直接展开成 Sibling Topics。
-
-如果某个 Dimension 会使同一个 Case 自然属于多个 Sibling Topics，说明该 Dimension 描述的是 Case 内部同时存在的属性，而不是 Cases 之间合适的区分维度。
-
-此时应放弃该 Dimension，重新选择其他 Case-level Dimension。
-
-如果不存在合适的替代 Dimension，则输出 split = false。
-
-⸻
-
-4. Appropriate Semantic Level
-
-当前 Dimension 应符合当前结构深度。
-
-整体 Topic Structure 应保持：
-
-粗粒度 → 中粒度 → 细粒度
-
-Sibling Topics 应处于相近的抽象层级，不应同时包含宽泛类别和过细的具体信息。
-
-⸻
-
-5. Complete and Exclusive Assignment
-
-每个输入 Case 必须输出一次 Assignment。
-
-每个 Case 必须且只能属于一个 Sibling Topic。
-
-不得遗漏、重复或新增 case_id。
-
-⸻
-
-6. Faithfulness
-
-Dimension 和 Sibling Topics 必须来自 Cases 实际表达的语义差异。
-
-不要：
-
-* 添加 Cases 中不存在的条件；
-* 推断未明确表达的适用范围；
-* 为了形成互斥分类而人为制造相反属性；
-* 为了获得更多分支而强行制造不存在的 Case 差异。
-
-Sibling Topic 的名称应简洁、准确，并保持原 Case 表达的语义范围。
-
-如果无法形成可靠的下一层差异，应输出 split = false，而不是强行划分。
-
-⸻
-
-7. Functional Boundary
-
-Topic Structure 只表示：
-
-Cases 之间有哪些层级语义差异。
-
-它不表示：
-
-* 用户属于哪个 Sibling Topic；
-* 用户需要逐层确认哪些信息；
-* 应该询问用户什么；
-* 哪个 Case 应该被推荐；
-* 当前 Evidence 是否充分；
-* 下一步应该采取什么服务策略；
-* 应该如何回复用户。
-
-这些判断由其他模块完成。
-
-⸻
-
-8. One-level Boundary
-
-每次只生成当前节点的直接下一层结构。
-
-如果某个 Sibling Topic 下仍包含多个 Cases，也不要继续生成其子结构。
-
-后续聚合、树结构构建和递归由外部程序完成。
-
-⸻
-
-Output Contract
-
-只输出合法 JSON，不输出任何额外内容。
-
-存在合理划分时
-
-{
-“split”: true,
-“dimension”: “当前层用于区分 Cases 的语义维度”,
-“assignments”: [
-{
-“case_id”: “KTxxxx”,
-“topic”: “该 Case 所属的 Sibling Topic”
-},
-{
-“case_id”: “KTxxxx”,
-“topic”: “该 Case 所属的 Sibling Topic”
+import html
+import json
+import uuid
+from typing import Any, Dict, List
+
+import gradio as gr
+
+from run import DynamicMultiTurnRuntime
+
+
+# ==================== Runtime ====================
+
+def new_runtime() -> DynamicMultiTurnRuntime:
+    session_id = f"gradio_{uuid.uuid4().hex[:8]}"
+    return DynamicMultiTurnRuntime(
+        dialogue_id=session_id,
+        retrieval_top_k=5,
+        save_history_path=f"saves/gradio_runtime_{session_id}.json",
+        verbose=False,
+    )
+
+
+# ==================== Data Utils ====================
+
+def dataclass_to_dict(obj: Any) -> Any:
+    if isinstance(obj, list):
+        return [dataclass_to_dict(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: dataclass_to_dict(v) for k, v in obj.items()}
+    if hasattr(obj, "__dict__"):
+        return {k: dataclass_to_dict(v) for k, v in obj.__dict__.items()}
+    return obj
+
+
+def short_case_list(cases: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, str]]:
+    output = []
+    for c in cases[:max_items]:
+        output.append({
+            "case_id": str(c.get("case_id", "")),
+            "title": str(c.get("title", "")),
+        })
+    return output
+
+
+def build_state_sections(result) -> Dict[str, Any]:
+    evidence_state = result.state_snapshot.get("evidence_state", {})
+
+    evidence_used = dataclass_to_dict(result.retrieval_output)
+    active_evidence = dataclass_to_dict(evidence_state.get("active_evidence", []))
+    last_retrieved = dataclass_to_dict(evidence_state.get("last_retrieved_cases", []))
+
+    return {
+        "turn_id": result.turn_id,
+        "query": dataclass_to_dict(result.query_state),
+        "trigger": dataclass_to_dict(result.trigger_state),
+        "policy": dataclass_to_dict(result.policy_state),
+        "evidence": {
+            "evidence_used_this_turn": evidence_used,
+            "active_evidence": active_evidence,
+            "last_retrieved_cases": last_retrieved,
+            "evidence_source_query": evidence_state.get("evidence_source_query", ""),
+        },
+        "latency": dataclass_to_dict(result.latency),
+    }
+
+
+# ==================== Render ====================
+
+def render_chat(chat_history: List[Dict[str, str]]) -> str:
+    if not chat_history:
+        return """
+        <div class="empty-chat">
+            <div class="empty-chat-icon">✦</div>
+            <div class="empty-chat-title">欢迎使用华为 IT 动态多轮客服助手</div>
+            <div class="empty-chat-subtitle">
+                请输入一个 IT 问题开始对话，例如：VPN 登录提示账号无权限
+            </div>
+        </div>
+        """
+
+    bubbles = []
+    for msg in chat_history:
+        role = msg["role"]
+        content = html.escape(msg["content"])
+
+        if role == "user":
+            bubbles.append(f"""
+            <div class="msg-row user-row">
+                <div class="msg-avatar user-avatar">U</div>
+                <div class="bubble user-bubble">
+                    <div class="msg-meta">用户</div>
+                    <div class="msg-content">{content}</div>
+                </div>
+            </div>
+            """)
+        else:
+            bubbles.append(f"""
+            <div class="msg-row assistant-row">
+                <div class="msg-avatar assistant-avatar">AI</div>
+                <div class="bubble assistant-bubble">
+                    <div class="msg-meta">客服助手</div>
+                    <div class="msg-content">{content}</div>
+                </div>
+            </div>
+            """)
+
+    return f"""
+    <div class="chat-scroll">
+        {''.join(bubbles)}
+    </div>
+    """
+
+
+def badge(text: Any, kind: str = "default") -> str:
+    text = html.escape(str(text))
+    return f'<span class="badge badge-{kind}">{text}</span>'
+
+
+def render_list_block(items: List[Dict[str, Any]], empty_text: str = "无") -> str:
+    if not items:
+        return f'<div class="mini-empty">{html.escape(empty_text)}</div>'
+
+    cards = []
+    for item in items[:3]:
+        case_id = html.escape(str(item.get("case_id", "")))
+        title = html.escape(str(item.get("title", "")))
+        cards.append(f"""
+        <div class="mini-item">
+            <div class="mini-id">{case_id or "未命名案例"}</div>
+            <div class="mini-title">{title or "无标题"}</div>
+        </div>
+        """)
+    return "".join(cards)
+
+
+def render_state_cards(state: Dict[str, Any]) -> str:
+    if not state:
+        return """
+        <div class="state-empty">
+            <div class="state-empty-title">当前暂无状态</div>
+            <div class="state-empty-desc">
+                当你发送第一条消息后，这里会展示当前轮的 Query、Trigger、Policy、Evidence 和 Latency。
+            </div>
+        </div>
+        """
+
+    query = state.get("query", {})
+    trigger = state.get("trigger", {})
+    policy = state.get("policy", {})
+    evidence = state.get("evidence", {})
+    latency = state.get("latency", {})
+
+    query_mode = query.get("query_mode", "")
+    trigger_flag = trigger.get("trigger", "")
+    evidence_mode = trigger.get("evidence_mode", "")
+    policy_label = policy.get("label", "")
+
+    trigger_kind = "success" if trigger_flag is True else "muted"
+    evidence_kind = {
+        "retrieve_new_evidence": "warning",
+        "reuse_existing_evidence": "info",
+        "no_evidence_needed": "muted",
+    }.get(evidence_mode, "default")
+
+    policy_zh = {
+        "AskMissingSlot": "请求补充信息",
+        "AskClarification": "请求澄清",
+        "ExplainedResponse": "解释性回复",
+        "CaseRecommendation": "案例推荐",
+        "Handoff": "转交处理",
+        "ProcessAcknowledgement": "流程确认",
+    }.get(policy_label, policy_label)
+
+    active_evidence = evidence.get("active_evidence", [])
+    used_evidence = evidence.get("evidence_used_this_turn", [])
+    last_retrieved = evidence.get("last_retrieved_cases", [])
+
+    active_short = short_case_list(active_evidence)
+    used_short = short_case_list(used_evidence)
+    last_short = short_case_list(last_retrieved)
+
+    total_ms = latency.get("total_ms", 0)
+
+    return f"""
+    <div class="state-panel">
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">01</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Query Update</div>
+                    <div class="section-subtitle">本轮 query 改写与状态更新</div>
+                </div>
+            </div>
+            <div class="kv-line">
+                <span class="kv-key">Mode</span>
+                <span class="kv-value">{badge(query_mode or "unknown", "info")}</span>
+            </div>
+            <div class="text-block">
+                <div class="text-label">Query</div>
+                <div class="text-value">{html.escape(str(query.get("query_text", ""))) or "无"}</div>
+            </div>
+            <div class="reason-box">{html.escape(str(query.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">02</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Trigger Decision</div>
+                    <div class="section-subtitle">是否需要触发 retrieval 与 evidence 策略</div>
+                </div>
+            </div>
+            <div class="dual-grid">
+                <div class="info-chip">
+                    <div class="info-chip-label">Trigger</div>
+                    <div class="info-chip-value">{badge(trigger_flag, trigger_kind)}</div>
+                </div>
+                <div class="info-chip">
+                    <div class="info-chip-label">Evidence Mode</div>
+                    <div class="info-chip-value">{badge(evidence_mode or "unknown", evidence_kind)}</div>
+                </div>
+            </div>
+            <div class="reason-box">{html.escape(str(trigger.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">03</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Policy Decision</div>
+                    <div class="section-subtitle">本轮策略动作与决策原因</div>
+                </div>
+            </div>
+            <div class="kv-line">
+                <span class="kv-key">Policy</span>
+                <span class="kv-value">{badge(policy_label or "unknown", "success")}</span>
+            </div>
+            <div class="text-block">
+                <div class="text-label">中文动作</div>
+                <div class="text-value">{html.escape(str(policy_zh or "无"))}</div>
+            </div>
+            <div class="reason-box">{html.escape(str(policy.get("reason", "")) or "无")}</div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">04</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Evidence State</div>
+                    <div class="section-subtitle">本轮使用、缓存中保留、最近检索到的 evidence</div>
+                </div>
+            </div>
+
+            <div class="text-block">
+                <div class="text-label">Source Query</div>
+                <div class="text-value">{html.escape(str(evidence.get("evidence_source_query", ""))) or "无"}</div>
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">本轮使用 Evidence</div>
+                {render_list_block(used_short, "本轮未使用 evidence")}
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">Active Evidence</div>
+                {render_list_block(active_short, "当前没有 active evidence")}
+            </div>
+
+            <div class="mini-section">
+                <div class="mini-section-title">Last Retrieved Cases</div>
+                {render_list_block(last_short, "最近没有检索结果")}
+            </div>
+        </div>
+
+        <div class="section-card">
+            <div class="section-head">
+                <div class="section-index">05</div>
+                <div class="section-title-wrap">
+                    <div class="section-title">Latency</div>
+                    <div class="section-subtitle">本轮链路耗时拆解</div>
+                </div>
+            </div>
+
+            <div class="latency-total">
+                <span class="latency-total-num">{total_ms}</span>
+                <span class="latency-total-unit">ms</span>
+            </div>
+
+            <div class="latency-grid">
+                <div class="latency-item"><span>Query</span><b>{latency.get("query_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Retrieval</span><b>{latency.get("retrieval_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Trigger</span><b>{latency.get("trigger_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Policy</span><b>{latency.get("policy_ms", 0)} ms</b></div>
+                <div class="latency-item"><span>Response</span><b>{latency.get("response_ms", 0)} ms</b></div>
+            </div>
+        </div>
+
+    </div>
+    """
+
+
+def render_full_json(state: Dict[str, Any]) -> Dict[str, Any]:
+    return state or {}
+
+
+# ==================== Main Interaction ====================
+
+def chat(user_input: str, chat_history: List[Dict[str, str]], runtime: DynamicMultiTurnRuntime):
+    if runtime is None:
+        runtime = new_runtime()
+
+    if chat_history is None:
+        chat_history = []
+
+    if not user_input or not user_input.strip():
+        return (
+            "",
+            render_chat(chat_history),
+            runtime,
+            chat_history,
+            render_state_cards({}),
+            {},
+        )
+
+    user_input = user_input.strip()
+    result = runtime.step(user_input)
+
+    chat_history = chat_history + [
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": result.response},
+    ]
+
+    state = build_state_sections(result)
+
+    return (
+        "",
+        render_chat(chat_history),
+        runtime,
+        chat_history,
+        render_state_cards(state),
+        render_full_json(state),
+    )
+
+
+def reset_chat():
+    runtime = new_runtime()
+    chat_history = []
+    state = {}
+
+    return (
+        render_chat(chat_history),
+        runtime,
+        chat_history,
+        render_state_cards(state),
+        render_full_json(state),
+    )
+
+
+def runtime_turns_to_chat_history(runtime: DynamicMultiTurnRuntime) -> List[Dict[str, str]]:
+    """
+    将 runtime.state.turns 转换为前端 HTML 渲染使用的 chat_history。
+    """
+    return [
+        {"role": turn.role, "content": turn.text}
+        for turn in runtime.state.turns
+    ]
+
+
+def load_prefix_from_text(
+    prefix_text: str,
+    runtime: DynamicMultiTurnRuntime,
+):
+    """
+    从网页文本框加载历史 prefix。
+
+    输入格式示例：
+    用户: 我的 VPN 登录不了
+    客服: 请问有什么具体报错？
+    用户: 提示账号无权限
+    """
+    if runtime is None:
+        runtime = new_runtime()
+
+    if not prefix_text or not prefix_text.strip():
+        status_html = """
+        <div class="prefix-status prefix-error">
+            请输入历史对话。格式示例：用户: ... / 客服: ...
+        </div>
+        """
+        return (
+            render_chat([]),
+            runtime,
+            [],
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
+    try:
+        runtime.load_dialogue_prefix_text(prefix_text, reset_state=True)
+        chat_history = runtime_turns_to_chat_history(runtime)
+
+        status_html = f"""
+        <div class="prefix-status prefix-success">
+            已加载历史对话：共 {len(runtime.state.turns)} 条消息，
+            已完成客服轮数 {runtime.state.current_turn_id}。
+            现在可以在左侧输入下一轮用户问题，观察系统回复。
+        </div>
+        """
+
+        return (
+            render_chat(chat_history),
+            runtime,
+            chat_history,
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
+    except Exception as e:
+        status_html = f"""
+        <div class="prefix-status prefix-error">
+            加载失败：{html.escape(str(e))}
+        </div>
+        """
+        return (
+            render_chat([]),
+            runtime,
+            [],
+            render_state_cards({}),
+            {},
+            status_html,
+        )
+
+
+
+# ==================== CSS ====================
+
+CUSTOM_CSS = """
+:root {
+    --bg: #f5f7fb;
+    --panel: #ffffff;
+    --panel-soft: #fafbfc;
+    --line: #e6eaf0;
+    --line-soft: #eef2f6;
+    --text: #0f1728;
+    --text-2: #344054;
+    --text-3: #667085;
+    --blue: #2563eb;
+    --blue-soft: #eff6ff;
+    --green: #16a34a;
+    --green-soft: #effdf3;
+    --amber: #d97706;
+    --amber-soft: #fffbeb;
+    --shadow: 0 10px 30px rgba(15, 23, 40, 0.06);
+    --radius-xl: 24px;
+    --radius-lg: 18px;
+    --radius-md: 14px;
+    --radius-sm: 12px;
 }
-]
+
+html, body {
+    background: var(--bg) !important;
 }
 
-必须满足：
-
-* split = true；
-* dimension 只表示一个语义维度；
-* 相同 topic 表示 Cases 属于同一个 Case Group；
-* 不同 topic 表示该 Dimension 下不同的 Sibling Topics；
-* 最终必须至少形成两个不同的 Sibling Topics；
-* 每个输入 case_id 必须出现且只能出现一次；
-* 不得遗漏或新增 case_id；
-* 不输出 children；
-* 不输出嵌套结构；
-* 不生成当前层以下的 Topic Structure。
-
-当前不存在合理划分时
-
-{
-“split”: false,
-“dimension”: “”,
-“assignments”: []
+body {
+    color: var(--text);
 }
 
-只有当当前 Cases 之间不存在可靠、自然且符合当前 Query / Path 的下一层 Case-level Difference 时，才输出 split = false。
+.gradio-container {
+    max-width: 1320px !important;
+    margin: 0 auto !important;
+    padding-top: 20px !important;
+    padding-bottom: 28px !important;
+}
 
-不要为了继续生成 Topic Structure 而强行制造差异。
+#hero {
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    border: 1px solid var(--line);
+    border-radius: 28px;
+    padding: 26px 30px;
+    box-shadow: var(--shadow);
+    margin-bottom: 18px;
+}
+
+.hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.hero-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.hero-badge {
+    width: fit-content;
+    padding: 6px 10px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.hero-title {
+    font-size: 30px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.2;
+}
+
+.hero-desc {
+    font-size: 14px;
+    color: var(--text-3);
+    line-height: 1.7;
+    max-width: 780px;
+}
+
+.hero-side {
+    min-width: 220px;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.hero-metrics {
+    background: #f8fafc;
+    border: 1px solid var(--line-soft);
+    border-radius: 18px;
+    padding: 12px 14px;
+    min-width: 200px;
+}
+
+.hero-metrics-title {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 8px;
+}
+
+.hero-metrics-item {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-top: 4px;
+}
+
+.main-card {
+    background: transparent;
+}
+
+.chat-shell, .state-shell {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+.panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--line-soft);
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+}
+
+.panel-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.panel-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.panel-subtitle {
+    font-size: 13px;
+    color: var(--text-3);
+}
+
+.panel-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: #22c55e;
+    box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.12);
+    margin-right: 6px;
+}
+
+.chat-box {
+    height: 640px;
+    overflow-y: auto;
+    background: linear-gradient(180deg, #fcfdff 0%, #f8fbff 100%);
+    padding: 22px;
+}
+
+.chat-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.empty-chat {
+    height: 580px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-3);
+    text-align: center;
+    padding: 0 40px;
+}
+
+.empty-chat-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 16px;
+    background: var(--blue-soft);
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    margin-bottom: 16px;
+    font-weight: 700;
+}
+
+.empty-chat-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 10px;
+}
+
+.empty-chat-subtitle {
+    font-size: 14px;
+    line-height: 1.8;
+    max-width: 520px;
+}
+
+.msg-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+}
+
+.user-row {
+    justify-content: flex-end;
+}
+
+.assistant-row {
+    justify-content: flex-start;
+}
+
+.user-row .bubble {
+    order: 1;
+}
+
+.user-row .msg-avatar {
+    order: 2;
+}
+
+.assistant-row .bubble {
+    order: 2;
+}
+
+.assistant-row .msg-avatar {
+    order: 1;
+}
+
+.msg-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 800;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.user-avatar {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.assistant-avatar {
+    background: #e8ecf3;
+    color: #334155;
+}
+
+.bubble {
+    max-width: 76%;
+    border-radius: 18px;
+    padding: 12px 14px;
+    line-height: 1.7;
+    font-size: 14px;
+    word-break: break-word;
+}
+
+.user-bubble {
+    background: linear-gradient(180deg, #2b6ef3 0%, #2563eb 100%);
+    color: white;
+    border-bottom-right-radius: 8px;
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.18);
+}
+
+.assistant-bubble {
+    background: #ffffff;
+    color: var(--text);
+    border: 1px solid var(--line-soft);
+    border-bottom-left-radius: 8px;
+}
+
+.msg-meta {
+    font-size: 12px;
+    opacity: 0.78;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.msg-content {
+    white-space: pre-wrap;
+}
+
+.input-area {
+    padding: 16px 18px 18px 18px;
+    border-top: 1px solid var(--line-soft);
+    background: #ffffff;
+}
+
+.state-html {
+    height: 640px;
+    overflow-y: auto;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+    padding: 18px;
+}
+
+.state-empty {
+    min-height: 560px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+    color: var(--text-3);
+    padding: 0 24px;
+}
+
+.state-empty-title {
+    font-size: 20px;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 10px;
+}
+
+.state-empty-desc {
+    font-size: 14px;
+    line-height: 1.8;
+}
+
+.state-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.section-card {
+    border: 1px solid var(--line-soft);
+    border: 18px;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+    padding: 16px;
+}
+
+.section-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 14px;
+}
+
+.section-index {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    background: #f2f6ff;
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.section-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.section-title {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--text);
+}
+
+.section-subtitle {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.kv-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin: 10px 0;
+}
+
+.kv-key {
+    font-size: 13px;
+    color: var(--text-3);
+}
+
+.kv-value {
+    color: var(--text);
+}
+
+.text-block {
+    margin-top: 12px;
+    padding: 12px 13px;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid var(--line-soft);
+}
+
+.text-label {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 6px;
+}
+
+.text-value {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.6;
+    word-break: break-word;
+}
+
+.reason-box {
+    margin-top: 12px;
+    padding: 12px 13px;
+    border-radius: 14px;
+    background: #fcfcfd;
+    border: 1px dashed #d8e0ea;
+    color: #475467;
+    font-size: 13px;
+    line-height: 1.7;
+    word-break: break-word;
+}
+
+.dual-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.info-chip {
+    padding: 12px;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid var(--line-soft);
+}
+
+.info-chip-label {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 8px;
+}
+
+.info-chip-value {
+    font-size: 14px;
+    color: var(--text);
+}
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    border 1px solid transparent;
+}
+
+.badge-default {
+    background: #f3f4f6;
+    color: #475467;
+}
+
+.badge-info {
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-color: #dbeafe;
+}
+
+.badge-success {
+    background: #effdf3;
+    color: #15803d;
+    border-color: #c7f0d5;
+}
+
+.badge-warning {
+    background: #fff7ed;
+    color: #c2410c;
+    border-color: #fed7aa;
+}
+
+.badge-muted {
+    background: #f3f4f6;
+    color: #667085;
+    border-color: #e5e7eb;
+}
+
+.mini-section {
+    margin-top: 14px;
+}
+
+.mini-section-title {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-bottom: 8px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.mini-item {
+    padding: 10px 12px;
+    border: 1px solid var(--line-soft);
+    background: #fbfcfe;
+    border-radius: 12px;
+    margin-bottom: 8px;
+}
+
+.mini-id {
+    font-size: 12px;
+    color: var(--blue);
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.mini-title {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.5;
+}
+
+.mini-empty {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: #f8fafc;
+    color: var(--text-3);
+    font-size: 13px;
+    border: 1px dashed #d8e0ea;
+}
+
+.latency-total {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 4px 0 14px 0;
+}
+
+.latency-total-num {
+    font-size: 34px;
+    font-weight: 800;
+    color: var(--blue);
+    line-height: 1;
+}
+
+.latency-total-unit {
+    font-size: 14px;
+    color: var(--text-3);
+    font-weight: 700;
+}
+
+.latency-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.latency-item {
+    border: 1px solid var(--line-soft);
+    border-radius: 14px;
+    padding: 12px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.latency-item span {
+    font-size: 12px;
+    color: var(--text-3);
+}
+
+.latency-item b {
+    font-size: 14px;
+    color: var(--text);
+}
+
+button.primary,
+button[variant="primary"] {
+    border-radius: 14px !important;
+}
+
+
+.prefix-status {
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.7;
+    margin-top: 10px;
+}
+
+.prefix-success {
+    background: #effdf3;
+    border: 1px solid #abefc6;
+    color: #027a48;
+}
+
+.prefix-error {
+    background: #fff1f3;
+    border: 1px solid #fecdd6;
+    color: #be123c;
+}
+
+.prefix-help {
+    color: var(--text-3);
+    font-size: 13px;
+    line-height: 1.7;
+    margin-bottom: 10px;
+}
+
+
+footer {
+    display: none !important;
+}
+
+@media (max-width: 1100px) {
+    .hero-top {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .hero-side {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .bubble {
+        max-width: 88%;
+    }
+
+    .dual-grid,
+    .latency-grid {
+        grid-template-columns: 1fr;
+    }
+}
+"""
+
+
+# ==================== Gradio App ====================
+
+with gr.Blocks(
+    title="华为 IT 动态多轮客服助手",
+    css=CUSTOM_CSS,
+    theme=gr.themes.Soft(
+        primary_hue="blue",
+        neutral_hue="slate",
+        radius_size="lg",
+    ),
+) as demo:
+    runtime_state = gr.State(value=new_runtime())
+    chat_history_state = gr.State(value=[])
+
+    gr.HTML("""
+    <div id="hero">
+        <div class="hero-top">
+            <div class="hero-title-wrap">
+                <div class="hero-badge">Huawei IT Support Assistant</div>
+                <div class="hero-title">华为 IT 动态多轮客服助手</div>
+                <div class="hero-desc">
+                    面向多轮 IT 支持场景的动态客服系统，支持 Query Update、Evidence Trigger、Policy Decision 与 Response Generation 的可解释闭环。
+                </div>
+            </div>
+            <div class="hero-side">
+                <div class="hero-metrics">
+                    <div class="hero-metrics-title">系统能力</div>
+                    <div class="hero-metrics-item"><span>多轮状态跟踪</span><b>Enabled</b></div>
+                    <div class="hero-metrics-item"><span>动态证据复用</span><b>Enabled</b></div>
+                    <div class="hero-metrics-item"><span>策略可解释性</span><b>Enabled</b></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """)
+
+    with gr.Row(elem_classes=["main-card"]):
+        with gr.Column(scale=7, min_width=680):
+            with gr.Group(elem_classes=["chat-shell"]):
+                gr.HTML("""
+                <div class="panel-header">
+                    <div class="panel-title-wrap">
+                        <div class="panel-title">对话面板</div>
+                        <div class="panel-subtitle">与系统进行多轮交互，左侧展示完整对话过程</div>
+                    </div>
+                    <div class="panel-dot"></div>
+                </div>
+                """)
+
+                chat_display = gr.HTML(
+                    value=render_chat([]),
+                    elem_classes=["chat-box"],
+                )
+
+                with gr.Group(elem_classes=["input-area"]):
+                    with gr.Row():
+                        user_box = gr.Textbox(
+                            placeholder="请输入用户问题，例如：VPN 登录提示账号无权限",
+                            show_label=False,
+                            scale=6,
+                            lines=3,
+                        )
+                        send_btn = gr.Button("发送", scale=1, variant="primary")
+
+                    reset_btn = gr.Button("清空并重新开始")
+
+                    with gr.Accordion("加载历史对话 Prefix", open=False):
+                        gr.HTML("""
+                        <div class="prefix-help">
+                            输入已有历史对话，系统会将其作为 dialogue history 加载。
+                            格式示例：<br>
+                            用户: 我的 VPN 登录不了<br>
+                            客服: 请问有什么具体报错？<br>
+                            用户: 提示账号无权限 <br>
+                            客服: 请问您是否已经申请了VPN权限？
+                        </div>
+                        """)
+                        prefix_box = gr.Textbox(
+                            placeholder=(
+                                "用户: 我的 VPN 登录不了\n"
+                                "客服: 请问有什么具体报错？\n"
+                                "用户: 提示账号无权限"
+                            ),
+                            show_label=False,
+                            lines=8,
+                        )
+                        load_prefix_btn = gr.Button("加载为历史对话", variant="secondary")
+                        prefix_status = gr.HTML(value="")
+
+        with gr.Column(scale=5, min_width=520):
+            with gr.Group(elem_classes=["state-shell"]):
+                gr.HTML("""
+                <div class="panel-header">
+                    <div class="panel-title-wrap">
+                        <div class="panel-title">当前轮状态</div>
+                        <div class="panel-subtitle">系统内部决策链路与证据状态展示</div>
+                    </div>
+                </div>
+                """)
+
+                state_cards = gr.HTML(
+                    value=render_state_cards({}),
+                    elem_classes=["state-html"],
+                )
+
+                with gr.Accordion("查看完整 JSON 状态", open=False):
+                    state_json = gr.JSON(value={}, label=None)
+
+    send_btn.click(
+        fn=chat,
+        inputs=[user_box, chat_history_state, runtime_state],
+        outputs=[
+            user_box,
+            chat_display,
+            runtime_state,
+            chat_history_state,
+            state_cards,
+            state_json,
+        ],
+    )
+
+    user_box.submit(
+        fn=chat,
+        inputs=[user_box, chat_history_state, runtime_state],
+        outputs=[
+            user_box,
+            chat_display,
+            runtime_state,
+            chat_history_state,
+            state_cards,
+            state_json,
+        ],
+    )
+
+    reset_btn.click(
+        fn=reset_chat,
+        inputs=[],
+        outputs=[
+            chat_display,
+            runtime_state,
+            chat_history_state,
+            state_cards,
+            state_json,
+        ],
+    )
+
+    load_prefix_btn.click(
+        fn=load_prefix_from_text,
+        inputs=[prefix_box, runtime_state],
+        outputs=[
+            chat_display,
+            runtime_state,
+            chat_history_state,
+            state_cards,
+            state_json,
+            prefix_status,
+        ],
+    )
+
+if __name__ == "__main__":
+    demo.launch(
+        server_name="10.67.43.9",
+        server_port=7860,
+        share=False,
+    )
