@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from Agent.utils.scu_rag import batch_zefeng_rag
@@ -338,7 +339,12 @@ class MemoryAgent:
         self.mode = mode
         self.max_topic_depth = max_topic_depth
         self.show_state = show_state
+
         self.memory = init_memory()
+
+        # 对外暴露当前轮状态，供 Project / Web UI 使用。
+        # 不参与 Agent 内部决策。
+        self.last_turn_state = {}
 
     # ========================================================
     # LLM
@@ -611,9 +617,26 @@ class MemoryAgent:
         if not user:
             raise ValueError("Current user message is empty")
 
+        # 每轮开始时重置对外状态。
+        self.last_turn_state = {}
+
+        latency = {
+            "query_ms": 0,
+            "trigger_ms": 0,
+            "rag_ms": 0,
+            "topic_ms": 0,
+            "policy_ms": 0,
+            "response_ms": 0,
+            "total_ms": 0,
+        }
+
+        total_start = time.perf_counter()
+
         # ----------------------------------------------------
         # 1. Query
         # ----------------------------------------------------
+
+        start = time.perf_counter()
 
         query_state = self.call_llm(
             self.query_prompt,
@@ -624,11 +647,17 @@ class MemoryAgent:
             },
         )
 
+        latency["query_ms"] = round(
+            (time.perf_counter() - start) * 1000
+        )
+
         self.update_issue(query_state)
 
         # ----------------------------------------------------
         # 2. Trigger
         # ----------------------------------------------------
+
+        start = time.perf_counter()
 
         trigger_state = self.call_llm(
             self.trigger_prompt,
@@ -639,6 +668,10 @@ class MemoryAgent:
                 },
                 "active_cases": self.memory["evidence_state"]["active_cases"],
             },
+        )
+
+        latency["trigger_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
         # ----------------------------------------------------
@@ -656,14 +689,30 @@ class MemoryAgent:
             if not query:
                 raise ValueError("RAG query is empty")
 
+            # ---------------- RAG ----------------
+
+            start = time.perf_counter()
+
             evidence = batch_zefeng_rag(
                 [history_to_text(dialogue_history)],
                 [query],
             )[0]
 
+            latency["rag_ms"] = round(
+                (time.perf_counter() - start) * 1000
+            )
+
+            # ---------------- Topic ----------------
+
+            start = time.perf_counter()
+
             topic_structure = self.generate_topic_structure(
                 query=query,
                 cases=evidence,
+            )
+
+            latency["topic_ms"] = round(
+                (time.perf_counter() - start) * 1000
             )
 
         else:
@@ -687,6 +736,8 @@ class MemoryAgent:
                 "topic_structure": self.memory["evidence_state"]["topic_structure"],
             }
 
+        start = time.perf_counter()
+
         policy_state = self.call_llm(
             self.policy_prompt,
             {
@@ -696,6 +747,10 @@ class MemoryAgent:
                 "dialogue_state": self.memory["dialogue_state"],
                 "current": {"u": user},
             },
+        )
+
+        latency["policy_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
         self.update_interaction(policy_state)
@@ -719,6 +774,8 @@ class MemoryAgent:
             "information": policy_state.get("information"),
         }
 
+        start = time.perf_counter()
+
         response_state = self.call_llm(
             self.response_prompt,
             {
@@ -726,6 +783,10 @@ class MemoryAgent:
                 "policy": response_policy,
                 "evidence": selected_evidence,
             },
+        )
+
+        latency["response_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
         response = (
@@ -738,6 +799,26 @@ class MemoryAgent:
         response = str(response).strip()
 
         self.update_dialogue(user, response)
+
+        # ----------------------------------------------------
+        # 6. Latency + External Turn State
+        # ----------------------------------------------------
+
+        latency["total_ms"] = round(
+            (time.perf_counter() - total_start) * 1000
+        )
+
+        self.last_turn_state = {
+            "query": query_state,
+            "trigger": trigger_state,
+            "evidence": {
+                "active_cases": self.memory["evidence_state"]["active_cases"],
+                "topic_structure": self.memory["evidence_state"]["topic_structure"],
+            },
+            "policy": policy_state,
+            "response": response,
+            "latency": latency,
+        }
 
         # ----------------------------------------------------
         # Display
@@ -753,3 +834,4 @@ class MemoryAgent:
 
     def reset(self):
         self.memory = init_memory()
+        self.last_turn_state = {}
