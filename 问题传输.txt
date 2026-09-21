@@ -1,4 +1,3 @@
-    "turns": [
       {
         "turn_id": 0,
         "dialog_id": "220597650",
@@ -27,6 +26,24 @@
           "query_mode": "rewrite",
           "query_text": "MateBook Fold 是否可以安装 Welink",
           "reason": "用户提出了一个新的 IT 问题，询问特定设备是否支持安装指定软件。"
+        },
+        "trigger_raw": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "## Role\n\n你是企业内部 IT 客服知识检索系统中的 Trigger Predictor。\n\n你负责判断当前轮是否需要调用 RAG 获取新的案例证据。\n\n⸻\n\n## Objective\n\n根据当前 current_query 和已有 active_cases，判断当前轮的证据使用方式：\n\n* 不需要案例证据；\n* 复用已有案例证据；\n* 重新调用 RAG 获取新的案例证据。\n\ncurrent_query 已由 Query Predictor 确定，表示当前用户的检索意图。\n\n你只负责 Evidence Routing，不重新判断或修改用户意图。\n\n⸻\n\n## Input\n\n输入 JSON 包含以下字段。\n\n1. current_query\n\nQuery Predictor 已确定的当前检索意图。\n\ncurrent_query 是判断当前证据需求的唯一问题依据。\n\n你必须直接使用该 Query，不判断其是否正确，不重新解释、改写或补全 Query。\n\n⸻\n\n2. evidence_state\n\n当前维护的案例证据状态。\n\nactive_cases\n\n当前系统已经持有、可以继续复用的案例证据。\n\nactive_cases 用于判断已有证据是否足以支持 current_query。\n\n如果 active_cases 为空，表示当前没有可复用的案例证据。\n\n⸻\n\n## Decision Space\n\nevidence_mode 只能选择以下三类：\n\nno_evidence_needed\n\n当前 current_query 不需要案例知识即可继续处理。\n\n例如，当前 Query 不构成需要企业内部案例知识支持的检索需求。\n\n⸻\n\nreuse_existing_evidence\n\n当前 current_query 需要案例知识，并且 active_cases 中已有证据足以覆盖当前 Query 的知识需求。\n\n选择该模式要求已有证据与当前 Query 的具体问题匹配，并能够提供足够的信息支持后续处理。\n\n⸻\n\nretrieve_new_evidence\n\n当前 current_query 需要案例知识，但现有 active_cases 无法提供足够证据，需要重新调用 RAG。\n\n包括：\n\n* active_cases 为空；\n* 现有案例与当前 Query 的具体问题不匹配；\n* 现有案例只有主题、产品或领域相关，但不能覆盖当前具体问题；\n* 现有案例只能覆盖当前 Query 的部分知识需求。\n\n⸻\n\n## Decision Rules\n\n按照以下顺序判断。\n\nStep 1: Evidence Need\n\n判断当前 current_query 是否需要企业内部案例知识。\n\n如果不需要：\n\n→ no_evidence_needed\n\n如果需要：\n\n→ 继续 Step 2。\n\n⸻\n\nStep 2: Evidence Sufficiency\n\n判断当前 active_cases 是否足以支持 current_query。\n\n只有当现有案例能够覆盖当前 Query 的具体知识需求时：\n\n→ reuse_existing_evidence\n\n否则：\n\n→ retrieve_new_evidence\n\n判断 Evidence Sufficiency 时，应关注案例是否能够支持当前 Query 的具体问题。\n\n不能仅因为以下情况就认为 Evidence 足够：\n\n* 产品名称相同；\n* 软件或系统相同；\n* 属于相同 IT 领域；\n* 案例标题相似；\n* 包含部分相同关键词；\n* 仅覆盖当前 Query 的部分需求。\n\n主题相关不等于证据充分。\n\nEvidence Sufficiency 必须针对 Query 中的用户目标判断。共享对象、场景、症状或关键词，不代表 Evidence 能够支持该 Query。尤其不能用解决“问题原因/症状”的 Case，替代用户明确请求的目标操作。\n⸻\n\n## Constraints\n\n必须遵守以下规则：\n\n1. 完全信任 current_query。\n    不判断 Query 是否正确，不重新理解用户意图，不修改、改写或补全 Query。\n2. 不要根据案例反向推断用户意图。\n    active_cases 只能作为 Evidence，不能用于给 Query 增加用户没有表达的信息。\n3. 只判断 Evidence 是否足够。\n    不负责选择、排序或推荐具体 Case。\n4. 不进行 Policy 决策。\n    不判断下一步应该询问、澄清、解释、推荐案例、确认流程或转人工。\n5. 不生成用户回复。\n    不回答用户问题，不生成解决方案或客服回复。\n6. Evidence Sufficiency 必须针对具体 Query 判断。\n    同一产品、系统或领域不代表解决同一个问题。\n\n⸻\n\n## Output Contract\n\n只输出合法 JSON，不输出任何额外内容：\n\n{\n“trigger”: true,\n“evidence_mode”: “retrieve_new_evidence”,\n“reason”: “一句简短原因”\n}\n\n字段必须满足以下约束：\n\n* evidence_mode = \"no_evidence_needed\"\n    → trigger = false\n* evidence_mode = \"reuse_existing_evidence\"\n    → trigger = false\n* evidence_mode = \"retrieve_new_evidence\"\n    → trigger = true\n\nreason 只说明 Evidence Routing 的直接原因，例如：\n\n* 当前 Query 不需要案例知识；\n* 现有案例已充分覆盖当前 Query；\n* 现有案例与当前 Query 不匹配；\n* 现有案例只能覆盖部分需求；\n* 当前没有可复用案例。\n\n不要在 reason 中选择具体 Case、提出服务策略或生成解决方案。"
+            },
+            {
+              "role": "user",
+              "content": "{\"current_issue\": \"MateBook Fold 是否可以安装 Welink\", \"evidence_state\": {\"active_cases\": []}}"
+            }
+          ],
+          "response": "{\n\"trigger\": true,\n\"evidence_mode\": \"retrieve_new_evidence\",\n\"reason\": \"当前没有可复用案例\"\n}",
+          "parsed_response": null,
+          "success": true,
+          "error": null,
+          "retry_count": 0,
+          "format_valid": true
         },
         "trigger": {
           "trigger": true,
@@ -210,7 +227,5 @@
           "retry_count": 0,
           "format_valid": true
         },
-        "response": {
-          "response": "您好，目前通过公开市场购买的MateBook Fold 非凡大师鸿蒙单框架电脑，暂时不支持安装华为内部通用办公软件。如果需要使用WeLink等内部软件，建议您通过测试或beta渠道尝试获取，后续会随岗位应用齐套后正式引入。如需进一步了解，可以参考相关案例 [KT00370519]。"
-        }
+        "response": "您好，目前通过公开市场购买的MateBook Fold 非凡大师鸿蒙单框架电脑，暂时不支持安装华为内部通用办公软件。如果需要使用WeLink等内部软件，建议您通过测试或beta渠道尝试获取，后续会随岗位应用齐套后正式引入。如需进一步了解，可以参考相关案例 [KT00370519]。"
       },
