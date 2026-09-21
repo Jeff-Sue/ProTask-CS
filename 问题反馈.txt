@@ -12,7 +12,6 @@ from Agent.utils.qwen_api_multi import single_inference, parallel_inference
 def parse_json(text):
     if isinstance(text, dict):
         return text
-
     if not isinstance(text, str):
         return {}
 
@@ -44,155 +43,81 @@ def parse_json(text):
 
 def parse_llm_output(output):
     parsed = parse_json(output)
-
     if not parsed:
         return {}
-
-    # 兼容 inference wrapper:
-    # {
-    #     "response": "...",
-    #     ...
-    # }
     if "response" not in parsed:
         return parsed
-
-    response = parsed.get("response", "")
-
-    if isinstance(response, dict):
-        return response
-
-    return parse_json(response)
+    return parse_json(parsed.get("response", ""))
 
 
 def prompt_read(path):
     path = Path(path)
-
     if not path.exists():
         raise FileNotFoundError(f"Prompt file not found: {path}")
-
     return path.read_text(encoding="utf-8").strip()
 
 
 def build_messages(system_prompt, data):
     return [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {
-            "role": "user",
-            "content": json.dumps(data, ensure_ascii=False),
-        },
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
     ]
 
 
 def history_to_text(history):
     lines = []
-
     for msg in history:
         if msg.get("role") == "user":
             lines.append(f"用户: {msg.get('content', '')}")
-
         elif msg.get("role") == "assistant":
             lines.append(f"客服: {msg.get('content', '')}")
-
     return "\n".join(lines)
 
 
 def get_case_id(case):
     if not isinstance(case, dict):
         return ""
-
-    return str(
-        case.get("case_id")
-        or case.get("id")
-        or case.get("caseId")
-        or ""
-    ).strip()
+    return str(case.get("case_id") or case.get("id") or case.get("caseId") or "").strip()
 
 
 def case_map_from_cases(cases):
-    return {
-        get_case_id(case): case
-        for case in cases or []
-        if get_case_id(case)
-    }
-
-
-def normalize_case_ids(value):
-    if value is None:
-        return []
-
-    if isinstance(value, str):
-        value = [value]
-
-    if not isinstance(value, list):
-        return []
-
-    return list(
-        dict.fromkeys(
-            str(x).strip()
-            for x in value
-            if str(x).strip()
-        )
-    )
+    return {get_case_id(case): case for case in cases or [] if get_case_id(case)}
 
 
 def get_policy_case_ids(policy_state):
     information = policy_state.get("information")
-
     if not isinstance(information, dict):
         return []
 
     value = information.get("case_id")
-
     if value is None:
         value = information.get("case_ids")
 
     if value is None:
         return []
-
     if isinstance(value, str):
         value = [value]
-
     if not isinstance(value, list):
         return []
 
-    return list(
-        dict.fromkeys(
-            str(x).strip()
-            for x in value
-            if str(x).strip()
-        )
-    )
+    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
 
 
 def get_selected_evidence(policy_state, active_cases):
-    if policy_state.get("label") not in {
-        "CaseRecommendation",
-        "ExplainedResponse",
-    }:
+    if policy_state.get("label") not in {"CaseRecommendation", "ExplainedResponse"}:
         return None
 
     case_ids = get_policy_case_ids(policy_state)
-
     if not case_ids:
         return None
 
     case_map = case_map_from_cases(active_cases)
-
-    selected = [
-        case_map[case_id]
-        for case_id in case_ids
-        if case_id in case_map
-    ]
+    selected = [case_map[cid] for cid in case_ids if cid in case_map]
 
     if not selected:
         return None
-
     if len(selected) == 1:
         return selected[0]
-
     return selected
 
 
@@ -206,18 +131,15 @@ def init_memory():
             "current_issue": "",
             "query_history": [],
         },
-
         "evidence_state": {
             "active_cases": [],
             "topic_structure": {},
         },
-
         "interaction_state": {
             "stage": "Start",
             "last_policy": None,
             "policy_history": [],
         },
-
         "dialogue_state": {
             "recent_history": [],
         },
@@ -225,15 +147,10 @@ def init_memory():
 
 
 # ============================================================
-# Topic Structure Utils
+# Topic Structure
 # ============================================================
 
-def build_topic_split_input(
-    query,
-    cases,
-    parent_path,
-    depth,
-):
+def build_topic_split_input(query, cases, parent_path, depth):
     return {
         "query": query,
         "parent_path": parent_path,
@@ -242,152 +159,52 @@ def build_topic_split_input(
     }
 
 
-def make_leaf(
-    case_id,
-    topic=None,
-    split_status="single_case",
-):
+def make_leaf(case_id, topic=None):
     return {
         "topic": topic or case_id,
         "case_ids": [case_id],
         "leaf": True,
         "case_id": case_id,
         "children": [],
-        "dimension": "",
-        "split_status": split_status,
     }
 
 
-def stop_topic_refinement(
-    node,
-    split_status,
-):
-    """
-    Stop refining a multi-case node.
-
-    Important:
-    leaf=True does not necessarily mean single case.
-    split_status tells us why refinement stopped.
-    """
-
-    node["leaf"] = True
-    node["dimension"] = ""
-    node["children"] = []
-    node["split_status"] = split_status
-
-
-def normalize_topic_assignment(
-    result,
-    expected_case_ids,
-):
-    """
-    Validate LLM output and convert:
-
-    {
-        "split": true,
-        "dimension": "...",
-        "assignments": [
-            {"case_id": "A", "topic": "X"},
-            {"case_id": "B", "topic": "X"},
-            {"case_id": "C", "topic": "Y"}
-        ]
-    }
-
-    into:
-
-    {
-        "split": True,
-        "dimension": "...",
-        "children": [
-            {
-                "topic": "X",
-                "case_ids": ["A", "B"]
-            },
-            {
-                "topic": "Y",
-                "case_ids": ["C"]
-            }
-        ]
-    }
-
-    Python is responsible for:
-    - complete coverage
-    - exclusivity
-    - grouping
-    - children construction
-    """
-
-    if not isinstance(result, dict):
+def normalize_split(split_result, expected_case_ids):
+    if not isinstance(split_result, dict):
         return None, "output is not a dict"
 
-    # --------------------------------------------------------
-    # split
-    # --------------------------------------------------------
-
-    split = result.get("split")
-
+    split = split_result.get("split")
     if not isinstance(split, bool):
         return None, "missing or invalid split"
 
-    # --------------------------------------------------------
-    # no meaningful split
-    # --------------------------------------------------------
-
-    if split is False:
+    if not split:
         return {
             "split": False,
             "dimension": "",
             "children": [],
         }, ""
 
-    # --------------------------------------------------------
-    # split = true
-    # --------------------------------------------------------
-
-    dimension = str(
-        result.get("dimension", "")
-    ).strip()
+    dimension = str(split_result.get("dimension", "")).strip()
+    assignments = split_result.get("assignments", [])
 
     if not dimension:
         return None, "missing dimension"
 
-    assignments = result.get("assignments")
-
     if not isinstance(assignments, list):
-        return None, "assignments is not a list"
-
-    expected_case_ids = [
-        str(case_id).strip()
-        for case_id in expected_case_ids
-        if str(case_id).strip()
-    ]
+        return None, "assignments must be a list"
 
     expected_set = set(expected_case_ids)
-
-    # --------------------------------------------------------
-    # Validate each assignment
-    # --------------------------------------------------------
-
     assignment_map = {}
 
     for item in assignments:
-
         if not isinstance(item, dict):
             return None, "assignment is not a dict"
 
-        case_id = str(
-            item.get("case_id", "")
-        ).strip()
+        case_id = str(item.get("case_id", "")).strip()
+        topic = str(item.get("topic", "")).strip()
 
-        topic = str(
-            item.get("topic", "")
-        ).strip()
-
-        if not case_id:
-            return None, "assignment missing case_id"
-
-        if not topic:
-            return None, f"assignment missing topic: {case_id}"
+        if not case_id or not topic:
+            return None, "assignment missing case_id or topic"
 
         if case_id not in expected_set:
             return None, f"unknown case_id: {case_id}"
@@ -397,56 +214,54 @@ def normalize_topic_assignment(
 
         assignment_map[case_id] = topic
 
-    # --------------------------------------------------------
-    # Check complete coverage
-    # --------------------------------------------------------
-
-    missing_case_ids = [
+    missing = [
         case_id
         for case_id in expected_case_ids
         if case_id not in assignment_map
     ]
 
-    if missing_case_ids:
-        return None, f"missing case_ids: {missing_case_ids}"
+    if missing:
+        return None, f"missing case_ids: {missing}"
 
-    # --------------------------------------------------------
-    # Group assignments by topic
-    # --------------------------------------------------------
+    groups = {}
 
-    topic_groups = {}
-
-    # Preserve original case order
     for case_id in expected_case_ids:
-
         topic = assignment_map[case_id]
+        groups.setdefault(topic, []).append(case_id)
 
-        if topic not in topic_groups:
-            topic_groups[topic] = []
-
-        topic_groups[topic].append(case_id)
-
-    # --------------------------------------------------------
-    # A valid split must create >= 2 groups
-    # --------------------------------------------------------
-
-    if len(topic_groups) < 2:
+    if len(groups) < 2:
         return None, "fewer than 2 valid topic groups"
 
-    children = []
-
-    for topic, case_ids in topic_groups.items():
-
-        children.append({
+    children = [
+        {
             "topic": topic,
             "case_ids": case_ids,
-        })
+        }
+        for topic, case_ids in groups.items()
+    ]
 
     return {
         "split": True,
         "dimension": dimension,
         "children": children,
     }, ""
+
+
+def stop_topic_refinement(node, split_status):
+    node["leaf"] = True
+    node["dimension"] = ""
+    node["children"] = []
+    node["split_status"] = split_status
+
+
+def normalize_case_ids(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
 
 
 def format_topic_tree(tree):
@@ -456,97 +271,37 @@ def format_topic_tree(tree):
     lines = []
 
     def node_text(node):
-
-        topic = str(
-            node.get("topic", "")
-        ).strip()
-
-        dimension = str(
-            node.get("dimension", "")
-        ).strip()
-
-        case_ids = normalize_case_ids(
-            node.get("case_ids")
-        )
-
-        split_status = str(
-            node.get("split_status", "")
-        ).strip()
-
-        # ----------------------------------------------------
-        # Leaf
-        # ----------------------------------------------------
+        topic = str(node.get("topic", "")).strip()
+        dimension = str(node.get("dimension", "")).strip()
+        case_ids = normalize_case_ids(node.get("case_ids"))
 
         if node.get("leaf"):
-
             if case_ids:
                 ids = ", ".join(case_ids)
-
-                if topic and topic not in case_ids:
-                    text = f"{topic}  [{ids}]"
-                else:
-                    text = f"[{ids}]"
-
-            else:
-                text = topic or "Unknown"
-
-            if split_status:
-                text += f"  ({split_status})"
-
-            return text
-
-        # ----------------------------------------------------
-        # Internal node
-        # ----------------------------------------------------
+                return f"{topic}  [{ids}]" if topic and topic not in case_ids else f"[{ids}]"
+            return topic or "Unknown"
 
         if dimension:
             return f"{topic}  <{dimension}>"
 
         return topic or "Unknown"
 
-    def walk(
-        node,
-        prefix="",
-        is_last=True,
-        root=False,
-    ):
-
+    def walk(node, prefix="", is_last=True, root=False):
         if root:
             lines.append(node_text(node))
-
         else:
-            lines.append(
-                prefix
-                + ("└─ " if is_last else "├─ ")
-                + node_text(node)
-            )
+            lines.append(prefix + ("└─ " if is_last else "├─ ") + node_text(node))
 
         children = node.get("children", [])
-
         if not children:
             return
 
-        child_prefix = (
-            prefix
-            if root
-            else prefix
-            + ("   " if is_last else "│  ")
-        )
+        child_prefix = prefix if root else prefix + ("   " if is_last else "│  ")
 
         for i, child in enumerate(children):
+            walk(child, child_prefix, i == len(children) - 1, False)
 
-            walk(
-                child,
-                child_prefix,
-                i == len(children) - 1,
-                False,
-            )
-
-    walk(
-        tree,
-        root=True,
-    )
-
+    walk(tree, root=True)
     return "\n".join(lines)
 
 
@@ -555,14 +310,11 @@ def format_topic_tree(tree):
 # ============================================================
 
 class MemoryAgent:
-
     """
     Stateful customer-service agent.
 
     One instance corresponds to one dialogue.
-
-    Call reset() before starting a new dialogue
-    if reusing the same instance.
+    Call reset() before starting a new dialogue if reusing it.
     """
 
     def __init__(
@@ -572,268 +324,103 @@ class MemoryAgent:
         max_topic_depth=8,
         show_state=True,
     ):
-
         prompt_dir = Path(prompt_dir)
 
-        self.query_prompt = prompt_read(
-            prompt_dir / "query.prompt"
-        )
+        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
+        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
+        self.topic_prompt = prompt_read(prompt_dir / "topic.prompt")
+        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
+        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
 
-        self.trigger_prompt = prompt_read(
-            prompt_dir / "trigger.prompt"
-        )
-
-        self.topic_prompt = prompt_read(
-            prompt_dir / "topic.prompt"
-        )
-
-        self.policy_prompt = prompt_read(
-            prompt_dir / "policy.prompt"
-        )
-
-        self.response_prompt = prompt_read(
-            prompt_dir / "response.prompt"
-        )
-
-        if mode not in {
-            "single",
-            "parallel",
-        }:
-            raise ValueError(
-                f"Unsupported mode: {mode}"
-            )
+        if mode not in {"single", "parallel"}:
+            raise ValueError(f"Unsupported mode: {mode}")
 
         self.mode = mode
         self.max_topic_depth = max_topic_depth
         self.show_state = show_state
-
         self.memory = init_memory()
 
     # ========================================================
     # LLM
     # ========================================================
 
-    def call_llm(
-        self,
-        prompt,
-        data,
-    ):
-
-        messages = build_messages(
-            prompt,
-            data,
-        )
+    def call_llm(self, prompt, data):
+        messages = build_messages(prompt, data)
 
         if self.mode == "single":
-
-            output = single_inference(
-                messages
-            )
-
+            output = single_inference(messages)
         else:
+            output = parallel_inference([messages])[0]
 
-            output = parallel_inference(
-                [messages]
-            )[0]
+        return parse_llm_output(output)
 
-        return parse_llm_output(
-            output
-        )
-
-    def call_llm_batch(
-        self,
-        messages,
-    ):
-
+    def call_llm_batch(self, messages):
         if not messages:
             return []
 
         if self.mode == "single":
-
-            outputs = [
-                single_inference(message)
-                for message in messages
-            ]
-
+            outputs = [single_inference(message) for message in messages]
         else:
+            outputs = parallel_inference(messages)
 
-            outputs = parallel_inference(
-                messages
-            )
-
-        return [
-            parse_llm_output(output)
-            for output in outputs
-        ]
+        return [parse_llm_output(output) for output in outputs]
 
     # ========================================================
     # Memory Update
     # ========================================================
 
-    def update_issue(
-        self,
-        query_state,
-    ):
+    def update_issue(self, query_state):
+        mode = str(query_state.get("query_mode", "none")).strip()
+        query = str(query_state.get("query_text", "")).strip()
 
-        mode = str(
-            query_state.get(
-                "query_mode",
-                "none",
-            )
-        ).strip()
+        if mode in {"rewrite", "refine"} and query:
+            self.memory["issue_state"]["current_issue"] = query
+            self.memory["issue_state"]["query_history"].append(query)
 
-        query = str(
-            query_state.get(
-                "query_text",
-                "",
-            )
-        ).strip()
-
-        if (
-            mode in {"rewrite", "refine"}
-            and query
-        ):
-
-            self.memory[
-                "issue_state"
-            ][
-                "current_issue"
-            ] = query
-
-            self.memory[
-                "issue_state"
-            ][
-                "query_history"
-            ].append(query)
-
-    def update_evidence(
-        self,
-        trigger_state,
-        evidence,
-        topic_structure=None,
-    ):
-
-        if (
-            trigger_state.get(
-                "evidence_mode"
-            )
-            != "retrieve_new_evidence"
-        ):
+    def update_evidence(self, trigger_state, evidence, topic_structure=None):
+        if trigger_state.get("evidence_mode") != "retrieve_new_evidence":
             return
 
-        self.memory[
-            "evidence_state"
-        ][
-            "active_cases"
-        ] = evidence
+        self.memory["evidence_state"]["active_cases"] = evidence
+        self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
 
-        self.memory[
-            "evidence_state"
-        ][
-            "topic_structure"
-        ] = topic_structure or {}
-
-    def update_interaction(
-        self,
-        policy_state,
-    ):
-
-        label = str(
-            policy_state.get(
-                "label",
-                "",
-            )
-        ).strip()
-
-        information = policy_state.get(
-            "information"
-        )
+    def update_interaction(self, policy_state):
+        label = str(policy_state.get("label", "")).strip()
+        information = policy_state.get("information")
 
         policy = {
             "label": label,
             "information": information,
         }
 
-        interaction = self.memory[
-            "interaction_state"
-        ]
+        interaction = self.memory["interaction_state"]
+        interaction["last_policy"] = policy
+        interaction["policy_history"].append(policy)
 
-        interaction[
-            "last_policy"
-        ] = policy
-
-        interaction[
-            "policy_history"
-        ].append(policy)
-
-        if label in {
-            "AskMissingSlot",
-            "AskClarification",
-        }:
-
-            interaction[
-                "stage"
-            ] = "Clarification"
-
-        elif label in {
-            "ExplainedResponse",
-            "CaseRecommendation",
-        }:
-
-            interaction[
-                "stage"
-            ] = "Resolution"
-
+        if label in {"AskMissingSlot", "AskClarification"}:
+            interaction["stage"] = "Clarification"
+        elif label in {"ExplainedResponse", "CaseRecommendation"}:
+            interaction["stage"] = "Resolution"
         elif label == "Handoff":
+            interaction["stage"] = "End"
 
-            interaction[
-                "stage"
-            ] = "End"
-
-    def update_dialogue(
-        self,
-        user,
-        response,
-    ):
-
-        history = self.memory[
-            "dialogue_state"
-        ][
-            "recent_history"
-        ]
+    def update_dialogue(self, user, response):
+        history = self.memory["dialogue_state"]["recent_history"]
 
         history.append({
             "user": user,
             "assistant": response,
         })
 
-        self.memory[
-            "dialogue_state"
-        ][
-            "recent_history"
-        ] = history[-5:]
+        self.memory["dialogue_state"]["recent_history"] = history[-5:]
 
     # ========================================================
     # Topic Structure Generation
     # ========================================================
 
-    def generate_topic_structure(
-        self,
-        query,
-        cases,
-    ):
-
-        case_map = case_map_from_cases(
-            cases
-        )
-
-        case_ids = list(
-            case_map.keys()
-        )
-
-        # ----------------------------------------------------
-        # Root
-        # ----------------------------------------------------
+    def generate_topic_structure(self, query, cases):
+        case_map = case_map_from_cases(cases)
+        case_ids = list(case_map)
 
         root = {
             "query": query,
@@ -841,35 +428,15 @@ class MemoryAgent:
             "case_ids": case_ids,
             "leaf": len(case_ids) <= 1,
             "children": [],
-            "dimension": "",
-            "split_status": "",
         }
 
-        # ----------------------------------------------------
-        # No cases
-        # ----------------------------------------------------
-
         if not case_ids:
-
-            root["leaf"] = True
-            root["split_status"] = "no_case"
-
             return root
-
-        # ----------------------------------------------------
-        # Single case
-        # ----------------------------------------------------
 
         if len(case_ids) == 1:
-
             root["case_id"] = case_ids[0]
             root["split_status"] = "single_case"
-
             return root
-
-        # ----------------------------------------------------
-        # Initial frontier
-        # ----------------------------------------------------
 
         frontier = [{
             "node": root,
@@ -880,248 +447,98 @@ class MemoryAgent:
 
         round_id = 0
 
-        # ====================================================
-        # Recursive refinement
-        # ====================================================
-
         while frontier:
-
-            print(
-                f"[TopicStructure] "
-                f"Round {round_id}: "
-                f"{len(frontier)} nodes"
-            )
+            print(f"[TopicStructure] Round {round_id}: {len(frontier)} nodes")
 
             active_frontier = []
 
-            # ------------------------------------------------
-            # Max depth
-            # ------------------------------------------------
-
             for task in frontier:
-
-                if (
-                    task["depth"]
-                    >= self.max_topic_depth
-                ):
-
-                    print(
-                        "[TopicStructure Stop] "
-                        "max_depth: "
-                        f"{task['case_ids']}"
-                    )
-
-                    stop_topic_refinement(
-                        task["node"],
-                        "max_depth",
-                    )
-
+                if task["depth"] >= self.max_topic_depth:
+                    print(f"[TopicStructure Warning] max_depth reached: {task['case_ids']}")
+                    stop_topic_refinement(task["node"], "max_depth")
                 else:
-
-                    active_frontier.append(
-                        task
-                    )
+                    active_frontier.append(task)
 
             if not active_frontier:
                 break
 
-            # ------------------------------------------------
-            # Build one-level split requests
-            # ------------------------------------------------
-
             messages = []
 
             for task in active_frontier:
+                node_cases = [case_map[case_id] for case_id in task["case_ids"]]
 
-                node_cases = [
-                    case_map[case_id]
-                    for case_id
-                    in task["case_ids"]
-                ]
-
-                split_input = (
-                    build_topic_split_input(
-                        query=query,
-                        cases=node_cases,
-                        parent_path=task[
-                            "parent_path"
-                        ],
-                        depth=task[
-                            "depth"
-                        ],
-                    )
+                split_input = build_topic_split_input(
+                    query=query,
+                    cases=node_cases,
+                    parent_path=task["parent_path"],
+                    depth=task["depth"],
                 )
 
-                messages.append(
-                    build_messages(
-                        self.topic_prompt,
-                        split_input,
-                    )
-                )
+                messages.append(build_messages(self.topic_prompt, split_input))
 
-            # ------------------------------------------------
-            # ONE LLM call per node
-            # No retry
-            # ------------------------------------------------
+            outputs = self.call_llm_batch(messages)
 
-            outputs = self.call_llm_batch(
-                messages
-            )
+            valid_results = {}
+
+            for idx, (task, output) in enumerate(zip(active_frontier, outputs)):
+                valid_split, error = normalize_split(output, task["case_ids"])
+
+                if valid_split:
+                    valid_results[idx] = valid_split
+                else:
+                    print(f"[TopicStructure Invalid] {error}")
+                    print("output:", output, flush=True)
 
             next_frontier = []
 
-            # ------------------------------------------------
-            # Process outputs
-            # ------------------------------------------------
-
-            for task, output in zip(
-                active_frontier,
-                outputs,
-            ):
-
+            for idx, task in enumerate(active_frontier):
                 node = task["node"]
+                valid_split = valid_results.get(idx)
 
-                normalized, error = (
-                    normalize_topic_assignment(
-                        output,
-                        task["case_ids"],
-                    )
-                )
-
-                # ============================================
-                # Invalid output
-                # ============================================
-
-                if normalized is None:
-
+                if not valid_split:
                     print(
-                        "[TopicStructure Invalid] "
-                        f"{error}"
+                        "[TopicStructure Warning] "
+                        f"invalid output, stop refinement: {task['case_ids']}"
                     )
-
-                    print(
-                        "case_ids:",
-                        task["case_ids"],
-                        flush=True,
-                    )
-
-                    print(
-                        "output:",
-                        output,
-                        flush=True,
-                    )
-
-                    stop_topic_refinement(
-                        node,
-                        "invalid_output",
-                    )
-
+                    stop_topic_refinement(node, "invalid_output")
                     continue
 
-                # ============================================
-                # Model decides there is no meaningful split
-                # ============================================
-
-                if normalized["split"] is False:
-
+                if valid_split["split"] is False:
                     print(
-                        "[TopicStructure Stop] "
-                        "no meaningful split: "
-                        f"{task['case_ids']}"
+                        "[TopicStructure] "
+                        f"no meaningful split: {task['case_ids']}"
                     )
-
-                    stop_topic_refinement(
-                        node,
-                        "no_meaningful_split",
-                    )
-
+                    stop_topic_refinement(node, "no_meaningful_split")
                     continue
-
-                # ============================================
-                # Valid split
-                # ============================================
 
                 node["leaf"] = False
-
-                node["dimension"] = (
-                    normalized["dimension"]
-                )
-
+                node["dimension"] = valid_split["dimension"]
                 node["children"] = []
+                node["split_status"] = "valid"
 
-                node[
-                    "split_status"
-                ] = "valid"
-
-                # --------------------------------------------
-                # Python constructs children
-                # --------------------------------------------
-
-                for child_info in (
-                    normalized["children"]
-                ):
-
-                    child_case_ids = (
-                        child_info["case_ids"]
-                    )
-
-                    child_topic = (
-                        child_info["topic"]
-                    )
-
-                    # ----------------------------------------
-                    # Single-case child
-                    # ----------------------------------------
-
-                    if (
-                        len(child_case_ids)
-                        == 1
-                    ):
-
-                        child_node = make_leaf(
-                            case_id=child_case_ids[0],
-                            topic=child_topic,
-                            split_status="single_case",
-                        )
-
-                        node[
-                            "children"
-                        ].append(
-                            child_node
-                        )
-
-                        continue
-
-                    # ----------------------------------------
-                    # Multi-case child
-                    # ----------------------------------------
+                for child_info in valid_split["children"]:
+                    child_case_ids = child_info["case_ids"]
+                    child_topic = child_info["topic"]
 
                     child_node = {
                         "topic": child_topic,
                         "case_ids": child_case_ids,
-                        "leaf": False,
+                        "leaf": len(child_case_ids) == 1,
                         "children": [],
-                        "dimension": "",
-                        "split_status": "",
                     }
 
-                    node[
-                        "children"
-                    ].append(
-                        child_node
-                    )
+                    node["children"].append(child_node)
 
-                    # Python decides recursion
+                    if len(child_case_ids) == 1:
+                        child_node["case_id"] = child_case_ids[0]
+                        child_node["split_status"] = "single_case"
+                        continue
+
                     next_frontier.append({
                         "node": child_node,
                         "case_ids": child_case_ids,
-                        "depth": (
-                            task["depth"] + 1
-                        ),
-                        "parent_path": (
-                            task["parent_path"]
-                            + [child_topic]
-                        ),
+                        "depth": task["depth"] + 1,
+                        "parent_path": task["parent_path"] + [child_topic],
                     })
 
             frontier = next_frontier
@@ -1133,124 +550,43 @@ class MemoryAgent:
     # State Display
     # ========================================================
 
-    def print_state(
-        self,
-        query_state,
-        trigger_state,
-        policy_state,
-    ):
-
+    def print_state(self, query_state, trigger_state, policy_state):
         if not self.show_state:
             return
 
-        query_mode = query_state.get(
-            "query_mode",
-            "",
-        )
+        query_mode = query_state.get("query_mode", "")
+        query_text = query_state.get("query_text", "")
+        trigger = trigger_state.get("trigger", "")
+        evidence_mode = trigger_state.get("evidence_mode", "")
 
-        query_text = query_state.get(
-            "query_text",
-            "",
-        )
+        active_cases = self.memory["evidence_state"]["active_cases"]
+        case_ids = [get_case_id(case) for case in active_cases if get_case_id(case)]
 
-        trigger = trigger_state.get(
-            "trigger",
-            "",
-        )
+        policy = policy_state.get("label", "")
+        information = policy_state.get("information")
+        topic_tree = format_topic_tree(self.memory["evidence_state"]["topic_structure"])
 
-        evidence_mode = trigger_state.get(
-            "evidence_mode",
-            "",
-        )
-
-        active_cases = self.memory[
-            "evidence_state"
-        ][
-            "active_cases"
-        ]
-
-        case_ids = [
-            get_case_id(case)
-            for case in active_cases
-            if get_case_id(case)
-        ]
-
-        policy = policy_state.get(
-            "label",
-            "",
-        )
-
-        information = policy_state.get(
-            "information"
-        )
-
-        topic_tree = format_topic_tree(
-            self.memory[
-                "evidence_state"
-            ][
-                "topic_structure"
-            ]
-        )
-
-        print(
-            "\n"
-            "╔══════════════ "
-            "AGENT STATE "
-            "══════════════╗"
-        )
-
-        print(
-            f" Query    : "
-            f"{query_mode} | "
-            f"{query_text}"
-        )
-
-        print(
-            f" Trigger  : "
-            f"{trigger}"
-        )
-
-        print(
-            f" Evidence : "
-            f"{evidence_mode}"
-        )
-
-        print(
-            f" Cases    : "
-            f"{', '.join(case_ids) if case_ids else 'None'}"
-        )
+        print("\n╔══════════════ AGENT STATE ══════════════╗")
+        print(f" Query    : {query_mode} | {query_text}")
+        print(f" Trigger  : {trigger}")
+        print(f" Evidence : {evidence_mode}")
+        print(f" Cases    : {', '.join(case_ids) if case_ids else 'None'}")
 
         print("\n Topic Tree")
-
         for line in topic_tree.splitlines():
             print(f" {line}")
 
-        print(
-            f"\n Policy   : "
-            f"{policy}"
-        )
-
-        print(
-            f" Info     : "
-            f"{information if information is not None else 'None'}"
-        )
-
-        print(
-            "╚══════════════════════════════════════════╝"
-        )
+        print(f"\n Policy   : {policy}")
+        print(f" Info     : {information if information is not None else 'None'}")
+        print("╚══════════════════════════════════════════╝")
 
     # ========================================================
     # Reply
     # ========================================================
 
-    def reply(
-        self,
-        dialogue_history,
-    ):
-
+    def reply(self, dialogue_history):
         """
         dialogue_history:
-
         [
             {"role": "user", "content": "..."},
             {"role": "assistant", "content": "..."},
@@ -1263,312 +599,149 @@ class MemoryAgent:
         """
 
         if not dialogue_history:
-            raise ValueError(
-                "dialogue_history is empty"
-            )
+            raise ValueError("dialogue_history is empty")
 
         last_msg = dialogue_history[-1]
 
-        if (
-            last_msg.get("role")
-            != "user"
-        ):
-            raise ValueError(
-                "The last message in "
-                "dialogue_history must be "
-                "from user."
-            )
+        if last_msg.get("role") != "user":
+            raise ValueError("The last message in dialogue_history must be from user.")
 
-        user = str(
-            last_msg.get(
-                "content",
-                "",
-            )
-        ).strip()
+        user = str(last_msg.get("content", "")).strip()
 
         if not user:
-            raise ValueError(
-                "Current user message is empty"
-            )
+            raise ValueError("Current user message is empty")
 
-        # ====================================================
+        # ----------------------------------------------------
         # 1. Query
-        # ====================================================
+        # ----------------------------------------------------
 
         query_state = self.call_llm(
             self.query_prompt,
             {
-                "issue_state":
-                    self.memory[
-                        "issue_state"
-                    ],
-
-                "dialogue_state":
-                    self.memory[
-                        "dialogue_state"
-                    ],
-
-                "current": {
-                    "u": user
-                },
+                "issue_state": self.memory["issue_state"],
+                "dialogue_state": self.memory["dialogue_state"],
+                "current": {"u": user},
             },
         )
 
-        self.update_issue(
-            query_state
-        )
+        self.update_issue(query_state)
 
-        # ====================================================
+        # ----------------------------------------------------
         # 2. Trigger
-        # ====================================================
+        # ----------------------------------------------------
 
         trigger_state = self.call_llm(
             self.trigger_prompt,
             {
                 "query": {
-                    "query_mode":
-                        query_state.get(
-                            "query_mode",
-                            "none",
-                        ),
-
-                    "query_text":
-                        query_state.get(
-                            "query_text",
-                            "",
-                        ),
+                    "query_mode": query_state.get("query_mode", "none"),
+                    "query_text": query_state.get("query_text", ""),
                 },
-
-                "active_cases":
-                    self.memory[
-                        "evidence_state"
-                    ][
-                        "active_cases"
-                    ],
+                "active_cases": self.memory["evidence_state"]["active_cases"],
             },
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # 3. RAG + Topic
-        # ====================================================
+        # ----------------------------------------------------
 
-        evidence_mode = (
-            trigger_state.get(
-                "evidence_mode",
-                "",
-            )
-        )
+        evidence_mode = trigger_state.get("evidence_mode", "")
 
-        if (
-            evidence_mode
-            == "retrieve_new_evidence"
-        ):
-
-            query = str(
-                query_state.get(
-                    "query_text",
-                    "",
-                )
-            ).strip()
+        if evidence_mode == "retrieve_new_evidence":
+            query = str(query_state.get("query_text", "")).strip()
 
             if not query:
-
-                query = (
-                    self.memory[
-                        "issue_state"
-                    ][
-                        "current_issue"
-                    ].strip()
-                )
+                query = self.memory["issue_state"]["current_issue"].strip()
 
             if not query:
-                raise ValueError(
-                    "RAG query is empty"
-                )
+                raise ValueError("RAG query is empty")
 
             evidence = batch_zefeng_rag(
-                [
-                    history_to_text(
-                        dialogue_history
-                    )
-                ],
+                [history_to_text(dialogue_history)],
                 [query],
             )[0]
 
-            topic_structure = (
-                self.generate_topic_structure(
-                    query=query,
-                    cases=evidence,
-                )
+            topic_structure = self.generate_topic_structure(
+                query=query,
+                cases=evidence,
             )
 
         else:
+            evidence = self.memory["evidence_state"]["active_cases"]
+            topic_structure = self.memory["evidence_state"]["topic_structure"]
 
-            evidence = (
-                self.memory[
-                    "evidence_state"
-                ][
-                    "active_cases"
-                ]
-            )
+        self.update_evidence(trigger_state, evidence, topic_structure)
 
-            topic_structure = (
-                self.memory[
-                    "evidence_state"
-                ][
-                    "topic_structure"
-                ]
-            )
-
-        self.update_evidence(
-            trigger_state,
-            evidence,
-            topic_structure,
-        )
-
-        # ====================================================
+        # ----------------------------------------------------
         # 4. Policy
-        # ====================================================
+        # ----------------------------------------------------
 
-        if (
-            evidence_mode
-            == "no_evidence_needed"
-        ):
-
+        if evidence_mode == "no_evidence_needed":
             policy_evidence = {
                 "active_cases": [],
                 "topic_structure": {},
             }
-
         else:
-
             policy_evidence = {
-                "active_cases":
-                    self.memory[
-                        "evidence_state"
-                    ][
-                        "active_cases"
-                    ],
-
-                "topic_structure":
-                    self.memory[
-                        "evidence_state"
-                    ][
-                        "topic_structure"
-                    ],
+                "active_cases": self.memory["evidence_state"]["active_cases"],
+                "topic_structure": self.memory["evidence_state"]["topic_structure"],
             }
 
         policy_state = self.call_llm(
             self.policy_prompt,
             {
-                "issue_state":
-                    self.memory[
-                        "issue_state"
-                    ],
-
-                "evidence_state":
-                    policy_evidence,
-
-                "interaction_state":
-                    self.memory[
-                        "interaction_state"
-                    ],
-
-                "dialogue_state":
-                    self.memory[
-                        "dialogue_state"
-                    ],
-
-                "current": {
-                    "u": user
-                },
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": policy_evidence,
+                "interaction_state": self.memory["interaction_state"],
+                "dialogue_state": self.memory["dialogue_state"],
+                "current": {"u": user},
             },
         )
 
-        self.update_interaction(
-            policy_state
-        )
+        self.update_interaction(policy_state)
 
-        # ====================================================
+        # ----------------------------------------------------
         # 5. Response
-        # ====================================================
+        # ----------------------------------------------------
 
-        selected_evidence = (
-            get_selected_evidence(
-                policy_state,
-                self.memory[
-                    "evidence_state"
-                ][
-                    "active_cases"
-                ],
-            )
+        selected_evidence = get_selected_evidence(
+            policy_state,
+            self.memory["evidence_state"]["active_cases"],
         )
 
         response_dialogue = {
-            "recent_history":
-                self.memory[
-                    "dialogue_state"
-                ][
-                    "recent_history"
-                ],
-
-            "current": {
-                "u": user
-            },
+            "recent_history": self.memory["dialogue_state"]["recent_history"],
+            "current": {"u": user},
         }
 
         response_policy = {
-            "label":
-                policy_state.get(
-                    "label",
-                    "",
-                ),
-
-            "information":
-                policy_state.get(
-                    "information"
-                ),
+            "label": policy_state.get("label", ""),
+            "information": policy_state.get("information"),
         }
 
         response_state = self.call_llm(
             self.response_prompt,
             {
-                "dialogue_state":
-                    response_dialogue,
-
-                "policy":
-                    response_policy,
-
-                "evidence":
-                    selected_evidence,
+                "dialogue_state": response_dialogue,
+                "policy": response_policy,
+                "evidence": selected_evidence,
             },
         )
 
         response = (
-            response_state.get(
-                "response"
-            )
-            or response_state.get(
-                "text"
-            )
-            or response_state.get(
-                "content"
-            )
+            response_state.get("response")
+            or response_state.get("text")
+            or response_state.get("content")
             or ""
         )
 
-        response = str(
-            response
-        ).strip()
+        response = str(response).strip()
 
-        self.update_dialogue(
-            user,
-            response,
-        )
+        self.update_dialogue(user, response)
 
-        # ====================================================
+        # ----------------------------------------------------
         # Display
-        # ====================================================
+        # ----------------------------------------------------
 
         self.print_state(
             query_state=query_state,
@@ -1577,10 +750,6 @@ class MemoryAgent:
         )
 
         return response
-
-    # ========================================================
-    # Reset
-    # ========================================================
 
     def reset(self):
         self.memory = init_memory()
