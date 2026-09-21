@@ -1,1244 +1,146 @@
-"""
-动态多轮 LLM-prompt Runtime 环境
-
-核心机制：
-1. 动态维护 dialogue_state，而不是每轮重新构造 gold prefix；
-2. 使用 active_evidence 是否为空决定链路：
-   - active_evidence 为空：Query -> Retrieval -> Trigger(use) -> Policy -> Guard -> Response
-   - active_evidence 非空：Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence -> Policy -> Guard -> Response
-3. prompt 文件必须放在当前脚本同级目录下的 prompts/ 文件夹中；
-4. 支持 json_repair 修复 LLM 输出 JSON；
-5. 支持非 debug 模式屏蔽底层 tqdm / print / 全部耗时输出；
-6. 支持连续澄清保护机制，避免无限 AskClarification / AskMissingSlot。
-"""
-
-from __future__ import annotations
-
-import contextlib
-import json
-import logging
-import os
-import re
-import time
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-
-# ==================== 可选依赖：json_repair ====================
-
-try:
-    from json_repair import repair_json  # type: ignore
-except Exception:
-    repair_json = None
-
-# ==================== 输出控制 ====================
-
-@contextlib.contextmanager
-def suppress_stdout_stderr(enabled: bool = True):
-    """
-    非 debug 模式下屏蔽底层 LLM/RAG 函数里的 print、tqdm、耗时输出等。
-    这类输出通常不是 logging，因此单纯设置 logging level 无法关闭。
-    """
-    if not enabled:
-        yield
-        return
-
-    with open(os.devnull, "w") as devnull:
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            yield
-
-
-# ==================== 可选：接入你原工程里的 LLM / RAG ====================
-
-try:
-    import sys
-    sys.path.append(str(Path(__file__).parent.parent.parent))
-    from utils.qwen_api import parallel_inference_without_extra_information  # type: ignore
-    from utils.scu_rag import rag  # type: ignore
-except Exception:
-    parallel_inference_without_extra_information = None
-    rag = None
-
-# ==================== 日志配置 ====================
-
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-# ==================== 枚举约束 ====================
-
-ALLOWED_QUERY_MODES = {"none", "reuse", "refine", "rewrite"}
-
-ALLOWED_EVIDENCE_MODES = {
-    "no_evidence_needed",
-    "retrieve_new_evidence",
-    "reuse_existing_evidence",
-}
-
-ALLOWED_POLICY_LABELS = {
-    "AskMissingSlot",
-    "AskClarification",
-    "ExplainedResponse",
-    "CaseRecommendation",
-    "Handoff",
-    "ProcessAcknowledgement",
-}
-
-CLARIFICATION_POLICIES = {"AskClarification", "AskMissingSlot"}
-
-# ==================== 数据结构 ====================
-
-@dataclass
-class DialogueTurn:
-    role: str  # "user" | "assistant"
-    text: str
-
-
-@dataclass
-class RetrievalCase:
-    case_id: str
-    title: str
-    content: str
-
-
-@dataclass
-class QueryState:
-    query_mode: str = "none"
-    query_text: str = ""
-    reason: str = ""
-
-
-@dataclass
-class TriggerState:
-    trigger: bool = False
-    evidence_mode: str = "no_evidence_needed"
-    reason: str = ""
-
-
-@dataclass
-class PolicyState:
-    label: str = "ProcessAcknowledgement"
-    reason: str = ""
-
-
-@dataclass
-class EvidenceState:
-    """
-    active_evidence 是当前已经被 Trigger 判断为可用的知识。
-    本脚本只用 active_evidence 是否为空来决定动态链路。
-    """
-    active_evidence: List[RetrievalCase] = field(default_factory=list)
-    evidence_source_query: str = ""
-    last_retrieved_cases: List[RetrievalCase] = field(default_factory=list)
-
-
-@dataclass
-class DialogueState:
-    dialogue_id: str
-    turns: List[DialogueTurn] = field(default_factory=list)
-    current_turn_id: int = 0
-    query_state: QueryState = field(default_factory=QueryState)
-    trigger_state: TriggerState = field(default_factory=TriggerState)
-    policy_state: PolicyState = field(default_factory=PolicyState)
-    evidence_state: EvidenceState = field(default_factory=EvidenceState)
-    clarification_streak: int = 0
-
-
-@dataclass
-class Latency:
-    query_ms: int = 0
-    retrieval_ms: int = 0
-    trigger_ms: int = 0
-    policy_ms: int = 0
-    response_ms: int = 0
-    total_ms: int = 0
-
-
-@dataclass
-class ClarificationGuardInfo:
-    enabled: bool
-    limit: int
-    before_streak: int
-    after_streak: int
-    applied: bool
-    original_label: str
-    final_label: str
-    reason: str = ""
-
-
-@dataclass
-class TurnResult:
-    dialogue_id: str
-    turn_id: int
-    user_input: str
-    query_state: QueryState
-    evidence_used_this_turn: List[RetrievalCase]
-    trigger_state: TriggerState
-    policy_state: PolicyState
-    response: str
-    latency: Latency
-    clarification_guard: ClarificationGuardInfo
-    state_snapshot: Dict[str, Any]
-
-    @property
-    def retrieval_output(self) -> List[RetrievalCase]:
-        """
-        向后兼容旧版 web_gradio.py。
-        语义上这里更准确叫 evidence_used_this_turn。
-        """
-        return self.evidence_used_this_turn
-
-
-# ==================== Prompt 管理 ====================
-
-# prompt 文件放在当前脚本同级目录下的 prompts/ 文件夹中。
-# 例如：
-# dynamic_multiturn_runtime.py
-# prompts/
-#   dynamic_query.prompt
-#   dynamic_trigger_use.prompt
-#   dynamic_trigger_retrieval.prompt
-#   dynamic_policy.prompt
-#   dynamic_response.prompt
-PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
-
-PROMPT_FILES = {
-    "query": "dynamic_query.prompt",
-    "trigger_use": "dynamic_trigger_use.prompt",
-    "trigger_retrieval": "dynamic_trigger_retrieval.prompt",
-    "policy": "dynamic_policy.prompt",
-    "response": "dynamic_response.prompt",
-}
-
-
-def load_prompt(prompt_name: str, prompt_dir: Path = PROMPT_DIR) -> str:
-    """
-    从当前脚本同级 prompts/ 目录读取动态多轮 prompt。
-    不再使用内置 DEFAULT_PROMPT；如果文件不存在，直接报错，避免误用旧 prompt。
-    """
-    if prompt_name not in PROMPT_FILES:
-        raise KeyError(f"Unknown prompt name: {prompt_name}")
-
-    file_name = PROMPT_FILES[prompt_name]
-    path = prompt_dir / file_name
-
-    if not path.exists():
-        required = "\n".join(f"- {name}" for name in PROMPT_FILES.values())
-        raise FileNotFoundError(
-            f"Prompt file not found: {path}\n"
-            f"Please put the following prompt files under: {prompt_dir}\n"
-            f"{required}"
-        )
-
-    with open(path, "r", encoding="utf-8") as f:
-        prompt = f.read().strip()
-
-    if not prompt:
-        raise ValueError(f"Prompt file is empty: {path}")
-
-    return prompt
-
-
-QUERY_PROMPT = load_prompt("query")
-TRIGGER_USE_PROMPT = load_prompt("trigger_use")
-TRIGGER_RETRIEVAL_PROMPT = load_prompt("trigger_retrieval")
-POLICY_PROMPT = load_prompt("policy")
-RESPONSE_PROMPT = load_prompt("response")
-
-# ==================== 文本格式化 ====================
-
-def format_dialogue_history(turns: Sequence[DialogueTurn]) -> str:
-    if not turns:
-        return "无"
-    role_map = {"user": "用户", "assistant": "客服"}
-    return "\n".join(f"{role_map.get(t.role, t.role)}：{t.text}" for t in turns)
-
-
-def parse_dialogue_prefix_text(prefix_text: str) -> List[Dict[str, str]]:
-    """
-    将文本格式的历史对话 prefix 解析为 turns。
-
-    支持格式：
-    用户: xxx
-    客服: xxx
-    用户：xxx
-    客服：xxx
-
-    也支持英文角色：
-    user: xxx
-    assistant: xxx
-
-    多行内容规则：
-    - 以 用户:/客服:/user:/assistant: 开头的行会开启一个新 turn；
-    - 不以上述前缀开头的非空行，会追加到上一条 turn 的 text 中。
-    """
-    if not prefix_text or not prefix_text.strip():
-        return []
-
-    role_map = {
-        "用户": "user",
-        "客服": "assistant",
-        "user": "user",
-        "assistant": "assistant",
-    }
-
-    turns: List[Dict[str, str]] = []
-    current_role: Optional[str] = None
-    current_lines: List[str] = []
-
-    def flush_current() -> None:
-        nonlocal current_role, current_lines
-        if current_role is not None:
-            text = "\n".join(line.strip() for line in current_lines).strip()
-            if text:
-                turns.append({"role": current_role, "text": text})
-        current_role = None
-        current_lines = []
-
-    for line_no, raw_line in enumerate(prefix_text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        matched = False
-        for speaker, role in role_map.items():
-            for sep in [":", "："]:
-                prefix = f"{speaker}{sep}"
-                if line.startswith(prefix):
-                    flush_current()
-                    current_role = role
-                    content = line[len(prefix):].strip()
-                    current_lines = [content] if content else []
-                    matched = True
-                    break
-            if matched:
-                break
-
-        if not matched:
-            if current_role is None:
-                raise ValueError(
-                    f"第 {line_no} 行无法解析：{line}\n"
-                    "请使用格式：用户: ... 或 客服: ..."
-                )
-            current_lines.append(line)
-
-    flush_current()
-
-    if not turns:
-        raise ValueError("未解析到任何有效对话轮次。")
-
-    return turns
-
-
-def format_cases(cases: Sequence[RetrievalCase]) -> str:
-    if not cases:
-        return "无"
-    parts = []
-    for i, c in enumerate(cases, start=1):
-        parts.append(
-            f"{i}. case_id: {c.case_id}\n"
-            f"   title: {c.title}\n"
-            f"   content: {c.content}"
-        )
-    return "\n".join(parts)
-
-
-def format_query_state(query_state: QueryState) -> str:
-    return (
-        f"query_mode: {query_state.query_mode}\n"
-        f"query_text: {query_state.query_text}\n"
-        f"reason: {query_state.reason}"
-    )
-
-
-def format_trigger_state(trigger_state: TriggerState) -> str:
-    return (
-        f"trigger: {str(trigger_state.trigger).lower()}\n"
-        f"evidence_mode: {trigger_state.evidence_mode}\n"
-        f"reason: {trigger_state.reason}"
-    )
-
-
-def format_policy_state(policy_state: PolicyState) -> str:
-    return f"label: {policy_state.label}\nreason: {policy_state.reason}"
-
-
-# ==================== LLM 调用层 ====================
-
-def _extract_text_from_parallel_result(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    if isinstance(result, dict):
-        for key in ["content", "text", "response", "output"]:
-            if key in result and isinstance(result[key], str):
-                return result[key]
-    if isinstance(result, list) and result:
-        first = result[0]
-        if isinstance(first, str):
-            return first
-        if isinstance(first, dict):
-            for key in ["content", "text", "response", "output"]:
-                if key in first and isinstance(first[key], str):
-                    return first[key]
-    raise ValueError(f"Unrecognized LLM result format: {type(result)} -> {result}")
-
-
-def call_llm_text(messages: List[Dict[str, str]], quiet: bool = True) -> str:
-    """
-    默认接入原工程 parallel_inference_without_extra_information。
-    如果你本地没有 parallel_inference_without_extra_information，请替换这里。
-
-    quiet=True 时会屏蔽 parallel_inference_without_extra_information 内部的 tqdm/print/耗时输出。
-    """
-    if parallel_inference_without_extra_information is None:
-        raise RuntimeError(
-            "parallel_inference_without_extra_information is unavailable. "
-            "Please replace call_llm_text with your own local/API LLM call."
-        )
-
-    item = {"messages": messages}
-    with suppress_stdout_stderr(enabled=quiet):
-        result = parallel_inference_without_extra_information([item])
-    return _extract_text_from_parallel_result(result).strip()
-
-
-def strip_code_fence(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 2 and lines[-1].strip() == "```":
-            first = lines[0].strip().lower()
-            if first in {"```", "```json", "```javascript", "```js"}:
-                return "\n".join(lines[1:-1]).strip()
-    return text
-
-
-def extract_json_object(text: str) -> str:
-    """
-    尽量从 LLM 输出中抽取最外层 JSON object。
-    可处理：
-    - 前后夹杂说明文字
-    - ```json fenced block
-    - 多余空白
-    """
-    text = strip_code_fence(text).strip()
-
-    if text.startswith("{") and text.endswith("}"):
-        return text
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start:end + 1].strip()
-
-    return text
-
-
-def save_json_decode_error(raw_text: str, cleaned_text: str, error: Exception) -> None:
-    error_dir = Path("json_decode_errors")
-    error_dir.mkdir(exist_ok=True)
-    timestamp = int(time.time() * 1000)
-    path = error_dir / f"json_error_{timestamp}.txt"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("==== JSON DECODE ERROR ====\n")
-        f.write(str(error))
-        f.write("\n\n==== RAW TEXT ====\n")
-        f.write(raw_text)
-        f.write("\n\n==== CLEANED TEXT ====\n")
-        f.write(cleaned_text)
-    logger.error("Bad JSON saved to %s", path)
-
-
-def call_llm_json(messages: List[Dict[str, str]], quiet: bool = True) -> Dict[str, Any]:
-    raw_text = call_llm_text(messages, quiet=quiet)
-    cleaned = extract_json_object(raw_text)
-
-    try:
-        return json.loads(cleaned)
-    except Exception as first_error:
-        if repair_json is not None:
-            try:
-                repaired = repair_json(cleaned)
-                if isinstance(repaired, str):
-                    return json.loads(repaired)
-                if isinstance(repaired, dict):
-                    return repaired
-            except Exception as repair_error:
-                save_json_decode_error(raw_text, cleaned, repair_error)
-                raise repair_error
-
-        save_json_decode_error(raw_text, cleaned, first_error)
-        raise first_error
-
-
-# ==================== Retriever ====================
-
-def default_retriever(query_text: str, dialogue_history: str) -> List[Dict[str, str]]:
-    """
-    默认调用原工程 rag。
-    返回格式需要兼容：
-    [
-      {"case_id": "...", "title": "...", "content": "..."},
-      ...
-    ]
-    """
-    if rag is None:
-        logger.warning("rag is unavailable. Return empty evidence.")
-        return []
-    return rag(query_text, dialogue_history, "true")
-
-
-def normalize_cases(raw_cases: Sequence[Dict[str, Any]], top_k: int = 5) -> List[RetrievalCase]:
-    cases: List[RetrievalCase] = []
-    for case in list(raw_cases)[:top_k]:
-        cases.append(
-            RetrievalCase(
-                case_id=str(case.get("case_id", case.get("caseId", ""))),
-                title=str(case.get("title", "")),
-                content=str(case.get("content", "")),
-            )
-        )
-    return cases
-
-
-# ==================== 输出解析与校验 ====================
-
-def parse_query_state(raw: Dict[str, Any]) -> QueryState:
-    state = QueryState(
-        query_mode=str(raw.get("query_mode", "none")),
-        query_text=str(raw.get("query_text", "") or ""),
-        reason=str(raw.get("reason", "") or ""),
-    )
-    if state.query_mode not in ALLOWED_QUERY_MODES:
-        raise ValueError(f"Invalid query_mode: {state.query_mode}")
-    if state.query_mode == "none" and state.query_text.strip():
-        raise ValueError("query_mode=none 时 query_text 必须为空")
-    if state.query_mode != "none" and not state.query_text.strip():
-        raise ValueError("query_mode 非 none 时 query_text 不能为空")
-    return state
-
-
-def parse_trigger_state(raw: Dict[str, Any], active_evidence_empty: bool) -> TriggerState:
-    trigger = raw.get("trigger", False)
-    if not isinstance(trigger, bool):
-        raise ValueError(f"trigger must be bool, got: {trigger}")
-
-    state = TriggerState(
-        trigger=trigger,
-        evidence_mode=str(raw.get("evidence_mode", "no_evidence_needed")),
-        reason=str(raw.get("reason", "") or ""),
-    )
-    if state.evidence_mode not in ALLOWED_EVIDENCE_MODES:
-        raise ValueError(f"Invalid evidence_mode: {state.evidence_mode}")
-    if not state.trigger and state.evidence_mode != "no_evidence_needed":
-        raise ValueError("trigger=False 时 evidence_mode 必须是 no_evidence_needed")
-    if state.trigger and state.evidence_mode == "no_evidence_needed":
-        raise ValueError("trigger=True 时 evidence_mode 不能是 no_evidence_needed")
-
-    if active_evidence_empty and state.evidence_mode == "reuse_existing_evidence":
-        raise ValueError("active_evidence 为空时不能输出 reuse_existing_evidence")
-
-    return state
-
-
-def parse_policy_state(raw: Dict[str, Any]) -> PolicyState:
-    state = PolicyState(
-        label=str(raw.get("label", "ProcessAcknowledgement")),
-        reason=str(raw.get("reason", "") or ""),
-    )
-    if state.label not in ALLOWED_POLICY_LABELS:
-        raise ValueError(f"Invalid policy label: {state.label}")
-    return state
-
-
-# ==================== 动态 Runtime ====================
-
-class DynamicMultiTurnRuntime:
-    def __init__(
-        self,
-        dialogue_id: str = "dynamic_dialogue",
-        retriever: Callable[[str, str], List[Dict[str, str]]] = default_retriever,
-        retrieval_top_k: int = 5,
-        save_history_path: Optional[str] = None,
-        verbose: bool = False,
-        clarification_limit: int = 3,
-        enable_clarification_guard: bool = True,
-    ) -> None:
-        self.state = DialogueState(dialogue_id=dialogue_id)
-        self.retriever = retriever
-        self.retrieval_top_k = retrieval_top_k
-        self.save_history_path = save_history_path
-        self.verbose = verbose
-        self.clarification_limit = clarification_limit
-        self.enable_clarification_guard = enable_clarification_guard
-        self.turn_results: List[TurnResult] = []
-
-    # ---------- 对外主入口 ----------
-
-    def step(self, user_input: str) -> TurnResult:
-        """
-        动态多轮环境的一轮执行。
-        输入用户新 utterance，输出当前轮系统回复和完整模块状态。
-        """
-        total_start = time.time()
-        self.state.current_turn_id += 1
-        turn_id = self.state.current_turn_id
-        if self.verbose:
-            logger.info("Processing dynamic turn %s", turn_id)
-
-        # 0. 追加用户输入
-        self.state.turns.append(DialogueTurn(role="user", text=user_input))
-
-        # 1. Query Update
-        query_state, query_ms = self.run_query_update(user_input=user_input)
-        self.state.query_state = query_state
-
-        retrieval_ms = 0
-        response_cases: List[RetrievalCase] = []
-
-        # query_mode=none 时，不走检索，也不激活 evidence
-        if query_state.query_mode == "none":
-            trigger_state = TriggerState(
-                trigger=False,
-                evidence_mode="no_evidence_needed",
-                reason="当前用户输入未形成业务检索意图。",
-            )
-            trigger_ms = 0
-            self.state.trigger_state = trigger_state
-
-        else:
-            # 2. 根据 active_evidence 是否为空决定链路
-            if not self.state.evidence_state.active_evidence:
-                # Cold-start: Query -> Retrieval -> Trigger(use)
-                # retrieved_cases 先只作为 Trigger 的判断输入；只有 Trigger=true 时才进入 Policy/Response。
-                retrieved_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
-                self.state.evidence_state.last_retrieved_cases = retrieved_cases
-
-                trigger_state, trigger_ms = self.run_trigger_use(
-                    retrieved_cases=retrieved_cases,
-                )
-                self.state.trigger_state = trigger_state
-
-                # Trigger 判断新检索 evidence 可用，则写入 active_evidence，并作为本轮可用 evidence。
-                if trigger_state.trigger and trigger_state.evidence_mode == "retrieve_new_evidence":
-                    self.state.evidence_state.active_evidence = retrieved_cases
-                    self.state.evidence_state.evidence_source_query = query_state.query_text
-                    response_cases = retrieved_cases
-                else:
-                    # 和 dynamic_trigger_use.prompt 对齐：trigger=false 时，本轮不使用 retrieved evidence。
-                    response_cases = []
-
-            else:
-                # Stateful: Query -> Trigger(retrieval) -> Retrieval/Reuse/NoEvidence
-                trigger_state, trigger_ms = self.run_trigger_retrieval()
-                self.state.trigger_state = trigger_state
-
-                if trigger_state.evidence_mode == "retrieve_new_evidence":
-                    response_cases, retrieval_ms = self.run_retrieval(query_state.query_text)
-                    self.state.evidence_state.last_retrieved_cases = response_cases
-                    self.state.evidence_state.active_evidence = response_cases
-                    self.state.evidence_state.evidence_source_query = query_state.query_text
-
-                elif trigger_state.evidence_mode == "reuse_existing_evidence":
-                    response_cases = list(self.state.evidence_state.active_evidence)
-                    retrieval_ms = 0
-
-                elif trigger_state.evidence_mode == "no_evidence_needed":
-                    response_cases = []
-                    retrieval_ms = 0
-
-                else:
-                    raise ValueError(f"Unexpected evidence_mode: {trigger_state.evidence_mode}")
-
-        # 3. Policy
-        policy_state, policy_ms = self.run_policy(response_cases=response_cases)
-
-        # 4. Clarification Guard：Policy 后、Response 前
-        policy_state, response_cases, guard_info = self.apply_clarification_guard(
-            policy_state=policy_state,
-            response_cases=response_cases,
-        )
-        self.state.policy_state = policy_state
-
-        # 5. Response
-        response, response_ms = self.run_response(response_cases=response_cases)
-
-        # 6. 追加客服回复
-        self.state.turns.append(DialogueTurn(role="assistant", text=response))
-
-        total_ms = int((time.time() - total_start) * 1000)
-        latency = Latency(
-            query_ms=query_ms,
-            retrieval_ms=retrieval_ms,
-            trigger_ms=trigger_ms,
-            policy_ms=policy_ms,
-            response_ms=response_ms,
-            total_ms=total_ms,
-        )
-
-        result = TurnResult(
-            dialogue_id=self.state.dialogue_id,
-            turn_id=turn_id,
-            user_input=user_input,
-            query_state=query_state,
-            evidence_used_this_turn=response_cases,
-            trigger_state=self.state.trigger_state,
-            policy_state=policy_state,
-            response=response,
-            latency=latency,
-            clarification_guard=guard_info,
-            state_snapshot=self.snapshot_state(),
-        )
-
-        self.turn_results.append(result)
-        self._autosave()
-        return result
-
-    # ---------- Clarification Guard ----------
-
-    def apply_clarification_guard(
-        self,
-        policy_state: PolicyState,
-        response_cases: List[RetrievalCase],
-    ) -> Tuple[PolicyState, List[RetrievalCase], ClarificationGuardInfo]:
-        """
-        连续澄清保护机制：
-        - 统计连续 AskClarification / AskMissingSlot；
-        - 达到 clarification_limit 时，不允许继续追问；
-        - 强制进入 ExplainedResponse 或 Handoff；
-        - 如果已有 active_evidence 但本轮 response_cases 为空，可复用 active_evidence 推进解释。
-        """
-        before = self.state.clarification_streak
-        original_label = policy_state.label
-
-        if not self.enable_clarification_guard:
-            # guard 关闭时，仍正常维护 streak，方便观测
-            after = before + 1 if policy_state.label in CLARIFICATION_POLICIES else 0
-            self.state.clarification_streak = after
-            return policy_state, response_cases, ClarificationGuardInfo(
-                enabled=False,
-                limit=self.clarification_limit,
-                before_streak=before,
-                after_streak=after,
-                applied=False,
-                original_label=original_label,
-                final_label=policy_state.label,
-                reason="连续澄清保护机制已关闭。",
-            )
-
-        if policy_state.label in CLARIFICATION_POLICIES:
-            candidate_streak = before + 1
-        else:
-            candidate_streak = 0
-
-        if candidate_streak < self.clarification_limit:
-            self.state.clarification_streak = candidate_streak
-            return policy_state, response_cases, ClarificationGuardInfo(
-                enabled=True,
-                limit=self.clarification_limit,
-                before_streak=before,
-                after_streak=candidate_streak,
-                applied=False,
-                original_label=original_label,
-                final_label=policy_state.label,
-                reason="未达到连续澄清保护阈值。",
-            )
-
-        # 达到阈值：不允许继续 AskClarification / AskMissingSlot
-        applied = True
-        forced_cases = response_cases
-
-        if response_cases:
-            forced_policy = PolicyState(
-                label="ExplainedResponse",
-                reason=(
-                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
-                    "需基于本轮可用 evidence 给出阶段性解释或处理建议。"
-                ),
-            )
-        elif self.state.evidence_state.active_evidence:
-            forced_cases = list(self.state.evidence_state.active_evidence)
-            forced_policy = PolicyState(
-                label="ExplainedResponse",
-                reason=(
-                    f"已连续 {candidate_streak} 轮澄清/补槽，不能继续追问；"
-                    "需复用已有 active_evidence 推进处理。"
-                ),
-            )
-        else:
-            forced_policy = PolicyState(
-                label="Handoff",
-                reason=(
-                    f"已连续 {candidate_streak} 轮澄清/补槽仍无法形成可用处理方案，"
-                    "需转交人工或后台进一步处理。"
-                ),
-            )
-
-        # 强制推进后，重置 streak
-        self.state.clarification_streak = 0
-
-        return forced_policy, forced_cases, ClarificationGuardInfo(
-            enabled=True,
-            limit=self.clarification_limit,
-            before_streak=before,
-            after_streak=0,
-            applied=applied,
-            original_label=original_label,
-            final_label=forced_policy.label,
-            reason=forced_policy.reason,
-        )
-
-    # ---------- 各模块 ----------
-
-    def run_query_update(self, user_input: str) -> Tuple[QueryState, int]:
-        start = time.time()
-        user_prompt = f"""
-下面是当前动态多轮客服对话状态。
-
-【完整对话历史】
-{format_dialogue_history(self.state.turns)}
-
-【上一轮 query 状态】
-{format_query_state(self.state.query_state)}
-
-【用户最新输入】
-{user_input}
-
-请输出当前轮 query 状态 JSON。
-""".strip()
-
-        messages = [
-            {"role": "system", "content": QUERY_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = call_llm_json(messages, quiet=not self.verbose)
-        output = parse_query_state(raw)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return output, elapsed_ms
-
-    def run_retrieval(self, query_text: str) -> Tuple[List[RetrievalCase], int]:
-        start = time.time()
-        dialogue_history = format_dialogue_history(self.state.turns)
-        with suppress_stdout_stderr(enabled=not self.verbose):
-            raw_cases = self.retriever(query_text, dialogue_history)
-        cases = normalize_cases(raw_cases, top_k=self.retrieval_top_k)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return cases, elapsed_ms
-
-    def run_trigger_use(self, retrieved_cases: List[RetrievalCase]) -> Tuple[TriggerState, int]:
-        """
-        active_evidence 为空时使用。
-        此时 Retrieval 已经发生，Trigger 判断 retrieved evidence 是否可用。
-        """
-        start = time.time()
-        user_prompt = f"""
-下面是当前动态多轮客服对话状态。
-
-【完整对话历史】
-{format_dialogue_history(self.state.turns)}
-
-【当前 query 状态】
-{format_query_state(self.state.query_state)}
-
-【当前新检索 retrieved evidence】
-{format_cases(retrieved_cases)}
-
-【当前 active evidence】
-无
-
-请判断 retrieved evidence 是否可用于当前轮客服回复，并输出 Trigger JSON。
-""".strip()
-
-        messages = [
-            {"role": "system", "content": TRIGGER_USE_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = call_llm_json(messages, quiet=not self.verbose)
-        output = parse_trigger_state(raw, active_evidence_empty=True)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return output, elapsed_ms
-
-    def run_trigger_retrieval(self) -> Tuple[TriggerState, int]:
-        """
-        active_evidence 非空时使用。
-        Trigger 基于 previous active_evidence 判断复用、重新检索或不使用 evidence。
-        """
-        start = time.time()
-        user_prompt = f"""
-下面是当前动态多轮客服对话状态。
-
-【完整对话历史】
-{format_dialogue_history(self.state.turns)}
-
-【当前 query 状态】
-{format_query_state(self.state.query_state)}
-
-【已有 active evidence】
-{format_cases(self.state.evidence_state.active_evidence)}
-
-【active evidence 来源 query】
-{self.state.evidence_state.evidence_source_query or "无"}
-
-请判断当前轮是否需要使用知识、复用已有 evidence 或重新检索，并输出 Trigger JSON。
-""".strip()
-
-        messages = [
-            {"role": "system", "content": TRIGGER_RETRIEVAL_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = call_llm_json(messages, quiet=not self.verbose)
-        output = parse_trigger_state(raw, active_evidence_empty=False)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return output, elapsed_ms
-
-    def run_policy(self, response_cases: List[RetrievalCase]) -> Tuple[PolicyState, int]:
-        start = time.time()
-        user_prompt = f"""
-下面是当前动态多轮客服对话状态。
-
-【完整对话历史】
-{format_dialogue_history(self.state.turns)}
-
-【当前 query 状态】
-{format_query_state(self.state.query_state)}
-
-【当前 trigger 状态】
-{format_trigger_state(self.state.trigger_state)}
-
-【本轮可用于决策的 evidence】
-{format_cases(response_cases)}
-
-请判断当前轮客服最应该采取的 policy，并输出 Policy JSON。
-""".strip()
-
-        messages = [
-            {"role": "system", "content": POLICY_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = call_llm_json(messages, quiet=not self.verbose)
-        output = parse_policy_state(raw)
-        elapsed_ms = int((time.time() - start) * 1000)
-        return output, elapsed_ms
-
-    def run_response(self, response_cases: List[RetrievalCase]) -> Tuple[str, int]:
-        start = time.time()
-        user_prompt = f"""
-下面是当前动态多轮客服对话状态。
-
-【完整对话历史】
-{format_dialogue_history(self.state.turns)}
-
-【当前 query 状态】
-{format_query_state(self.state.query_state)}
-
-【当前 trigger 状态】
-{format_trigger_state(self.state.trigger_state)}
-
-【当前 policy 状态】
-{format_policy_state(self.state.policy_state)}
-
-【本轮可用于回复的 evidence】
-{format_cases(response_cases)}
-
-请生成当前轮客服回复。
-""".strip()
-
-        messages = [
-            {"role": "system", "content": RESPONSE_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        response = call_llm_text(messages, quiet=not self.verbose).strip()
-        elapsed_ms = int((time.time() - start) * 1000)
-        return response, elapsed_ms
-
-    # ---------- 状态与保存 ----------
-
-    def snapshot_state(self) -> Dict[str, Any]:
-        return {
-            "dialogue_id": self.state.dialogue_id,
-            "current_turn_id": self.state.current_turn_id,
-            "dialogue_history": [asdict(t) for t in self.state.turns],
-            "query_state": asdict(self.state.query_state),
-            "trigger_state": asdict(self.state.trigger_state),
-            "policy_state": asdict(self.state.policy_state),
-            "evidence_state": asdict(self.state.evidence_state),
-            "clarification_streak": self.state.clarification_streak,
-            "clarification_guard": {
-                "enabled": self.enable_clarification_guard,
-                "limit": self.clarification_limit,
-            },
-        }
-
-    def load_dialogue_prefix(
-        self,
-        turns: List[Dict[str, str]],
-        reset_state: bool = True,
-        dialogue_id: Optional[str] = None,
-    ) -> None:
-        """
-        直接加载历史 prefix，不重放模块。
-
-        适用场景：
-        - 已有前 n 轮真实对话；
-        - 不希望模型重新生成历史客服回复；
-        - 只想把这些历史作为 dialogue_history，
-          然后调用 step(current_user_input) 观察第 n+1 轮表现。
-
-        turns 格式：
-        [
-            {"role": "user", "text": "..."},
-            {"role": "assistant", "text": "..."},
-            ...
-        ]
-
-        注意：
-        - 该方法只写入历史文本；
-        - 不会重建 query_state / trigger_state / policy_state / active_evidence；
-        - current_turn_id 会按历史中 assistant 轮数设置；
-        - clarification_streak 会重置为 0，因为没有重放 policy，无法可靠恢复历史 streak。
-        """
-        target_dialogue_id = dialogue_id or self.state.dialogue_id
-
-        if reset_state:
-            self.reset(dialogue_id=target_dialogue_id)
-
-        normalized_turns: List[DialogueTurn] = []
-        for idx, turn in enumerate(turns):
-            role = str(turn.get("role", "")).strip()
-            text = str(turn.get("text", "") or "")
-
-            if role not in {"user", "assistant"}:
-                raise ValueError(
-                    f"Invalid role at turns[{idx}]: {role}. "
-                    "Expected 'user' or 'assistant'."
-                )
-            if not text.strip():
-                raise ValueError(f"Empty text at turns[{idx}]")
-
-            normalized_turns.append(DialogueTurn(role=role, text=text))
-
-        self.state.turns = normalized_turns
-
-        # current_turn_id 表示已经完成/经历过的客服目标轮数。
-        # 在动态 step() 中，每次新用户输入会 +1，所以这里设置为历史 assistant 数量。
-        self.state.current_turn_id = sum(
-            1 for turn in self.state.turns if turn.role == "assistant"
-        )
-
-        # 直接加载 prefix 不重建中间状态，因此清空这些状态，避免沿用旧对话状态。
-        self.state.query_state = QueryState()
-        self.state.trigger_state = TriggerState()
-        self.state.policy_state = PolicyState()
-        self.state.evidence_state = EvidenceState()
-        self.state.clarification_streak = 0
-
-        # 直接加载 prefix 后，旧 turn_results 不再对应当前状态。
-        self.turn_results = []
-        self._autosave()
-
-    def load_dialogue_prefix_text(
-        self,
-        prefix_text: str,
-        reset_state: bool = True,
-        dialogue_id: Optional[str] = None,
-    ) -> None:
-        """
-        从“用户:/客服:”文本格式直接加载历史 prefix，不重放模块。
-
-        示例：
-        用户: 我的 VPN 登录不了
-        客服: 请问有什么具体报错？
-        用户: 提示账号无权限
-
-        加载后可继续调用：
-        result = runtime.step("我已经申请过权限了")
-        """
-        turns = parse_dialogue_prefix_text(prefix_text)
-        self.load_dialogue_prefix(
-            turns=turns,
-            reset_state=reset_state,
-            dialogue_id=dialogue_id,
-        )
-
-    def reset(self, dialogue_id: Optional[str] = None) -> None:
-        dialogue_id = dialogue_id or self.state.dialogue_id
-        self.state = DialogueState(dialogue_id=dialogue_id)
-        self.turn_results = []
-
-    def save(self, output_path: str) -> None:
-        data = [asdict(r) for r in self.turn_results]
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info("Dynamic runtime results saved to %s", output_path)
-
-    def _autosave(self) -> None:
-        if self.save_history_path:
-            self.save(self.save_history_path)
-
-
-# ==================== 命令行交互环境 ====================
-
-def print_turn_result(result: TurnResult) -> None:
-    print("\n" + "=" * 80)
-    print(f"Turn {result.turn_id}")
-    print("-" * 80)
-    print(f"用户输入：{result.user_input}")
-    print("\n[Query]")
-    print(json.dumps(asdict(result.query_state), ensure_ascii=False, indent=2))
-    print("\n[Trigger]")
-    print(json.dumps(asdict(result.trigger_state), ensure_ascii=False, indent=2))
-    print("\n[Policy]")
-    print(json.dumps(asdict(result.policy_state), ensure_ascii=False, indent=2))
-    print("\n[Clarification Guard]")
-    print(json.dumps(asdict(result.clarification_guard), ensure_ascii=False, indent=2))
-    print("\n[Evidence Used This Turn]")
-    print(json.dumps([asdict(c) for c in result.evidence_used_this_turn], ensure_ascii=False, indent=2))
-    print("\n[Active Evidence]")
-    active_evidence = result.state_snapshot["evidence_state"]["active_evidence"]
-    print(json.dumps(active_evidence, ensure_ascii=False, indent=2))
-    print("\n[Response]")
-    print(result.response)
-    print("\n[Latency]")
-    print(json.dumps(asdict(result.latency), ensure_ascii=False, indent=2))
-    print("=" * 80 + "\n")
-
-
-def print_chat_response(result: TurnResult) -> None:
-    """正常对话界面：只显示客服回复。"""
-    print(f"客服：{result.response}\n")
-
-
-def interactive_main() -> None:
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Dynamic multi-turn IT customer-service runtime")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="显示 Query/Trigger/Policy/Evidence/Latency 等完整中间状态。默认只显示对话内容。",
-    )
-    parser.add_argument(
-        "--save-path",
-        default="dynamic_runtime_output.json",
-        help="运行日志保存路径。默认 dynamic_runtime_output.json。",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=5,
-        help="RAG 返回案例数量。默认 5。",
-    )
-    parser.add_argument(
-        "--clarification-limit",
-        type=int,
-        default=3,
-        help="连续澄清保护阈值。默认 3，即第 3 次连续 AskClarification/AskMissingSlot 时强制推进。",
-    )
-    parser.add_argument(
-        "--disable-clarification-guard",
-        action="store_true",
-        help="关闭连续澄清保护机制。",
-    )
-    parser.add_argument(
-        "--prefix-path",
-        default="",
-        help=(
-            "可选：加载一个 JSON prefix 文件作为初始历史。"
-            "文件格式为 turns 列表，或包含 turns 字段的对象。"
-        ),
-    )
-    args = parser.parse_args()
-
-    logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
-
-    runtime = DynamicMultiTurnRuntime(
-        dialogue_id="interactive_dialogue",
-        retrieval_top_k=args.top_k,
-        save_history_path=args.save_path,
-        verbose=args.debug,
-        clarification_limit=args.clarification_limit,
-        enable_clarification_guard=not args.disable_clarification_guard,
-    )
-
-    if args.prefix_path:
-        with open(args.prefix_path, "r", encoding="utf-8") as f:
-            prefix_data = json.load(f)
-
-        if isinstance(prefix_data, dict) and "turns" in prefix_data:
-            prefix_turns = prefix_data["turns"]
-        elif isinstance(prefix_data, list):
-            prefix_turns = prefix_data
-        else:
-            raise ValueError(
-                "prefix JSON must be a list of turns or a dict with key 'turns'."
-            )
-
-        runtime.load_dialogue_prefix(prefix_turns, reset_state=True)
-        print(f"已加载 prefix：{args.prefix_path}")
-        print(f"当前历史轮数：{len(runtime.state.turns)}，已完成客服轮数：{runtime.state.current_turn_id}")
-
-    print("动态多轮 IT 客服 Runtime 已启动。")
-    if args.debug:
-        print("当前模式：debug，中间状态会显示。输入 /exit 退出，/reset 重置对话，/state 查看状态，/load_prefix <path> 加载历史，/debug 关闭调试显示。")
-    else:
-        print("当前模式：chat，只显示正常对话。输入 /exit 退出，/reset 重置对话，/state 查看状态，/load_prefix <path> 加载历史，/debug 打开调试显示。")
-
-    print(
-        f"连续澄清保护：{'开启' if runtime.enable_clarification_guard else '关闭'}，"
-        f"阈值={runtime.clarification_limit}"
-    )
-
-    while True:
-        user_input = input("用户：").strip()
-        if not user_input:
-            continue
-        if user_input == "/exit":
-            runtime.save(args.save_path)
-            print(f"已退出，并保存到 {args.save_path}")
-            break
-        if user_input == "/reset":
-            runtime.reset(dialogue_id="interactive_dialogue")
-            print("对话已重置。")
-            continue
-        if user_input == "/state":
-            print(json.dumps(runtime.snapshot_state(), ensure_ascii=False, indent=2))
-            continue
-        if user_input.startswith("/load_prefix "):
-            prefix_path = user_input.replace("/load_prefix ", "", 1).strip().strip('"')
-            try:
-                with open(prefix_path, "r", encoding="utf-8") as f:
-                    prefix_data = json.load(f)
-                if isinstance(prefix_data, dict) and "turns" in prefix_data:
-                    prefix_turns = prefix_data["turns"]
-                elif isinstance(prefix_data, list):
-                    prefix_turns = prefix_data
-                else:
-                    raise ValueError("prefix JSON must be a list or a dict with key 'turns'.")
-                runtime.load_dialogue_prefix(prefix_turns, reset_state=True)
-                print(f"已加载 prefix：{prefix_path}")
-                print(f"当前历史轮数：{len(runtime.state.turns)}，已完成客服轮数：{runtime.state.current_turn_id}")
-            except Exception as e:
-                print(f"加载 prefix 失败：{e}")
-            continue
-        if user_input == "/debug":
-            runtime.verbose = not runtime.verbose
-            args.debug = runtime.verbose
-            logging.getLogger().setLevel(logging.INFO if args.debug else logging.WARNING)
-            print(f"已切换到 {'debug' if args.debug else 'chat'} 模式。")
-            continue
-
-        try:
-            result = runtime.step(user_input)
-            if args.debug:
-                print_turn_result(result)
-            else:
-                print_chat_response(result)
-        except Exception as e:
-            logger.exception("Turn failed")
-            print(f"当前轮执行失败：{e}")
-
-
-if __name__ == "__main__":
-    interactive_main()
+curl -v http://127.0.0.1:7866/
+* About to connect() to 127.0.0.1 port 7866 (#0)
+*   Trying 127.0.0.1...
+* Connected to 127.0.0.1 (127.0.0.1) port 7866 (#0)
+> GET / HTTP/1.1
+> User-Agent: curl/7.29.0
+> Host: 127.0.0.1:7866
+> Accept: */*
+> 
+< HTTP/1.1 200 OK
+< date: Mon, 21 Sep 2026 14:10:27 GMT
+< server: uvicorn
+< content-length: 39154
+< content-type: text/html; charset=utf-8
+< 
+<!doctype html>
+<html
+        lang="en"
+        style="
+                margin: 0;
+                padding: 0;
+                min-height: 100%;
+                display: flex;
+                flex-direction: column;
+        "
+>
+        <head>
+                <meta charset="utf-8" />
+                <meta
+                        name="viewport"
+                        content="width=device-width, initial-scale=1, shrink-to-fit=no"
+                />
+                <meta property="og:title" content="Gradio" />
+                <meta property="og:type" content="website" />
+                <meta property="og:url" content="{url}" />
+                <meta property="og:description" content="Click to try out the app!" />
+                <meta
+                        property="og:image"
+                        content="https://raw.githubusercontent.com/gradio-app/gradio/main/js/_website/src/lib/assets/img/header-image.jpg"
+                />
+                <meta name="twitter:card" content="summary_large_image" />
+                <meta name="twitter:creator" content="@Gradio" />
+                <meta name="twitter:title" content="Gradio" />
+                <meta name="twitter:description" content="Click to try out the app!" />
+                <meta
+                        name="twitter:image"
+                        content="https://raw.githubusercontent.com/gradio-app/gradio/main/js/_website/src/lib/assets/img/header-image.jpg"
+                />
+
+                <style>
+                        :root {
+                                --bg: #f8fafc;
+                                --col:   #1e293b;
+                                --bg-dark: #0a0f1e;
+                                --col-dark: #f1f5f9;
+                        }
+
+
+                        body {
+                                background: var(--bg);
+                                color: var(--col);
+                                font-family: Arial, Helvetica, sans-serif;
+                        }
+
+                        @media (prefers-color-scheme: dark) {
+                                body {
+                                        background: var(--bg-dark);
+                                        color: var(--col-dark);
+                                }
+                        }
+                </style>
+
+                <meta property="og:url" content="https://gradio.app/" />
+                <meta property="og:type" content="website" />
+                <meta property="og:image" content="" />
+                <meta property="og:title" content="Huawei IT Support Agent" />
+                <meta
+                        property="og:description"
+                        content=""
+                />
+                <meta name="twitter:card" content="summary_large_image" />
+                <meta name="twitter:creator" content="@teamGradio" />
+                <meta name="twitter:title" content="Huawei IT Support Agent" />
+                <meta
+                        name="twitter:description"
+                        content=""
+                />
+                <meta name="twitter:image" content="" />
+
+                <script>window.gradio_config = {"version":"6.14.0","api_prefix":"/gradio_api","mode":"blocks","app_id":5573707136585136394,"dev_mode":false,"vibe_mode":false,"analytics_enabled":true,"components":[{"id":1,"type":"state","props":{"time_to_live":null,"delete_callback":"\u003cfunction default_delete_callback at 0x7f127f89da20\u003e","name":"state","_selectable":false},"skip_api":true,"component_class_id":"7c43f589c28565b0fc00af558bc4aac2b47c9644bad1ff7309ac08cd19376c3f","key":null},{"id":2,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n        \u003cdiv class=\"hero\"\u003e\n            \u003cdiv\u003e\n                \u003cdiv class=\"hero-tag\"\u003e\n                    Huawei IT Support · Agent Console\n                \u003c/div\u003e\n\n                \u003cdiv class=\"hero-title\"\u003e\n                    IT 智能客服 Agent\n                \u003c/div\u003e\n\n                \u003cdiv class=\"hero-desc\"\u003e\n                    Dynamic Query · Evidence Retrieval ·\n                    Topic Structure · Policy Decision · Response\n                \u003c/div\u003e\n            \u003c/div\u003e\n\n            \u003cdiv class=\"hero-status\"\u003e\n                \u003cdiv class=\"status-dot\"\u003e\u003c/div\u003e\n                Agent Online\n            \u003c/div\u003e\n        \u003c/div\u003e\n        ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":[],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":3,"type":"row","props":{"variant":"default","visible":true,"elem_classes":[],"equal_height":false,"show_progress":false,"preserved_by_key":[],"name":"row"},"skip_api":true,"component_class_id":"fa9ccd6157b86ae10152c6f29a794e2447d5ef9ca3d003b7e2a4830af5cdeae7","key":null},{"id":4,"type":"column","props":{"scale":7,"min_width":620,"variant":"default","visible":true,"elem_classes":[],"show_progress":false,"preserved_by_key":[],"name":"column"},"skip_api":true,"component_class_id":"fe17e690369940392f3125592605223a438ac49c076427277ce09a6a645d8a63","key":null},{"id":5,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n                \u003cdiv class=\"panel-title\"\u003e\n                    Conversation\n                \u003c/div\u003e\n                ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":[],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":6,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n        \u003cdiv class=\"empty-chat\"\u003e\n\n            \u003cdiv class=\"empty-icon\"\u003e\n                ✦\n            \u003c/div\u003e\n\n            \u003cdiv class=\"empty-title\"\u003e\n                开始新的 IT 支持会话\n            \u003c/div\u003e\n\n            \u003cdiv class=\"empty-desc\"\u003e\n                输入用户问题后，\n                Agent 将动态完成 Query、Retrieval、\n                Topic Analysis、Policy 和 Response。\n            \u003c/div\u003e\n\n        \u003c/div\u003e\n        ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":["chat-panel"],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":7,"type":"row","props":{"variant":"default","visible":true,"elem_classes":[],"equal_height":false,"show_progress":false,"preserved_by_key":[],"name":"row"},"skip_api":true,"component_class_id":"fa9ccd6157b86ae10152c6f29a794e2447d5ef9ca3d003b7e2a4830af5cdeae7","key":null},{"id":8,"type":"textbox","props":{"type":"text","lines":3,"placeholder":"请输入 IT 问题...","show_label":false,"container":true,"scale":7,"min_width":160,"visible":true,"autofocus":false,"autoscroll":true,"elem_classes":[],"preserved_by_key":["value"],"rtl":false,"buttons":[],"submit_btn":false,"stop_btn":false,"name":"textbox","_selectable":false},"skip_api":false,"component_class_id":"1a11c8e5ce1710f464d0dac799514df3dd460656815f5e24ec077e5aeca58c4d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"Hello!!"},{"id":9,"type":"button","props":{"value":"发送","variant":"primary","size":"lg","link_target":"_self","visible":true,"interactive":true,"elem_classes":[],"preserved_by_key":["value"],"scale":1,"name":"button","_selectable":false},"skip_api":true,"component_class_id":"94b7ac44df9dffbddf4bcf8cf972cc70ef0509b2ed639a578657ded44387130a","key":null},{"id":10,"type":"form","props":{"scale":7,"min_width":160,"preserved_by_key":[],"name":"form"},"skip_api":true,"component_class_id":"27875ced390d3723e3f7cc657898c38eb4da9166f5084396b060f9ee6dd562d8","key":null},{"id":11,"type":"row","props":{"variant":"default","visible":true,"elem_classes":[],"equal_height":false,"show_progress":false,"preserved_by_key":[],"name":"row"},"skip_api":true,"component_class_id":"fa9ccd6157b86ae10152c6f29a794e2447d5ef9ca3d003b7e2a4830af5cdeae7","key":null},{"id":12,"type":"button","props":{"value":"新建会话","variant":"secondary","size":"lg","link_target":"_self","visible":true,"interactive":true,"elem_classes":[],"preserved_by_key":["value"],"name":"button","_selectable":false},"skip_api":true,"component_class_id":"94b7ac44df9dffbddf4bcf8cf972cc70ef0509b2ed639a578657ded44387130a","key":null},{"id":13,"type":"accordion","props":{"label":"加载已有对话","open":false,"visible":true,"elem_classes":[],"preserved_by_key":[],"name":"accordion"},"skip_api":true,"component_class_id":"2b8d719a4cf4bd6b8ee4ec292a55dcd728f40dbc8f5fa049462a8118ea4358af","key":null},{"id":14,"type":"textbox","props":{"type":"text","lines":7,"placeholder":"用户: 我的 VPN 无法登录\n客服: 请问具体有什么提示？\n用户: 显示账号无权限","show_label":false,"container":true,"min_width":160,"visible":true,"autofocus":false,"autoscroll":true,"elem_classes":[],"preserved_by_key":["value"],"rtl":false,"buttons":[],"submit_btn":false,"stop_btn":false,"name":"textbox","_selectable":false},"skip_api":false,"component_class_id":"1a11c8e5ce1710f464d0dac799514df3dd460656815f5e24ec077e5aeca58c4d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"Hello!!"},{"id":15,"type":"button","props":{"value":"加载历史","variant":"secondary","size":"lg","link_target":"_self","visible":true,"interactive":true,"elem_classes":[],"preserved_by_key":["value"],"name":"button","_selectable":false},"skip_api":true,"component_class_id":"94b7ac44df9dffbddf4bcf8cf972cc70ef0509b2ed639a578657ded44387130a","key":null},{"id":16,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":[],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":17,"type":"form","props":{"scale":0,"min_width":0,"preserved_by_key":[],"name":"form"},"skip_api":true,"component_class_id":"27875ced390d3723e3f7cc657898c38eb4da9166f5084396b060f9ee6dd562d8","key":null},{"id":18,"type":"column","props":{"scale":5,"min_width":500,"variant":"default","visible":true,"elem_classes":[],"show_progress":false,"preserved_by_key":[],"name":"column"},"skip_api":true,"component_class_id":"fe17e690369940392f3125592605223a438ac49c076427277ce09a6a645d8a63","key":null},{"id":19,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n    \u003cdiv class=\"session-bar\"\u003e\n\n        \u003cdiv\u003e\n            \u003cspan class=\"status-dot\"\u003e\u003c/span\u003e\n            Running\n        \u003c/div\u003e\n\n        \u003cdiv\u003e\n            Session\n            \u003cb\u003eweb_61ca051c42\u003c/b\u003e\n        \u003c/div\u003e\n\n        \u003cdiv\u003e\n            Turns\n            \u003cb\u003e0\u003c/b\u003e\n        \u003c/div\u003e\n\n    \u003c/div\u003e\n    ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":[],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":20,"type":"tabs","props":{"visible":true,"elem_classes":[],"preserved_by_key":[],"name":"tabs"},"skip_api":true,"component_class_id":"56994975cf40d5f497903a9f2d5946e921a7f009a7d47747caa188bb31c14fb3","key":null},{"id":21,"type":"tabitem","props":{"label":"当前决策","visible":true,"interactive":true,"elem_classes":[],"preserved_by_key":[],"render_children":false,"name":"tab"},"skip_api":true,"component_class_id":"c0f77558fc63e0937662fb1c08fd33483e8296f3c3b018bdb14f9342179f5842","key":null},{"id":22,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n        \u003cdiv class=\"state-empty\"\u003e\n\n            \u003cdiv class=\"state-empty-title\"\u003e\n                Waiting for interaction\n            \u003c/div\u003e\n\n            \u003cdiv class=\"state-empty-desc\"\u003e\n                当前轮执行后，\n                Query、Trigger、Evidence、\n                Policy 和 Latency 将显示在这里。\n            \u003c/div\u003e\n\n        \u003c/div\u003e\n        ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":["state-panel"],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"},{"id":23,"type":"tabitem","props":{"label":"运行轨迹","visible":true,"interactive":true,"elem_classes":[],"preserved_by_key":[],"render_children":false,"name":"tab"},"skip_api":true,"component_class_id":"c0f77558fc63e0937662fb1c08fd33483e8296f3c3b018bdb14f9342179f5842","key":null},{"id":24,"type":"html","props":{"_retryable":false,"_undoable":false,"likeable":false,"streamable":false,"value":"\n        \u003cdiv class=\"state-empty\"\u003e\n            暂无运行轨迹\n        \u003c/div\u003e\n        ","html_template":"${value}","css_template":"","js_on_load":"element.addEventListener(\u0027click\u0027, function() { trigger(\u0027click\u0027) });","apply_default_css":true,"show_label":false,"visible":true,"elem_classes":["history-panel"],"preserved_by_key":["value"],"container":false,"padding":false,"autoscroll":false,"buttons":[],"props":{},"name":"html","_selectable":false,"component_class_name":"HTML"},"skip_api":false,"component_class_id":"354ec112578a052dfe73b28a9c61e3d276e8d093f15c4f5eb19194290596633d","key":null,"api_info":{"type":"string"},"api_info_as_input":{"type":"string"},"api_info_as_output":{"type":"string"},"example_inputs":"\u003cp\u003eHello\u003c/p\u003e"}],"css":"\n\n:root {\n    --bg: #f5f7fb;\n    --panel: #ffffff;\n    --line: #e6eaf0;\n    --soft-line: #eef2f6;\n\n    --text: #101828;\n    --text2: #344054;\n    --muted: #667085;\n\n    --blue: #2563eb;\n    --blue-soft: #eff6ff;\n\n    --green: #16a34a;\n    --green-soft: #effdf3;\n\n    --gray-soft: #f2f4f7;\n\n    --shadow:\n        0 8px 30px\n        rgba(15, 23, 42, 0.06);\n}\n\n\nhtml,\nbody {\n    background: var(--bg) !important;\n}\n\n\n.gradio-container {\n    max-width: 1450px !important;\n    margin: auto !important;\n    padding: 24px !important;\n}\n\n\n/* =========================================================\n   HERO\n========================================================= */\n\n.hero {\n\n    background:\n        linear-gradient(\n            135deg,\n            #ffffff,\n            #f7faff\n        );\n\n    border: 1px solid var(--line);\n\n    border-radius: 24px;\n\n    padding: 24px 28px;\n\n    margin-bottom: 18px;\n\n    display: flex;\n\n    align-items: center;\n\n    justify-content: space-between;\n\n    box-shadow: var(--shadow);\n}\n\n\n.hero-tag {\n\n    color: var(--blue);\n\n    font-size: 12px;\n\n    font-weight: 700;\n\n    margin-bottom: 8px;\n}\n\n\n.hero-title {\n\n    font-size: 28px;\n\n    font-weight: 800;\n\n    color: var(--text);\n}\n\n\n.hero-desc {\n\n    margin-top: 7px;\n\n    color: var(--muted);\n\n    font-size: 13px;\n}\n\n\n.hero-status {\n\n    display: flex;\n\n    align-items: center;\n\n    gap: 8px;\n\n    font-size: 13px;\n\n    color: var(--text2);\n}\n\n\n.status-dot {\n\n    width: 8px;\n\n    height: 8px;\n\n    display: inline-block;\n\n    border-radius: 50%;\n\n    background: #22c55e;\n\n    margin-right: 5px;\n}\n\n\n/* =========================================================\n   PANELS\n========================================================= */\n\n.panel-title {\n\n    font-size: 16px;\n\n    font-weight: 750;\n\n    color: var(--text);\n\n    margin-bottom: 10px;\n}\n\n\n.chat-panel,\n.state-panel,\n.history-panel {\n\n    background: white;\n\n    border: 1px solid var(--line);\n\n    border-radius: 20px;\n\n    box-shadow: var(--shadow);\n}\n\n\n.chat-panel {\n\n    height: 650px;\n\n    overflow-y: auto;\n\n    padding: 20px;\n}\n\n\n.state-panel,\n.history-panel {\n\n    height: 690px;\n\n    overflow-y: auto;\n\n    padding: 16px;\n}\n\n\n/* =========================================================\n   EMPTY CHAT\n========================================================= */\n\n.empty-chat {\n\n    height: 580px;\n\n    display: flex;\n\n    flex-direction: column;\n\n    align-items: center;\n\n    justify-content: center;\n\n    text-align: center;\n\n    color: var(--muted);\n}\n\n\n.empty-icon {\n\n    width: 52px;\n\n    height: 52px;\n\n    border-radius: 16px;\n\n    background: var(--blue-soft);\n\n    color: var(--blue);\n\n    display: flex;\n\n    align-items: center;\n\n    justify-content: center;\n\n    font-size: 22px;\n\n    margin-bottom: 16px;\n}\n\n\n.empty-title {\n\n    font-size: 20px;\n\n    font-weight: 800;\n\n    color: var(--text);\n\n    margin-bottom: 8px;\n}\n\n\n.empty-desc {\n\n    max-width: 450px;\n\n    line-height: 1.7;\n\n    font-size: 13px;\n}\n\n\n/* =========================================================\n   CHAT\n========================================================= */\n\n.chat-scroll {\n\n    display: flex;\n\n    flex-direction: column;\n\n    gap: 16px;\n}\n\n\n.message-row {\n\n    display: flex;\n\n    gap: 10px;\n\n    align-items: flex-start;\n}\n\n\n.user-row {\n\n    justify-content: flex-end;\n}\n\n\n.avatar {\n\n    width: 34px;\n\n    height: 34px;\n\n    flex-shrink: 0;\n\n    border-radius: 50%;\n\n    display: flex;\n\n    align-items: center;\n\n    justify-content: center;\n\n    font-size: 11px;\n\n    font-weight: 800;\n}\n\n\n.user-avatar {\n\n    background: #dbeafe;\n\n    color: #1d4ed8;\n}\n\n\n.agent-avatar {\n\n    background: #e9edf3;\n\n    color: #344054;\n}\n\n\n.message-bubble {\n\n    max-width: 76%;\n\n    padding: 12px 14px;\n\n    border-radius: 17px;\n\n    font-size: 14px;\n\n    line-height: 1.65;\n\n    white-space: pre-wrap;\n}\n\n\n.user-message {\n\n    background: var(--blue);\n\n    color: white;\n\n    border-bottom-right-radius: 6px;\n}\n\n\n.agent-message {\n\n    background: white;\n\n    color: var(--text);\n\n    border: 1px solid var(--soft-line);\n\n    border-bottom-left-radius: 6px;\n}\n\n\n.message-role {\n\n    font-size: 11px;\n\n    font-weight: 700;\n\n    opacity: .7;\n\n    margin-bottom: 4px;\n}\n\n\n/* =========================================================\n   SESSION\n========================================================= */\n\n.session-bar {\n\n    display: flex;\n\n    align-items: center;\n\n    gap: 18px;\n\n    background: white;\n\n    border: 1px solid var(--line);\n\n    border-radius: 14px;\n\n    padding: 10px 14px;\n\n    margin-bottom: 10px;\n\n    font-size: 12px;\n\n    color: var(--muted);\n}\n\n\n.session-bar b {\n\n    color: var(--text2);\n\n    margin-left: 4px;\n}\n\n\n/* =========================================================\n   STATE\n========================================================= */\n\n.state-section {\n\n    border: 1px solid var(--soft-line);\n\n    border-radius: 16px;\n\n    padding: 14px;\n\n    margin-bottom: 12px;\n\n    background: #fff;\n}\n\n\n.section-title {\n\n    font-size: 14px;\n\n    font-weight: 800;\n\n    color: var(--text);\n\n    margin-bottom: 12px;\n}\n\n\n.kv-row {\n\n    display: flex;\n\n    justify-content: space-between;\n\n    align-items: center;\n\n    margin: 7px 0;\n\n    font-size: 12px;\n\n    color: var(--muted);\n}\n\n\n.state-text {\n\n    background: #f8fafc;\n\n    padding: 10px 12px;\n\n    border-radius: 10px;\n\n    margin-top: 9px;\n\n    font-size: 13px;\n\n    color: var(--text2);\n}\n\n\n.state-label {\n\n    font-size: 11px;\n\n    color: var(--muted);\n\n    margin-top: 12px;\n\n    margin-bottom: 5px;\n}\n\n\n/* =========================================================\n   BADGES\n========================================================= */\n\n.badge {\n\n    display: inline-flex;\n\n    padding: 4px 9px;\n\n    border-radius: 999px;\n\n    font-size: 11px;\n\n    font-weight: 700;\n}\n\n\n.badge-blue {\n\n    background: var(--blue-soft);\n\n    color: #1d4ed8;\n}\n\n\n.badge-green {\n\n    background: var(--green-soft);\n\n    color: #15803d;\n}\n\n\n.badge-gray {\n\n    background: var(--gray-soft);\n\n    color: #475467;\n}\n\n\n.badge-default {\n\n    background: #f2f4f7;\n\n    color: #475467;\n}\n\n\n/* =========================================================\n   CASE\n========================================================= */\n\n.case-item {\n\n    border: 1px solid var(--soft-line);\n\n    border-radius: 11px;\n\n    padding: 9px 10px;\n\n    margin-bottom: 7px;\n\n    background: #fafbfc;\n}\n\n\n.case-id {\n\n    color: var(--blue);\n\n    font-size: 11px;\n\n    font-weight: 750;\n}\n\n\n.case-title {\n\n    font-size: 12px;\n\n    color: var(--text2);\n\n    margin-top: 3px;\n}\n\n\n.empty-small {\n\n    padding: 10px;\n\n    background: #f8fafc;\n\n    border-radius: 10px;\n\n    color: var(--muted);\n\n    font-size: 12px;\n}\n\n\n/* =========================================================\n   TOPIC TREE\n========================================================= */\n\n.topic-tree {\n\n    padding: 5px 0;\n}\n\n\n.tree-node {\n\n    position: relative;\n\n    padding: 6px 7px;\n\n    font-size: 12px;\n\n    color: var(--text2);\n}\n\n\n.tree-dot {\n\n    display: inline-block;\n\n    width: 6px;\n\n    height: 6px;\n\n    background: #94a3b8;\n\n    border-radius: 50%;\n\n    margin-right: 7px;\n}\n\n\n.tree-topic {\n\n    font-weight: 600;\n}\n\n\n.tree-dimension {\n\n    margin-left: 7px;\n\n    color: var(--blue);\n\n    font-size: 10px;\n\n    background: var(--blue-soft);\n\n    padding: 2px 5px;\n\n    border-radius: 5px;\n}\n\n\n.tree-case {\n\n    margin-left: 7px;\n\n    color: var(--muted);\n\n    font-size: 10px;\n}\n\n\n.tree-leaf .tree-dot {\n\n    background: #22c55e;\n}\n\n\n/* =========================================================\n   LATENCY\n========================================================= */\n\n.latency-total {\n\n    font-size: 28px;\n\n    font-weight: 800;\n\n    color: var(--blue);\n\n    margin-bottom: 12px;\n}\n\n\n.latency-grid {\n\n    display: grid;\n\n    grid-template-columns:\n        repeat(2, 1fr);\n\n    gap: 7px;\n}\n\n\n.latency-grid \u003e div {\n\n    background: #f8fafc;\n\n    border-radius: 10px;\n\n    padding: 9px;\n\n    display: flex;\n\n    justify-content: space-between;\n\n    font-size: 11px;\n}\n\n\n.latency-grid span {\n\n    color: var(--muted);\n}\n\n\n.latency-grid b {\n\n    color: var(--text2);\n}\n\n\n/* =========================================================\n   HISTORY\n========================================================= */\n\n.history-item {\n\n    border: 1px solid var(--soft-line);\n\n    border-radius: 14px;\n\n    padding: 12px;\n\n    margin-bottom: 10px;\n\n    background: white;\n}\n\n\n.history-head {\n\n    display: flex;\n\n    justify-content: space-between;\n\n    font-size: 12px;\n\n    color: var(--muted);\n}\n\n\n.history-head b {\n\n    color: var(--text);\n}\n\n\n.history-user {\n\n    font-size: 13px;\n\n    color: var(--text2);\n\n    margin: 9px 0;\n}\n\n\n.history-flow {\n\n    display: flex;\n\n    align-items: center;\n\n    gap: 5px;\n\n    flex-wrap: wrap;\n}\n\n\n/* =========================================================\n   OTHER\n========================================================= */\n\n.state-empty {\n\n    min-height: 400px;\n\n    display: flex;\n\n    align-items: center;\n\n    justify-content: center;\n\n    flex-direction: column;\n\n    color: var(--muted);\n}\n\n\n.state-empty-title {\n\n    color: var(--text);\n\n    font-weight: 800;\n\n    margin-bottom: 7px;\n}\n\n\n.state-empty-desc {\n\n    font-size: 12px;\n}\n\n\n.json-small {\n\n    background: #f8fafc;\n\n    padding: 9px;\n\n    border-radius: 9px;\n\n    font-size: 11px;\n\n    white-space: pre-wrap;\n}\n\n\n.error-card {\n\n    background: #fff1f3;\n\n    border: 1px solid #fecdd6;\n\n    color: #be123c;\n\n    padding: 14px;\n\n    border-radius: 12px;\n}\n\n\n.error-title {\n\n    font-weight: 800;\n\n    margin-bottom: 6px;\n}\n\n\n.prefix-success {\n\n    background: #effdf3;\n\n    border: 1px solid #abefc6;\n\n    color: #027a48;\n\n    padding: 10px;\n\n    border-radius: 10px;\n}\n\n\n.prefix-error {\n\n    background: #fff1f3;\n\n    border: 1px solid #fecdd6;\n\n    color: #be123c;\n\n    padding: 10px;\n\n    border-radius: 10px;\n}\n\n\nfooter {\n    display: none !important;\n}\n\n\n@media (max-width: 1050px) {\n\n    .hero {\n        flex-direction: column;\n        align-items: flex-start;\n        gap: 14px;\n    }\n\n    .message-bubble {\n        max-width: 88%;\n    }\n\n}\n\n","connect_heartbeat":true,"js":null,"head":null,"title":"Huawei IT Support Agent","space_id":null,"enable_queue":true,"show_error":false,"footer_links":["api","gradio","settings"],"is_colab":false,"max_file_size":null,"stylesheets":[],"theme":"soft","protocol":"sse_v3","body_css":{"body_background_fill":"#f8fafc","body_text_color":"#1e293b","body_background_fill_dark":"#0a0f1e","body_text_color_dark":"#f1f5f9"},"fill_height":false,"fill_width":false,"theme_hash":"92ec1df1ece2e4b217aa9075aa6a4ff317b04709e49d45921c21014909be8f29","pwa":false,"pages":[["","Home",true]],"page":{"":{"layout":{"id":0,"children":[{"id":1},{"id":2,"children":[]},{"id":3,"children":[{"id":4,"children":[{"id":5,"children":[]},{"id":6,"children":[]},{"id":7,"children":[{"id":10,"children":[{"id":8}]},{"id":9}]},{"id":11,"children":[{"id":12}]},{"id":13,"children":[{"id":17,"children":[{"id":14}]},{"id":15},{"id":16,"children":[]}]}]},{"id":18,"children":[{"id":19,"children":[]},{"id":20,"children":[{"id":21,"children":[{"id":22,"children":[]}]},{"id":23,"children":[{"id":24,"children":[]}]}]}]}]}]},"components":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24],"dependencies":[0,1,2,3]}},"mcp_server":false,"i18n_translations":null,"dependencies":[{"id":0,"targets":[[9,"click"]],"inputs":[8,1],"outputs":[8,6,22,24,19,1],"backend_fn":true,"js":null,"queue":true,"api_name":"chat","api_description":null,"scroll_to_output":false,"show_progress":"full","show_progress_on":null,"batch":false,"max_batch_size":4,"cancels":[],"types":{"generator":false,"cancel":false},"collects_event_data":false,"trigger_after":null,"trigger_only_on_success":false,"trigger_only_on_failure":false,"trigger_mode":"once","api_visibility":"public","rendered_in":null,"render_id":null,"connection":"sse","time_limit":null,"stream_every":0.5,"event_specific_args":null,"component_prop_inputs":[],"js_implementation":null},{"id":1,"targets":[[8,"submit"]],"inputs":[8,1],"outputs":[8,6,22,24,19,1],"backend_fn":true,"js":null,"queue":true,"api_name":"chat_1","api_description":null,"scroll_to_output":false,"show_progress":"full","show_progress_on":null,"batch":false,"max_batch_size":4,"cancels":[],"types":{"generator":false,"cancel":false},"collects_event_data":false,"trigger_after":null,"trigger_only_on_success":false,"trigger_only_on_failure":false,"trigger_mode":"once","api_visibility":"public","rendered_in":null,"render_id":null,"connection":"sse","time_limit":null,"stream_every":0.5,"event_specific_args":null,"component_prop_inputs":[],"js_implementation":null},{"id":2,"targets":[[12,"click"]],"inputs":[],"outputs":[8,6,22,24,19,1],"backend_fn":true,"js":null,"queue":true,"api_name":"reset_chat","api_description":null,"scroll_to_output":false,"show_progress":"full","show_progress_on":null,"batch":false,"max_batch_size":4,"cancels":[],"types":{"generator":false,"cancel":false},"collects_event_data":false,"trigger_after":null,"trigger_only_on_success":false,"trigger_only_on_failure":false,"trigger_mode":"once","api_visibility":"public","rendered_in":null,"render_id":null,"connection":"sse","time_limit":null,"stream_every":0.5,"event_specific_args":null,"component_prop_inputs":[],"js_implementation":null},{"id":3,"targets":[[15,"click"]],"inputs":[14,1],"outputs":[6,22,24,19,1,16],"backend_fn":true,"js":null,"queue":true,"api_name":"load_prefix","api_description":null,"scroll_to_output":false,"show_progress":"full","show_progress_on":null,"batch":false,"max_batch_size":4,"cancels":[],"types":{"generator":false,"cancel":false},"collects_event_data":false,"trigger_after":null,"trigger_only_on_success":false,"trigger_only_on_failure":false,"trigger_mode":"once","api_visibility":"public","rendered_in":null,"render_id":null,"connection":"sse","time_limit":null,"stream_every":0.5,"event_specific_args":null,"component_prop_inputs":[],"js_implementation":null}],"layout":{"id":0,"children":[{"id":1},{"id":2,"children":[]},{"id":3,"children":[{"id":4,"children":[{"id":5,"children":[]},{"id":6,"children":[]},{"id":7,"children":[{"id":10,"children":[{"id":8}]},{"id":9}]},{"id":11,"children":[{"id":12}]},{"id":13,"children":[{"id":17,"children":[{"id":14}]},{"id":15},{"id":16,"children":[]}]}]},{"id":18,"children":[{"id":19,"children":[]},{"id":20,"children":[{"id":21,"children":[{"id":22,"children":[]}]},{"id":23,"children":[{"id":24,"children":[]}]}]}]}]}]},"username":null,"deep_link_state":"none","current_page":"","root":"http://127.0.0.1:7866"};</script><script>window.gradio_api_info = {"named_endpoints":{"/chat":{"parameters":[{"label":"parameter_8","parameter_name":"user_input","parameter_has_default":false,"parameter_default":null,"type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox","example_input":"Hello!!"}],"returns":[{"label":"value_8","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox"},{"label":"value_6","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_22","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_24","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_19","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"}],"api_visibility":"public","description":"","code_snippets":{"python":"from gradio_client import Client\n\nclient = Client(\"http://localhost:7866\")\nresult = client.predict(\n\tuser_input=\"Hello!!\",\n\tapi_name=\"/chat\",\n)\nprint(result)","javascript":"import { Client } from \"@gradio/client\";\n\nconst client = await Client.connect(\"http://localhost:7866\");\nconst result = await client.predict(\"/chat\", {\n\t\tuser_input: \"Hello!!\",\n});\n\nconsole.log(result.data);","bash":"curl -X POST http://localhost:7866/gradio_api/call/v2/chat -s -H \"Content-Type: application/json\" \\\n  -d \u0027{\"user_input\": \"Hello!!\"}\u0027 \\\n  | awk -F\u0027\"\u0027 \u0027{ print $4}\u0027 \\\n  | read EVENT_ID; curl -N http://localhost:7866/gradio_api/call/chat/$EVENT_ID","cli":"{command} predict http://localhost:7866 /chat \u0027{\n  \"user_input\": \"Hello!!\"\n}\u0027\n"}},"/chat_1":{"parameters":[{"label":"parameter_8","parameter_name":"user_input","parameter_has_default":false,"parameter_default":null,"type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox","example_input":"Hello!!"}],"returns":[{"label":"value_8","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox"},{"label":"value_6","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_22","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_24","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_19","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"}],"api_visibility":"public","description":"","code_snippets":{"python":"from gradio_client import Client\n\nclient = Client(\"http://localhost:7866\")\nresult = client.predict(\n\tuser_input=\"Hello!!\",\n\tapi_name=\"/chat_1\",\n)\nprint(result)","javascript":"import { Client } from \"@gradio/client\";\n\nconst client = await Client.connect(\"http://localhost:7866\");\nconst result = await client.predict(\"/chat_1\", {\n\t\tuser_input: \"Hello!!\",\n});\n\nconsole.log(result.data);","bash":"curl -X POST http://localhost:7866/gradio_api/call/v2/chat_1 -s -H \"Content-Type: application/json\" \\\n  -d \u0027{\"user_input\": \"Hello!!\"}\u0027 \\\n  | awk -F\u0027\"\u0027 \u0027{ print $4}\u0027 \\\n  | read EVENT_ID; curl -N http://localhost:7866/gradio_api/call/chat_1/$EVENT_ID","cli":"{command} predict http://localhost:7866 /chat_1 \u0027{\n  \"user_input\": \"Hello!!\"\n}\u0027\n"}},"/reset_chat":{"parameters":[],"returns":[{"label":"value_8","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox"},{"label":"value_6","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_22","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_24","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_19","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"}],"api_visibility":"public","description":"","code_snippets":{"python":"from gradio_client import Client\n\nclient = Client(\"http://localhost:7866\")\nresult = client.predict(\n\tapi_name=\"/reset_chat\",\n)\nprint(result)","javascript":"import { Client } from \"@gradio/client\";\n\nconst client = await Client.connect(\"http://localhost:7866\");\nconst result = await client.predict(\"/reset_chat\", {\n});\n\nconsole.log(result.data);","bash":"curl -X POST http://localhost:7866/gradio_api/call/v2/reset_chat -s -H \"Content-Type: application/json\" \\\n  -d \u0027{}\u0027 \\\n  | awk -F\u0027\"\u0027 \u0027{ print $4}\u0027 \\\n  | read EVENT_ID; curl -N http://localhost:7866/gradio_api/call/reset_chat/$EVENT_ID","cli":"{command} predict http://localhost:7866 /reset_chat \u0027{}\u0027\n"}},"/load_prefix":{"parameters":[{"label":"parameter_14","parameter_name":"prefix_text","parameter_has_default":false,"parameter_default":null,"type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Textbox","example_input":"Hello!!"}],"returns":[{"label":"value_6","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_22","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_24","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_19","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"},{"label":"value_16","type":{"type":"string"},"python_type":{"type":"str","description":""},"component":"Html"}],"api_visibility":"public","description":"","code_snippets":{"python":"from gradio_client import Client\n\nclient = Client(\"http://localhost:7866\")\nresult = client.predict(\n\tprefix_text=\"Hello!!\",\n\tapi_name=\"/load_prefix\",\n)\nprint(result)","javascript":"import { Client } from \"@gradio/client\";\n\nconst client = await Client.connect(\"http://localhost:7866\");\nconst result = await client.predict(\"/load_prefix\", {\n\t\tprefix_text: \"Hello!!\",\n});\n\nconsole.log(result.data);","bash":"curl -X POST http://localhost:7866/gradio_api/call/v2/load_prefix -s -H \"Content-Type: application/json\" \\\n  -d \u0027{\"prefix_text\": \"Hello!!\"}\u0027 \\\n  | awk -F\u0027\"\u0027 \u0027{ print $4}\u0027 \\\n  | read EVENT_ID; curl -N http://localhost:7866/gradio_api/call/load_prefix/$EVENT_ID","cli":"{command} predict http://localhost:7866 /load_prefix \u0027{\n  \"prefix_text\": \"Hello!!\"\n}\u0027\n"}}},"unnamed_endpoints":{}};</script>
+
+                <link rel="preconnect" href="https://fonts.googleapis.com" />
+                <link
+                        rel="preconnect"
+                        href="https://fonts.gstatic.com"
+                        crossorigin="anonymous"
+                />
+                <script
+                        src="https://cdnjs.cloudflare.com/ajax/libs/iframe-resizer/4.3.1/iframeResizer.contentWindow.min.js"
+                        async
+                ></script>
+                <script data-gradio-mode>
+                        window.__gradio_mode__ = "app";
+                        window.iFrameResizer = {
+                                autoResize: false,
+                                sizeWidth: false
+                        };
+                        window.parent?.postMessage(
+                                { type: "SET_SCROLLING", enabled: false },
+                                "*"
+                        );
+                </script>
+                <link rel="manifest" href="/manifest.json" />
+                <script type="module" crossorigin src="./assets/index-B5CnGmTK.js"></script>
+                <link rel="stylesheet" crossorigin href="./assets/index-bt_TDFDJ.css">
+        </head>
+
+        <body
+                style="
+                        width: 100%;
+                        margin: 0;
+                        padding: 0;
+                        display: flex;
+                        flex-direction: column;
+                        flex-grow: 1;
+                "
+        >
+                <gradio-app
+                        control_page_title="true"
+                        embed="false"
+                        eager="true"
+                        style="display: flex; flex-direction: column; flex-grow: 1"
+                >
+                </gradio-app>
+                <script>
+                        const ce = document.getElementsByTagName("gradio-app");
+
+                        if (ce[0]) {
+                                ce[0].addEventListener("domchange", () => {
+                                        document.body.style.padding = "0";
+                                });
+                                document.body.style.padding = "0";
+                        }
+                </script>
+        </body>
+* Connection #0 to host 127.0.0.1 left intact
