@@ -1,82 +1,14 @@
-User: 请问外协人员怎么共享一台机器。\n就是切换用户这里。\n需要找IT人员现场操作吗？
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:04<00:00,  4.80s/it]
-[TopicStructure] Round 0: 1 nodes
-[TopicStructure] Round 1: 1 nodes
+Interaction Progress
 
-╔══════════════ AGENT STATE ══════════════╗
- Query    : rewrite | 外协人员共享机器的用户切换操作是否需要IT现场支持
- Trigger  : True
- Evidence : retrieve_new_evidence
- Cases    : KT00248529, KT00006565, KT00171898, KT00332601, KT00354185
+Policy 应结合 interaction_state 和 dialogue_state 判断上一轮动作是否有效推进了当前问题。
 
- Topic Tree
- 外协人员共享机器的用户切换操作是否需要IT现场支持  <是否需要IT现场支持>
- ├─ 需要IT现场支持  [KT00354185]
- └─ 不需要IT现场支持  <共享机器类型或用户权限申请方式>
-    ├─ 资产共享操作指导  [KT00248529]
-    ├─ 便携机同时使用人管理  [KT00006565]
-    ├─ 外协员工权限申请流程  [KT00171898]
-    └─ 工号切换服务不支持外协员工  [KT00332601]
+如果上一轮已经针对某个 Dimension 或信息进行了询问，而用户没有回答该询问，而是再次重复、重述或强调原来的问题，不要机械重复相同的询问。
 
- Policy   : CaseRecommendation
- Info     : {'case_id': 'KT00248529'}
-╚══════════════════════════════════════════╝
+这种情况通常表示上一轮询问没有解决用户当前最关心的问题。应重新判断现有 Evidence 是否已经能够直接回答或推荐；如果仍然必须澄清，应选择能够真正推进问题的不同信息，而不是重复相同的 Dimension 和 Candidate Values。
 
->>> AGENT RESPONSE
-外协人员共享机器的操作可以参考案例 KT00248529《资产共享操作指导》。具体步骤请查看文档：资产共享操作指导.docx。如果还有疑问，欢迎继续咨询。
+不要仅因为当前仍然缺少某项信息，就连续重复同一个 AskMissingSlot 或 AskClarification。
 
-User: 是不是需要原本的人先登录进去。
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:05<00:00,  5.04s/it]
-[TopicStructure] Round 0: 1 nodes
-[TopicStructure] Round 1: 2 nodes
 
-╔══════════════ AGENT STATE ══════════════╗
- Query    : refine | 外协人员共享机器的用户切换操作是否需要原用户先登录
- Trigger  : True
- Evidence : retrieve_new_evidence
- Cases    : KT00248529, KT00005754, KT00053256, KT00042899, KT00279158
 
- Topic Tree
- 外协人员共享机器的用户切换操作是否需要原用户先登录  <用户切换是否需要原用户先登录>
- ├─ 需要原用户先登录  <切换用户的方式>
- │  ├─ 通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）  [KT00005754]
- │  └─ 工号切换后重新登录（涉及XGate认证和网络环境）  [KT00042899]
- └─ 不需要原用户先登录  <操作对象类型>
-    ├─ 资产共享相关操作  [KT00248529]
-    ├─ 本地管理员账号添加与切换  [KT00053256]
-    └─ 外协人员信息修改  [KT00279158]
 
- Policy   : AskClarification
- Info     : {'dimension': '切换用户的方式', 'candidate_values': ['通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）', '工号切换后重新登录（涉及XGate认证和网络环境）']}
-╚══════════════════════════════════════════╝
-
->>> AGENT RESPONSE
-您提到的切换用户，是通过系统界面直接切换（比如使用 Alt+Ctrl+Del 或 Win+L），还是需要工号切换后重新登录（涉及 XGate 认证和网络环境）呢？可以简单说明一下具体情况吗？
-
-User: 需要原本的人先登录进去吗
-Processing: 100%|███████████████████████████████████████████████████████████████| 1/1 [00:06<00:00,  6.50s/it]
-[TopicStructure] Round 0: 1 nodes
-[TopicStructure] Round 1: 2 nodes
-
-╔══════════════ AGENT STATE ══════════════╗
- Query    : reuse | 外协人员共享机器的用户切换操作是否需要原用户先登录
- Trigger  : True
- Evidence : retrieve_new_evidence
- Cases    : KT00005754, KT00001086, KT00042899, KT00053256, KT00070250
-
- Topic Tree
- 外协人员共享机器的用户切换操作是否需要原用户先登录  <用户切换的触发方式>
- ├─ 通过系统快捷键切换用户  [KT00005754]
- ├─ 通过工号切换自动更新域账号  <登录方式>
- │  ├─ 无线网络登录  [KT00042899]
- │  └─ 有线网络登录  [KT00070250]
- └─ 手动添加新管理员账号后切换  <账号类型>
-    ├─ 域账号  [KT00001086]
-    └─ 本地账号  [KT00053256]
-
- Policy   : AskClarification
- Info     : {'dimension': '切换用户的方式', 'candidate_values': ['通过系统界面切换用户（Alt+Ctrl+Del 或 Win+L）', '工号切换后重新登录（涉及XGate认证和网络环境）']}
-╚══════════════════════════════════════════╝
-
->>> AGENT RESPONSE
-您提到的切换用户，是通过系统界面直接切换（比如使用 Alt+Ctrl+Del 或 Win+L），还是需要工号切换后重新登录（涉及 XGate 认证和网络环境）呢？可以简单说明一下具体情况吗？
+如果当前 Policy 要求询问的信息与上一轮客服已经询问的内容实质相同，而用户没有回答该问题、只是重复或强调原需求，不要机械复述上一轮问题。应根据当前 Policy Information 和对话语境，用更直接、不同的方式帮助用户推进当前问题。
