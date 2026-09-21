@@ -1,837 +1,561 @@
+import copy
 import json
-import time
+import sys
+import uuid
 from pathlib import Path
+from typing import Any, Dict, List
 
-from Agent.utils.scu_rag import batch_zefeng_rag
-from Agent.utils.qwen_api_multi import single_inference, parallel_inference
+import gradio as gr
+
+
+# ============================================================
+# Project Path
+# ============================================================
+
+PROJECT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = PROJECT_DIR.parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+# ============================================================
+# Agent
+# ============================================================
+
+from run import MemoryAgent
+from ui_render import (
+    render_chat,
+    render_state,
+    render_history,
+    render_session_info,
+    render_error,
+)
+from ui_style import CUSTOM_CSS
+
+
+# ============================================================
+# Config
+# ============================================================
+
+AGENT_PROMPT_DIR = ROOT_DIR / "Agent" / "promptsv2_3"
+
+DEFAULT_MODE = "single"
+DEFAULT_MAX_TOPIC_DEPTH = 8
+
+
+# ============================================================
+# Session
+# ============================================================
+
+def new_session() -> Dict[str, Any]:
+    """
+    一个浏览器 session 对应一个独立 MemoryAgent。
+
+    Project 不维护 Agent 内部 memory，
+    只维护：
+    - session id
+    - agent instance
+    - frontend dialogue history
+    - turn records
+    """
+
+    session_id = f"web_{uuid.uuid4().hex[:10]}"
+
+    agent = MemoryAgent(
+        prompt_dir=AGENT_PROMPT_DIR,
+        mode=DEFAULT_MODE,
+        max_topic_depth=DEFAULT_MAX_TOPIC_DEPTH,
+        show_state=False,
+    )
+
+    return {
+        "session_id": session_id,
+        "agent": agent,
+        "dialogue_history": [],
+        "turn_records": [],
+    }
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    if not isinstance(text, str):
+def safe_state_copy(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    last_turn_state 当前都是 JSON-compatible 数据，
+    这里 deepcopy 一份，避免后续 memory 更新影响历史记录。
+    """
+    try:
+        return copy.deepcopy(state)
+    except Exception:
+        return json.loads(
+            json.dumps(state, ensure_ascii=False, default=str)
+        )
+
+
+def get_latest_state(session: Dict[str, Any]) -> Dict[str, Any]:
+    records = session.get("turn_records", [])
+
+    if not records:
         return {}
 
-    text = text.strip()
-    if not text:
-        return {}
+    return records[-1].get("state", {})
+
+
+# ============================================================
+# Main Interaction
+# ============================================================
+
+def chat(
+    user_input: str,
+    session: Dict[str, Any],
+):
+    if session is None:
+        session = new_session()
+
+    user_input = str(user_input or "").strip()
+
+    if not user_input:
+        return (
+            "",
+            render_chat(session["dialogue_history"]),
+            render_state(get_latest_state(session)),
+            render_history(session["turn_records"]),
+            render_session_info(session),
+            session,
+        )
+
+    agent: MemoryAgent = session["agent"]
+
+    # --------------------------------------------------------
+    # 1. Add user message
+    # --------------------------------------------------------
+
+    dialogue_history = session["dialogue_history"] + [
+        {
+            "role": "user",
+            "content": user_input,
+        }
+    ]
+
+    # --------------------------------------------------------
+    # 2. Agent
+    # --------------------------------------------------------
 
     try:
-        return json.loads(text)
-    except Exception:
-        pass
+        response = agent.reply(dialogue_history)
+        turn_state = safe_state_copy(agent.last_turn_state)
 
-    if "```json" in text:
-        try:
-            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
+    except Exception as e:
+        error_message = str(e)
 
-    if "```" in text:
-        try:
-            text = text.split("```", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
+        # 用户消息仍保留，但不伪造 assistant 回复
+        session["dialogue_history"] = dialogue_history
 
-    return {}
+        return (
+            "",
+            render_chat(dialogue_history),
+            render_error(error_message),
+            render_history(session["turn_records"]),
+            render_session_info(session),
+            session,
+        )
 
+    # --------------------------------------------------------
+    # 3. Add assistant message
+    # --------------------------------------------------------
 
-def parse_llm_output(output):
-    parsed = parse_json(output)
-    if not parsed:
-        return {}
-    if "response" not in parsed:
-        return parsed
-    return parse_json(parsed.get("response", ""))
-
-
-def prompt_read(path):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
-
-def build_messages(system_prompt, data):
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-    ]
-
-
-def history_to_text(history):
-    lines = []
-    for msg in history:
-        if msg.get("role") == "user":
-            lines.append(f"用户: {msg.get('content', '')}")
-        elif msg.get("role") == "assistant":
-            lines.append(f"客服: {msg.get('content', '')}")
-    return "\n".join(lines)
-
-
-def get_case_id(case):
-    if not isinstance(case, dict):
-        return ""
-    return str(case.get("case_id") or case.get("id") or case.get("caseId") or "").strip()
-
-
-def case_map_from_cases(cases):
-    return {get_case_id(case): case for case in cases or [] if get_case_id(case)}
-
-
-def get_policy_case_ids(policy_state):
-    information = policy_state.get("information")
-    if not isinstance(information, dict):
-        return []
-
-    value = information.get("case_id")
-    if value is None:
-        value = information.get("case_ids")
-
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-
-    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
-
-
-def get_selected_evidence(policy_state, active_cases):
-    if policy_state.get("label") not in {"CaseRecommendation", "ExplainedResponse"}:
-        return None
-
-    case_ids = get_policy_case_ids(policy_state)
-    if not case_ids:
-        return None
-
-    case_map = case_map_from_cases(active_cases)
-    selected = [case_map[cid] for cid in case_ids if cid in case_map]
-
-    if not selected:
-        return None
-    if len(selected) == 1:
-        return selected[0]
-    return selected
-
-
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": [],
-        },
-        "evidence_state": {
-            "active_cases": [],
-            "topic_structure": {},
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_policy": None,
-            "policy_history": [],
-        },
-        "dialogue_state": {
-            "recent_history": [],
-        },
-    }
-
-
-# ============================================================
-# Topic Structure
-# ============================================================
-
-def build_topic_split_input(query, cases, parent_path, depth):
-    return {
-        "query": query,
-        "parent_path": parent_path,
-        "depth": depth,
-        "cases": cases,
-    }
-
-
-def make_leaf(case_id, topic=None):
-    return {
-        "topic": topic or case_id,
-        "case_ids": [case_id],
-        "leaf": True,
-        "case_id": case_id,
-        "children": [],
-    }
-
-
-def normalize_split(split_result, expected_case_ids):
-    if not isinstance(split_result, dict):
-        return None, "output is not a dict"
-
-    split = split_result.get("split")
-    if not isinstance(split, bool):
-        return None, "missing or invalid split"
-
-    if not split:
-        return {
-            "split": False,
-            "dimension": "",
-            "children": [],
-        }, ""
-
-    dimension = str(split_result.get("dimension", "")).strip()
-    assignments = split_result.get("assignments", [])
-
-    if not dimension:
-        return None, "missing dimension"
-
-    if not isinstance(assignments, list):
-        return None, "assignments must be a list"
-
-    expected_set = set(expected_case_ids)
-    assignment_map = {}
-
-    for item in assignments:
-        if not isinstance(item, dict):
-            return None, "assignment is not a dict"
-
-        case_id = str(item.get("case_id", "")).strip()
-        topic = str(item.get("topic", "")).strip()
-
-        if not case_id or not topic:
-            return None, "assignment missing case_id or topic"
-
-        if case_id not in expected_set:
-            return None, f"unknown case_id: {case_id}"
-
-        if case_id in assignment_map:
-            return None, f"duplicated case_id: {case_id}"
-
-        assignment_map[case_id] = topic
-
-    missing = [
-        case_id
-        for case_id in expected_case_ids
-        if case_id not in assignment_map
-    ]
-
-    if missing:
-        return None, f"missing case_ids: {missing}"
-
-    groups = {}
-
-    for case_id in expected_case_ids:
-        topic = assignment_map[case_id]
-        groups.setdefault(topic, []).append(case_id)
-
-    if len(groups) < 2:
-        return None, "fewer than 2 valid topic groups"
-
-    children = [
+    dialogue_history.append(
         {
-            "topic": topic,
-            "case_ids": case_ids,
+            "role": "assistant",
+            "content": response,
         }
-        for topic, case_ids in groups.items()
-    ]
+    )
 
-    return {
-        "split": True,
-        "dimension": dimension,
-        "children": children,
-    }, ""
+    session["dialogue_history"] = dialogue_history
 
+    # --------------------------------------------------------
+    # 4. Save turn record
+    # --------------------------------------------------------
 
-def stop_topic_refinement(node, split_status):
-    node["leaf"] = True
-    node["dimension"] = ""
-    node["children"] = []
-    node["split_status"] = split_status
+    turn_id = len(session["turn_records"]) + 1
 
-
-def normalize_case_ids(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
-
-
-def format_topic_tree(tree):
-    if not tree:
-        return "None"
-
-    lines = []
-
-    def node_text(node):
-        topic = str(node.get("topic", "")).strip()
-        dimension = str(node.get("dimension", "")).strip()
-        case_ids = normalize_case_ids(node.get("case_ids"))
-
-        if node.get("leaf"):
-            if case_ids:
-                ids = ", ".join(case_ids)
-                return f"{topic}  [{ids}]" if topic and topic not in case_ids else f"[{ids}]"
-            return topic or "Unknown"
-
-        if dimension:
-            return f"{topic}  <{dimension}>"
-
-        return topic or "Unknown"
-
-    def walk(node, prefix="", is_last=True, root=False):
-        if root:
-            lines.append(node_text(node))
-        else:
-            lines.append(prefix + ("└─ " if is_last else "├─ ") + node_text(node))
-
-        children = node.get("children", [])
-        if not children:
-            return
-
-        child_prefix = prefix if root else prefix + ("   " if is_last else "│  ")
-
-        for i, child in enumerate(children):
-            walk(child, child_prefix, i == len(children) - 1, False)
-
-    walk(tree, root=True)
-    return "\n".join(lines)
-
-
-# ============================================================
-# Memory Agent
-# ============================================================
-
-class MemoryAgent:
-    """
-    Stateful customer-service agent.
-
-    One instance corresponds to one dialogue.
-    Call reset() before starting a new dialogue if reusing it.
-    """
-
-    def __init__(
-        self,
-        prompt_dir="Agent/promptsv2_3",
-        mode="single",
-        max_topic_depth=8,
-        show_state=True,
-    ):
-        prompt_dir = Path(prompt_dir)
-
-        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
-        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
-        self.topic_prompt = prompt_read(prompt_dir / "topic.prompt")
-        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
-        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
-
-        if mode not in {"single", "parallel"}:
-            raise ValueError(f"Unsupported mode: {mode}")
-
-        self.mode = mode
-        self.max_topic_depth = max_topic_depth
-        self.show_state = show_state
-
-        self.memory = init_memory()
-
-        # 对外暴露当前轮状态，供 Project / Web UI 使用。
-        # 不参与 Agent 内部决策。
-        self.last_turn_state = {}
-
-    # ========================================================
-    # LLM
-    # ========================================================
-
-    def call_llm(self, prompt, data):
-        messages = build_messages(prompt, data)
-
-        if self.mode == "single":
-            output = single_inference(messages)
-        else:
-            output = parallel_inference([messages])[0]
-
-        return parse_llm_output(output)
-
-    def call_llm_batch(self, messages):
-        if not messages:
-            return []
-
-        if self.mode == "single":
-            outputs = [single_inference(message) for message in messages]
-        else:
-            outputs = parallel_inference(messages)
-
-        return [parse_llm_output(output) for output in outputs]
-
-    # ========================================================
-    # Memory Update
-    # ========================================================
-
-    def update_issue(self, query_state):
-        mode = str(query_state.get("query_mode", "none")).strip()
-        query = str(query_state.get("query_text", "")).strip()
-
-        if mode in {"rewrite", "refine"} and query:
-            self.memory["issue_state"]["current_issue"] = query
-            self.memory["issue_state"]["query_history"].append(query)
-
-    def update_evidence(self, trigger_state, evidence, topic_structure=None):
-        if trigger_state.get("evidence_mode") != "retrieve_new_evidence":
-            return
-
-        self.memory["evidence_state"]["active_cases"] = evidence
-        self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
-
-    def update_interaction(self, policy_state):
-        label = str(policy_state.get("label", "")).strip()
-        information = policy_state.get("information")
-
-        policy = {
-            "label": label,
-            "information": information,
-        }
-
-        interaction = self.memory["interaction_state"]
-        interaction["last_policy"] = policy
-        interaction["policy_history"].append(policy)
-
-        if label in {"AskMissingSlot", "AskClarification"}:
-            interaction["stage"] = "Clarification"
-        elif label in {"ExplainedResponse", "CaseRecommendation"}:
-            interaction["stage"] = "Resolution"
-        elif label == "Handoff":
-            interaction["stage"] = "End"
-
-    def update_dialogue(self, user, response):
-        history = self.memory["dialogue_state"]["recent_history"]
-
-        history.append({
-            "user": user,
+    session["turn_records"].append(
+        {
+            "turn_id": turn_id,
+            "user": user_input,
             "assistant": response,
-        })
-
-        self.memory["dialogue_state"]["recent_history"] = history[-5:]
-
-    # ========================================================
-    # Topic Structure Generation
-    # ========================================================
-
-    def generate_topic_structure(self, query, cases):
-        case_map = case_map_from_cases(cases)
-        case_ids = list(case_map)
-
-        root = {
-            "query": query,
-            "topic": query,
-            "case_ids": case_ids,
-            "leaf": len(case_ids) <= 1,
-            "children": [],
+            "state": turn_state,
         }
+    )
 
-        if not case_ids:
-            return root
+    # --------------------------------------------------------
+    # 5. Render
+    # --------------------------------------------------------
 
-        if len(case_ids) == 1:
-            root["case_id"] = case_ids[0]
-            root["split_status"] = "single_case"
-            return root
+    return (
+        "",
+        render_chat(dialogue_history),
+        render_state(turn_state),
+        render_history(session["turn_records"]),
+        render_session_info(session),
+        session,
+    )
 
-        frontier = [{
-            "node": root,
-            "case_ids": case_ids,
-            "depth": 0,
-            "parent_path": [],
-        }]
 
-        round_id = 0
+# ============================================================
+# Reset
+# ============================================================
 
-        while frontier:
-            print(f"[TopicStructure] Round {round_id}: {len(frontier)} nodes")
+def reset_chat():
+    session = new_session()
 
-            active_frontier = []
+    return (
+        "",
+        render_chat([]),
+        render_state({}),
+        render_history([]),
+        render_session_info(session),
+        session,
+    )
 
-            for task in frontier:
-                if task["depth"] >= self.max_topic_depth:
-                    print(f"[TopicStructure Warning] max_depth reached: {task['case_ids']}")
-                    stop_topic_refinement(task["node"], "max_depth")
-                else:
-                    active_frontier.append(task)
 
-            if not active_frontier:
-                break
+# ============================================================
+# Prefix
+# ============================================================
 
-            messages = []
+def parse_prefix(prefix_text: str) -> List[Dict[str, str]]:
+    """
+    支持：
 
-            for task in active_frontier:
-                node_cases = [case_map[case_id] for case_id in task["case_ids"]]
+    用户: xxx
+    客服: xxx
 
-                split_input = build_topic_split_input(
-                    query=query,
-                    cases=node_cases,
-                    parent_path=task["parent_path"],
-                    depth=task["depth"],
+    用户：xxx
+    客服：xxx
+    """
+
+    prefix_text = str(prefix_text or "").strip()
+
+    if not prefix_text:
+        return []
+
+    history = []
+
+    for raw_line in prefix_text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("用户:"):
+            history.append({
+                "role": "user",
+                "content": line[len("用户:"):].strip(),
+            })
+
+        elif line.startswith("用户："):
+            history.append({
+                "role": "user",
+                "content": line[len("用户："):].strip(),
+            })
+
+        elif line.startswith("客服:"):
+            history.append({
+                "role": "assistant",
+                "content": line[len("客服:"):].strip(),
+            })
+
+        elif line.startswith("客服："):
+            history.append({
+                "role": "assistant",
+                "content": line[len("客服："):].strip(),
+            })
+
+        else:
+            if not history:
+                raise ValueError(
+                    f"无法识别历史对话：{line}"
                 )
 
-                messages.append(build_messages(self.topic_prompt, split_input))
+            history[-1]["content"] += "\n" + line
 
-            outputs = self.call_llm_batch(messages)
+    return history
 
-            valid_results = {}
 
-            for idx, (task, output) in enumerate(zip(active_frontier, outputs)):
-                valid_split, error = normalize_split(output, task["case_ids"])
+def load_prefix(
+    prefix_text: str,
+    session: Dict[str, Any],
+):
+    if session is None:
+        session = new_session()
 
-                if valid_split:
-                    valid_results[idx] = valid_split
-                else:
-                    print(f"[TopicStructure Invalid] {error}")
-                    print("output:", output, flush=True)
+    try:
+        history = parse_prefix(prefix_text)
 
-            next_frontier = []
+        if not history:
+            raise ValueError("请输入历史对话。")
 
-            for idx, task in enumerate(active_frontier):
-                node = task["node"]
-                valid_split = valid_results.get(idx)
+        # Prefix 只作为 dialogue history。
+        # 不重放 Agent，因此重新创建 Agent，保证内部 memory 为空。
+        new_agent = MemoryAgent(
+            prompt_dir=AGENT_PROMPT_DIR,
+            mode=DEFAULT_MODE,
+            max_topic_depth=DEFAULT_MAX_TOPIC_DEPTH,
+            show_state=False,
+        )
 
-                if not valid_split:
-                    print(
-                        "[TopicStructure Warning] "
-                        f"invalid output, stop refinement: {task['case_ids']}"
-                    )
-                    stop_topic_refinement(node, "invalid_output")
-                    continue
+        session["agent"] = new_agent
+        session["dialogue_history"] = history
+        session["turn_records"] = []
 
-                if valid_split["split"] is False:
-                    print(
-                        "[TopicStructure] "
-                        f"no meaningful split: {task['case_ids']}"
-                    )
-                    stop_topic_refinement(node, "no_meaningful_split")
-                    continue
-
-                node["leaf"] = False
-                node["dimension"] = valid_split["dimension"]
-                node["children"] = []
-                node["split_status"] = "valid"
-
-                for child_info in valid_split["children"]:
-                    child_case_ids = child_info["case_ids"]
-                    child_topic = child_info["topic"]
-
-                    child_node = {
-                        "topic": child_topic,
-                        "case_ids": child_case_ids,
-                        "leaf": len(child_case_ids) == 1,
-                        "children": [],
-                    }
-
-                    node["children"].append(child_node)
-
-                    if len(child_case_ids) == 1:
-                        child_node["case_id"] = child_case_ids[0]
-                        child_node["split_status"] = "single_case"
-                        continue
-
-                    next_frontier.append({
-                        "node": child_node,
-                        "case_ids": child_case_ids,
-                        "depth": task["depth"] + 1,
-                        "parent_path": task["parent_path"] + [child_topic],
-                    })
-
-            frontier = next_frontier
-            round_id += 1
-
-        return root
-
-    # ========================================================
-    # State Display
-    # ========================================================
-
-    def print_state(self, query_state, trigger_state, policy_state):
-        if not self.show_state:
-            return
-
-        query_mode = query_state.get("query_mode", "")
-        query_text = query_state.get("query_text", "")
-        trigger = trigger_state.get("trigger", "")
-        evidence_mode = trigger_state.get("evidence_mode", "")
-
-        active_cases = self.memory["evidence_state"]["active_cases"]
-        case_ids = [get_case_id(case) for case in active_cases if get_case_id(case)]
-
-        policy = policy_state.get("label", "")
-        information = policy_state.get("information")
-        topic_tree = format_topic_tree(self.memory["evidence_state"]["topic_structure"])
-
-        print("\n╔══════════════ AGENT STATE ══════════════╗")
-        print(f" Query    : {query_mode} | {query_text}")
-        print(f" Trigger  : {trigger}")
-        print(f" Evidence : {evidence_mode}")
-        print(f" Cases    : {', '.join(case_ids) if case_ids else 'None'}")
-
-        print("\n Topic Tree")
-        for line in topic_tree.splitlines():
-            print(f" {line}")
-
-        print(f"\n Policy   : {policy}")
-        print(f" Info     : {information if information is not None else 'None'}")
-        print("╚══════════════════════════════════════════╝")
-
-    # ========================================================
-    # Reply
-    # ========================================================
-
-    def reply(self, dialogue_history):
-        """
-        dialogue_history:
-        [
-            {"role": "user", "content": "..."},
-            {"role": "assistant", "content": "..."},
-            ...
-            {"role": "user", "content": "..."},
-        ]
-
-        Returns:
-            str: customer-service response
+        status = f"""
+        <div class="prefix-success">
+            历史对话已加载，共 {len(history)} 条消息。
+            下一条用户输入将基于该历史继续处理。
+        </div>
         """
 
-        if not dialogue_history:
-            raise ValueError("dialogue_history is empty")
-
-        last_msg = dialogue_history[-1]
-
-        if last_msg.get("role") != "user":
-            raise ValueError("The last message in dialogue_history must be from user.")
-
-        user = str(last_msg.get("content", "")).strip()
-
-        if not user:
-            raise ValueError("Current user message is empty")
-
-        # 每轮开始时重置对外状态。
-        self.last_turn_state = {}
-
-        latency = {
-            "query_ms": 0,
-            "trigger_ms": 0,
-            "rag_ms": 0,
-            "topic_ms": 0,
-            "policy_ms": 0,
-            "response_ms": 0,
-            "total_ms": 0,
-        }
-
-        total_start = time.perf_counter()
-
-        # ----------------------------------------------------
-        # 1. Query
-        # ----------------------------------------------------
-
-        start = time.perf_counter()
-
-        query_state = self.call_llm(
-            self.query_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "dialogue_state": self.memory["dialogue_state"],
-                "current": {"u": user},
-            },
+        return (
+            render_chat(history),
+            render_state({}),
+            render_history([]),
+            render_session_info(session),
+            session,
+            status,
         )
 
-        latency["query_ms"] = round(
-            (time.perf_counter() - start) * 1000
+    except Exception as e:
+        return (
+            render_chat(session["dialogue_history"]),
+            render_state(get_latest_state(session)),
+            render_history(session["turn_records"]),
+            render_session_info(session),
+            session,
+            f"""
+            <div class="prefix-error">
+                加载失败：{str(e)}
+            </div>
+            """,
         )
 
-        self.update_issue(query_state)
+
+# ============================================================
+# UI
+# ============================================================
+
+with gr.Blocks(
+    title="Huawei IT Support Agent",
+    css=CUSTOM_CSS,
+    theme=gr.themes.Soft(
+        primary_hue="blue",
+        neutral_hue="slate",
+        radius_size="lg",
+    ),
+) as demo:
+
+    session_state = gr.State(value=new_session())
+
+    # ========================================================
+    # Header
+    # ========================================================
+
+    gr.HTML(
+        """
+        <div class="hero">
+            <div>
+                <div class="hero-tag">
+                    Huawei IT Support · Agent Console
+                </div>
+
+                <div class="hero-title">
+                    IT 智能客服 Agent
+                </div>
+
+                <div class="hero-desc">
+                    Dynamic Query · Evidence Retrieval ·
+                    Topic Structure · Policy Decision · Response
+                </div>
+            </div>
+
+            <div class="hero-status">
+                <div class="status-dot"></div>
+                Agent Online
+            </div>
+        </div>
+        """
+    )
+
+    # ========================================================
+    # Main
+    # ========================================================
+
+    with gr.Row():
 
         # ----------------------------------------------------
-        # 2. Trigger
+        # Left: Conversation
         # ----------------------------------------------------
 
-        start = time.perf_counter()
+        with gr.Column(scale=7, min_width=620):
 
-        trigger_state = self.call_llm(
-            self.trigger_prompt,
-            {
-                "query": {
-                    "query_mode": query_state.get("query_mode", "none"),
-                    "query_text": query_state.get("query_text", ""),
-                },
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
-        )
-
-        latency["trigger_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
-
-        # ----------------------------------------------------
-        # 3. RAG + Topic
-        # ----------------------------------------------------
-
-        evidence_mode = trigger_state.get("evidence_mode", "")
-
-        if evidence_mode == "retrieve_new_evidence":
-            query = str(query_state.get("query_text", "")).strip()
-
-            if not query:
-                query = self.memory["issue_state"]["current_issue"].strip()
-
-            if not query:
-                raise ValueError("RAG query is empty")
-
-            # ---------------- RAG ----------------
-
-            start = time.perf_counter()
-
-            evidence = batch_zefeng_rag(
-                [history_to_text(dialogue_history)],
-                [query],
-            )[0]
-
-            latency["rag_ms"] = round(
-                (time.perf_counter() - start) * 1000
+            gr.HTML(
+                """
+                <div class="panel-title">
+                    Conversation
+                </div>
+                """
             )
 
-            # ---------------- Topic ----------------
-
-            start = time.perf_counter()
-
-            topic_structure = self.generate_topic_structure(
-                query=query,
-                cases=evidence,
+            chat_display = gr.HTML(
+                value=render_chat([]),
+                elem_classes=["chat-panel"],
             )
 
-            latency["topic_ms"] = round(
-                (time.perf_counter() - start) * 1000
+            with gr.Row():
+
+                user_box = gr.Textbox(
+                    placeholder="请输入 IT 问题...",
+                    show_label=False,
+                    lines=3,
+                    scale=7,
+                )
+
+                send_btn = gr.Button(
+                    "发送",
+                    variant="primary",
+                    scale=1,
+                )
+
+            with gr.Row():
+
+                reset_btn = gr.Button(
+                    "新建会话",
+                    variant="secondary",
+                )
+
+            # ------------------------------------------------
+            # Prefix
+            # ------------------------------------------------
+
+            with gr.Accordion(
+                "加载已有对话",
+                open=False,
+            ):
+
+                prefix_box = gr.Textbox(
+                    placeholder=(
+                        "用户: 我的 VPN 无法登录\n"
+                        "客服: 请问具体有什么提示？\n"
+                        "用户: 显示账号无权限"
+                    ),
+                    lines=7,
+                    show_label=False,
+                )
+
+                load_prefix_btn = gr.Button(
+                    "加载历史",
+                )
+
+                prefix_status = gr.HTML()
+
+        # ----------------------------------------------------
+        # Right: Agent State
+        # ----------------------------------------------------
+
+        with gr.Column(scale=5, min_width=500):
+
+            session_info = gr.HTML(
+                value=render_session_info(
+                    new_session()
+                )
             )
 
-        else:
-            evidence = self.memory["evidence_state"]["active_cases"]
-            topic_structure = self.memory["evidence_state"]["topic_structure"]
+            with gr.Tabs():
 
-        self.update_evidence(trigger_state, evidence, topic_structure)
+                # --------------------------------------------
+                # Current State
+                # --------------------------------------------
 
-        # ----------------------------------------------------
-        # 4. Policy
-        # ----------------------------------------------------
+                with gr.Tab("当前决策"):
 
-        if evidence_mode == "no_evidence_needed":
-            policy_evidence = {
-                "active_cases": [],
-                "topic_structure": {},
-            }
-        else:
-            policy_evidence = {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-                "topic_structure": self.memory["evidence_state"]["topic_structure"],
-            }
+                    state_display = gr.HTML(
+                        value=render_state({}),
+                        elem_classes=["state-panel"],
+                    )
 
-        start = time.perf_counter()
+                # --------------------------------------------
+                # History
+                # --------------------------------------------
 
-        policy_state = self.call_llm(
-            self.policy_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": policy_evidence,
-                "interaction_state": self.memory["interaction_state"],
-                "dialogue_state": self.memory["dialogue_state"],
-                "current": {"u": user},
-            },
-        )
+                with gr.Tab("运行轨迹"):
 
-        latency["policy_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
+                    history_display = gr.HTML(
+                        value=render_history([]),
+                        elem_classes=["history-panel"],
+                    )
 
-        self.update_interaction(policy_state)
+    # ========================================================
+    # Events
+    # ========================================================
 
-        # ----------------------------------------------------
-        # 5. Response
-        # ----------------------------------------------------
+    chat_outputs = [
+        user_box,
+        chat_display,
+        state_display,
+        history_display,
+        session_info,
+        session_state,
+    ]
 
-        selected_evidence = get_selected_evidence(
-            policy_state,
-            self.memory["evidence_state"]["active_cases"],
-        )
+    send_btn.click(
+        fn=chat,
+        inputs=[
+            user_box,
+            session_state,
+        ],
+        outputs=chat_outputs,
+    )
 
-        response_dialogue = {
-            "recent_history": self.memory["dialogue_state"]["recent_history"],
-            "current": {"u": user},
-        }
+    user_box.submit(
+        fn=chat,
+        inputs=[
+            user_box,
+            session_state,
+        ],
+        outputs=chat_outputs,
+    )
 
-        response_policy = {
-            "label": policy_state.get("label", ""),
-            "information": policy_state.get("information"),
-        }
+    reset_btn.click(
+        fn=reset_chat,
+        inputs=[],
+        outputs=chat_outputs,
+    )
 
-        start = time.perf_counter()
+    load_prefix_btn.click(
+        fn=load_prefix,
+        inputs=[
+            prefix_box,
+            session_state,
+        ],
+        outputs=[
+            chat_display,
+            state_display,
+            history_display,
+            session_info,
+            session_state,
+            prefix_status,
+        ],
+    )
 
-        response_state = self.call_llm(
-            self.response_prompt,
-            {
-                "dialogue_state": response_dialogue,
-                "policy": response_policy,
-                "evidence": selected_evidence,
-            },
-        )
 
-        latency["response_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
+# ============================================================
+# Launch
+# ============================================================
 
-        response = (
-            response_state.get("response")
-            or response_state.get("text")
-            or response_state.get("content")
-            or ""
-        )
-
-        response = str(response).strip()
-
-        self.update_dialogue(user, response)
-
-        # ----------------------------------------------------
-        # 6. Latency + External Turn State
-        # ----------------------------------------------------
-
-        latency["total_ms"] = round(
-            (time.perf_counter() - total_start) * 1000
-        )
-
-        self.last_turn_state = {
-            "query": query_state,
-            "trigger": trigger_state,
-            "evidence": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-                "topic_structure": self.memory["evidence_state"]["topic_structure"],
-            },
-            "policy": policy_state,
-            "response": response,
-            "latency": latency,
-        }
-
-        # ----------------------------------------------------
-        # Display
-        # ----------------------------------------------------
-
-        self.print_state(
-            query_state=query_state,
-            trigger_state=trigger_state,
-            policy_state=policy_state,
-        )
-
-        return response
-
-    def reset(self):
-        self.memory = init_memory()
-        self.last_turn_state = {}
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+    )
