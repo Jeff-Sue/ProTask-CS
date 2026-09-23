@@ -1,153 +1,20 @@
-def render_latency(latency):
-    latency = latency or {}
+def call_llm(self, prompt, data):
+    messages = build_messages(prompt, data)
 
-    print("latency:", latency)
+    if self.mode == "single":
+        output = single_inference(messages)
+    else:
+        output = parallel_inference([messages])[0]
 
-    def ms_to_seconds(value):
-        try:
-            return float(value or 0) / 1000.0
-        except (TypeError, ValueError):
-            return 0.0
+    print("\n========== RAW LLM OUTPUT ==========")
+    print("type:", type(output))
+    print("output:", repr(output))
 
-    query = ms_to_seconds(
-        latency.get("query_ms", 0)
-    )
+    parsed = parse_llm_output(output)
 
-    trigger = ms_to_seconds(
-        latency.get("trigger_ms", 0)
-    )
+    print("---------- PARSED OUTPUT -----------")
+    print("type:", type(parsed))
+    print("parsed:", parsed)
+    print("====================================\n")
 
-    rag = ms_to_seconds(
-        latency.get("rag_ms", 0)
-    )
-
-    topic = ms_to_seconds(
-        latency.get("topic_ms", 0)
-    )
-
-    policy = ms_to_seconds(
-        latency.get("policy_ms", 0)
-    )
-
-    response = ms_to_seconds(
-        latency.get("response_ms", 0)
-    )
-
-    total = ms_to_seconds(
-        latency.get("total_ms", 0)
-    )
-
-    return f"""
-    <div class="latency-total">
-        {total:.2f}
-        <span>s</span>
-    </div>
-
-    <div class="latency-grid">
-        <div>
-            <span>Query</span>
-            <b>{query:.2f}s</b>
-        </div>
-
-        <div>
-            <span>Trigger</span>
-            <b>{trigger:.2f}s</b>
-        </div>
-
-        <div>
-            <span>RAG</span>
-            <b>{rag:.2f}s</b>
-        </div>
-
-        <div>
-            <span>Topic</span>
-            <b>{topic:.2f}s</b>
-        </div>
-
-        <div>
-            <span>Policy</span>
-            <b>{policy:.2f}s</b>
-        </div>
-
-        <div>
-            <span>Response</span>
-            <b>{response:.2f}s</b>
-        </div>
-    </div>
-    """
-
-
-
-
-def get_last_run(agent):
-    """
-    将 MemoryAgent.last_turn_state 转换成 UI 使用的统一格式。
-    """
-
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
-
-    if turn_state:
-        return {
-            "query_state": (
-                turn_state.get("query", {})
-                or {}
-            ),
-
-            "trigger_state": (
-                turn_state.get("trigger", {})
-                or {}
-            ),
-
-            "policy_state": (
-                turn_state.get("policy", {})
-                or {}
-            ),
-
-            "evidence_state": (
-                turn_state.get("evidence", {})
-                or {}
-            ),
-
-            "response": (
-                turn_state.get("response", "")
-            ),
-
-            "latency": (
-                turn_state.get("latency", {})
-                or {}
-            ),
-        }
-
-    # fallback
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    )
-
-    return {
-        "query_state": {},
-
-        "trigger_state": {},
-
-        "policy_state": (
-            memory
-            .get("interaction_state", {})
-            .get("last_policy", {})
-            or {}
-        ),
-
-        "evidence_state": (
-            memory
-            .get("evidence_state", {})
-            or {}
-        ),
-
-        "response": "",
-
-        "latency": {},
-    }
+    return parsed
