@@ -1,465 +1,12 @@
-from __future__ import annotations
-
-import sys
-import uuid
-from datetime import datetime
-from pathlib import Path
-
-import gradio as gr
-
-
-# ============================================================
-# Project Path
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-
-from Agent.agentv2_3 import MemoryAgent
-
-from project.logger import save_session
-
-from project.styles import CSS
-
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-    render_feedback_hint,
-    render_feedback_result,
-)
-
-
-# ============================================================
-# Feedback
-# ============================================================
-
-FEEDBACK_REASONS = {
-    "没理解我的问题":
-        "misunderstanding",
-
-    "重复或多余询问":
-        "repeated_or_unnecessary_question",
-
-    "推荐结果不对":
-        "wrong_result",
-
-    "回复内容有问题":
-        "response_problem",
-
-    "其他":
-        "other",
-}
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def now_iso():
-    return datetime.now().astimezone().isoformat(
-        timespec="seconds"
-    )
-
-
-# ============================================================
-# Session
-# ============================================================
-
-def new_session():
-
-    return {
-        "session_id":
-            "web_" + uuid.uuid4().hex[:10],
-
-        "created_at":
-            now_iso(),
-
-        "agent": MemoryAgent(
-            mode="single",
-            show_state=False,
-        ),
-
-        "history": [],
-
-        # 系统真实运行产生的 turn
-        "trace": [],
-
-        # 用户加载的已有历史
-        "prefix_history": [],
-
-        "turns": 0,
-
-        "mode": "user",
-
-        # {
-        #     turn_id: {
-        #         rating,
-        #         reason,
-        #         comment,
-        #         created_at
-        #     }
-        # }
-        "feedback": {},
-    }
-
-
-# ============================================================
-# Agent Snapshot
-# ============================================================
-
-def get_last_run(agent):
-
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
-
-    if turn_state:
-
-        return {
-            "query_state":
-                turn_state.get(
-                    "query",
-                    {},
-                ) or {},
-
-            "trigger_state":
-                turn_state.get(
-                    "trigger",
-                    {},
-                ) or {},
-
-            "evidence_state":
-                turn_state.get(
-                    "evidence",
-                    {},
-                ) or {},
-
-            "policy_state":
-                turn_state.get(
-                    "policy",
-                    {},
-                ) or {},
-
-            "response":
-                turn_state.get(
-                    "response",
-                    "",
-                ),
-
-            "latency":
-                turn_state.get(
-                    "latency",
-                    {},
-                ) or {},
-        }
-
-    # fallback
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    ) or {}
-
-    return {
-        "query_state": {},
-
-        "trigger_state": {},
-
-        "evidence_state":
-            memory.get(
-                "evidence_state",
-                {},
-            ) or {},
-
-        "policy_state":
-            (
-                memory
-                .get(
-                    "interaction_state",
-                    {},
-                )
-                .get(
-                    "last_policy",
-                    {},
-                )
-                or {}
-            ),
-
-        "response": "",
-
-        "latency": {},
-    }
-
-
-# ============================================================
-# History Parser
-# ============================================================
-
-def parse_prefix(text):
-
-    history = []
-
-    if not text:
-        return history
-
-    for raw_line in text.splitlines():
-
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("用户:"):
-
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("用户："):
-
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("客服:"):
-
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-        elif line.startswith("客服："):
-
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-    return history
-
-
-# ============================================================
-# Render Helpers
-# ============================================================
-
-def session_html(state):
-
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
-
-
-def developer_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
-
-
-def user_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
-
-
-def current_decision_html(state):
-
-    if not state["trace"]:
-        return render_decision(
-            None
-        )
-
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
 def trace_html(state):
 
     return render_trace(
-        state["trace"]
+        state["trace"],
+        state.get("feedback", {}),
     )
 
 
-def feedback_hint_html(state):
 
-    if not state:
-        return render_feedback_hint(
-            None
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-        return render_feedback_hint(
-            None
-        )
-
-    return render_feedback_hint(
-        turn
-    )
-
-
-# ============================================================
-# Chat
-# ============================================================
-
-def chat(
-    user_input,
-    state,
-):
-
-    if state is None:
-        state = new_session()
-
-    user_input = str(
-        user_input or ""
-    ).strip()
-
-    if not user_input:
-
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            feedback_hint_html(state),
-            "",
-            gr.update(visible=False),
-        )
-
-    history = list(
-        state["history"]
-    )
-
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
-
-    try:
-
-        response = state[
-            "agent"
-        ].reply(
-            history
-        )
-
-    except Exception as exc:
-
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    response = str(
-        response or ""
-    ).strip()
-
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
-
-    state["history"] = history
-
-    state["turns"] += 1
-
-    snapshot = get_last_run(
-        state["agent"]
-    )
-
-    snapshot = dict(
-        snapshot
-    )
-
-    snapshot["turn"] = (
-        state["turns"]
-    )
-
-    snapshot["user"] = (
-        user_input
-    )
-
-    snapshot["response"] = (
-        response
-    )
-
-    snapshot["created_at"] = (
-        now_iso()
-    )
-
-    state["trace"].append(
-        snapshot
-    )
-
-    # --------------------------------------------------------
-    # 每轮立即保存
-    # --------------------------------------------------------
-
-    save_session(
-        state
-    )
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        feedback_hint_html(state),
-        "",
-        gr.update(visible=False),
-    )
-
-
-# ============================================================
-# Feedback
-# ============================================================
 
 def submit_positive(
     state,
@@ -469,12 +16,19 @@ def submit_positive(
 
         return (
             state,
+
             render_feedback_result(
                 False,
                 "当前没有可反馈的回复。",
             ),
+
             gr.update(
                 visible=False
+            ),
+
+            render_trace(
+                [],
+                {},
             ),
         )
 
@@ -487,13 +41,17 @@ def submit_positive(
 
         return (
             state,
+
             render_feedback_result(
                 False,
                 "当前没有可反馈的回复。",
             ),
+
             gr.update(
                 visible=False
             ),
+
+            trace_html(state),
         )
 
     state.setdefault(
@@ -504,10 +62,12 @@ def submit_positive(
     state["feedback"][turn] = {
         "rating": "positive",
         "reason": None,
+        "reason_text": None,
         "comment": "",
         "created_at": now_iso(),
     }
 
+    # 保存到后台日志
     save_session(
         state
     )
@@ -523,36 +83,16 @@ def submit_positive(
         gr.update(
             visible=False
         ),
+
+        # 立即刷新开发者运行轨迹
+        trace_html(state),
     )
 
 
-def show_negative_feedback(
-    state,
-):
 
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
 
-        return (
-            gr.update(
-                visible=False
-            ),
 
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-        )
 
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        "",
-    )
 
 
 def submit_negative(
@@ -578,6 +118,11 @@ def submit_negative(
             reason_text,
 
             comment,
+
+            render_trace(
+                [],
+                {},
+            ),
         )
 
     turn = state.get(
@@ -602,6 +147,8 @@ def submit_negative(
             reason_text,
 
             comment,
+
+            trace_html(state),
         )
 
     reason_text = str(
@@ -625,6 +172,8 @@ def submit_negative(
             reason_text,
 
             comment,
+
+            trace_html(state),
         )
 
     reason_code = FEEDBACK_REASONS.get(
@@ -649,6 +198,7 @@ def submit_negative(
         "created_at": now_iso(),
     }
 
+    # 保存到后台日志
     save_session(
         state
     )
@@ -668,760 +218,421 @@ def submit_negative(
         None,
 
         "",
-    )
 
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
+        # 立即刷新开发者运行轨迹
         trace_html(state),
-        session_html(state),
-        state,
-        "",
-        feedback_hint_html(state),
-        gr.update(
-            visible=False
-        ),
-        None,
-        "",
     )
 
 
+
+
+
+
+
+
+
+positive_button.click(
+    fn=submit_positive,
+    inputs=[
+        session_state
+    ],
+    outputs=[
+        session_state,
+        feedback_result,
+        negative_feedback_panel,
+        trace_panel,
+    ],
+)
+
+
+negative_button.click(
+    fn=show_negative_feedback,
+    inputs=[
+        session_state
+    ],
+    outputs=[
+        negative_feedback_panel,
+        feedback_result,
+    ],
+)
+
+
+feedback_submit.click(
+    fn=submit_negative,
+    inputs=[
+        feedback_reason,
+        feedback_comment,
+        session_state,
+    ],
+    outputs=[
+        session_state,
+        feedback_result,
+        negative_feedback_panel,
+        feedback_reason,
+        feedback_comment,
+        trace_panel,
+    ],
+)
+
+
+
+
+
+
+
+
+
 # ============================================================
-# Load Prefix
+# Trace
 # ============================================================
 
-def load_prefix(
-    prefix_text,
-    state,
+def render_trace(
+    trace,
+    feedback_map=None,
 ):
 
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
+    feedback_map = (
+        feedback_map
+        or {}
     )
 
-    if not history:
+    if not trace:
 
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
+        return """
+        <div class="trace-surface">
 
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
-        )
+            <div class="decision-empty">
 
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
-
-    state["history"] = history
-
-    # 这里不把加载历史伪装成真实 Agent trace
-    state["trace"] = []
-
-    state["prefix_history"] = list(
-        history
-    )
-
-    # 真实运行 turn 从 0 开始重新记录
-    state["turns"] = 0
-
-    state["feedback"] = {}
-
-    save_session(
-        state
-    )
-
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-    )
-
-
-# ============================================================
-# View Switching
-# ============================================================
-
-def show_user_view():
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-    )
-
-
-def show_developer_view():
-
-    return (
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-    )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-initial_state = new_session()
-
-
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
-
-    session_state = gr.State(
-        initial_state
-    )
-
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        render_header(),
-        container=False,
-    )
-
-    # ========================================================
-    # Mode Switch
-    # ========================================================
-
-    with gr.Row(
-        elem_classes=[
-            "mode-switch"
-        ]
-    ):
-
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-active"
-            ],
-        )
-
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-inactive"
-            ],
-        )
-
-    # ========================================================
-    # USER VIEW
-    # ========================================================
-
-    with gr.Column(
-        visible=True,
-        elem_classes=[
-            "user-workspace"
-        ],
-    ) as user_view:
-
-        gr.HTML(
-            """
-            <div class="workspace-heading">
-
-                <div class="column-title">
-                    IT 智能客服
+                <div class="decision-empty-title">
+                    暂无运行轨迹
                 </div>
 
-                <div class="column-subtitle">
-                    Huawei IT Support
+                <div class="decision-empty-desc">
+                    每完成一轮交互，执行轨迹会显示在这里。
                 </div>
 
             </div>
-            """,
-            container=False,
+
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
+    ):
+
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
         )
 
-        user_chat = gr.HTML(
-            user_chat_html(
-                initial_state
-            ),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-html",
-            ],
+        user = escape(
+            item.get(
+                "user",
+                "",
+            )
         )
+
+        query = (
+            item.get("query_state")
+            or {}
+        )
+
+        trigger = (
+            item.get("trigger_state")
+            or {}
+        )
+
+        policy = (
+            item.get("policy_state")
+            or {}
+        )
+
+        latency = (
+            item.get("latency")
+            or {}
+        )
+
+        try:
+            total = (
+                float(
+                    latency.get(
+                        "total_ms",
+                        0,
+                    )
+                )
+                / 1000.0
+            )
+
+        except Exception:
+            total = 0.0
 
         # ====================================================
         # Feedback
         # ====================================================
 
-        with gr.Column(
-            elem_classes=[
-                "feedback-area"
-            ],
-        ):
+        feedback = (
+            feedback_map.get(turn)
+            or feedback_map.get(str(turn))
+        )
 
-            feedback_hint = gr.HTML(
-                feedback_hint_html(
-                    initial_state
-                ),
-                container=False,
-            )
+        if not feedback:
 
-            with gr.Row(
-                elem_classes=[
-                    "feedback-buttons"
-                ]
-            ):
+            feedback_html = """
+            <div class="trace-feedback trace-feedback-empty">
+                <span class="trace-feedback-label">
+                    Feedback
+                </span>
 
-                positive_button = gr.Button(
-                    "👍 满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
+                <span>
+                    —
+                </span>
+            </div>
+            """
 
-                negative_button = gr.Button(
-                    "👎 不满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
+        elif feedback.get(
+            "rating"
+        ) == "positive":
 
-            feedback_result = gr.HTML(
-                "",
-                container=False,
-            )
+            feedback_html = """
+            <div class="trace-feedback trace-feedback-positive">
 
-            with gr.Column(
-                visible=False,
-                elem_classes=[
-                    "feedback-detail"
-                ],
-            ) as negative_feedback_panel:
+                <span class="trace-feedback-label">
+                    Feedback
+                </span>
 
-                feedback_reason = gr.Radio(
-                    choices=list(
-                        FEEDBACK_REASONS.keys()
-                    ),
-                    label="请选择不满意的原因",
-                    elem_classes=[
-                        "feedback-reason"
-                    ],
-                )
+                <span>
+                    👍 满意
+                </span>
 
-                feedback_comment = gr.Textbox(
-                    label="补充说明（可选）",
-                    placeholder=(
-                        "如果方便，可以简单说明具体问题..."
-                    ),
-                    lines=2,
-                    max_lines=3,
-                    elem_classes=[
-                        "feedback-comment"
-                    ],
-                )
+            </div>
+            """
 
-                feedback_submit = gr.Button(
-                    "提交反馈",
-                    variant="primary",
-                    size="sm",
-                    elem_classes=[
-                        "feedback-submit"
-                    ],
-                )
+        else:
 
-        # ====================================================
-        # Input
-        # ====================================================
-
-        with gr.Row(
-            elem_classes=[
-                "chat-input-row"
-            ]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder=(
-                    "请输入您的 IT 问题..."
-                ),
-                show_label=False,
-                lines=2,
-                max_lines=4,
-                elem_classes=[
-                    "chat-input"
-                ],
-                scale=12,
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=[
-                    "send-button"
-                ],
-                scale=1,
-                min_width=110,
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=[
-            "developer-workspace"
-        ],
-        equal_height=True,
-    ) as developer_view:
-
-        # ====================================================
-        # LEFT
-        # ====================================================
-
-        with gr.Column(
-            scale=52,
-            min_width=0,
-            elem_classes=[
-                "chat-column"
-            ],
-        ):
-
-            with gr.Row(
-                elem_classes=[
-                    "panel-heading-row"
-                ]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-
-                        <div class="column-title">
-                            Conversation
-                        </div>
-
-                        <div class="column-subtitle">
-                            Current dialogue
-                        </div>
-
-                    </div>
-                    """,
-                    container=False,
-                )
-
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                    elem_classes=[
-                        "session-html"
-                    ],
-                )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-toolbar"
-                ]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                    elem_classes=[
-                        "new-chat-button"
-                    ],
-                )
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html",
-                    "developer-chat-html",
-                ],
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-input-row"
-                ]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder=(
-                        "请输入 IT 问题..."
-                    ),
-                    show_label=False,
-                    lines=2,
-                    max_lines=4,
-                    elem_classes=[
-                        "chat-input"
-                    ],
-                    scale=12,
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=[
-                        "send-button"
-                    ],
-                    scale=1,
-                    min_width=105,
-                )
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=[
-                    "history-loader"
-                ],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
+            reason = escape(
+                feedback.get(
+                    "reason_text",
                     "",
-                    container=False,
-                    elem_classes=[
-                        "prefix-area"
-                    ],
                 )
+                or "不满意"
+            )
 
-        # ====================================================
-        # RIGHT
-        # ====================================================
+            comment = escape(
+                feedback.get(
+                    "comment",
+                    "",
+                )
+            )
 
-        with gr.Column(
-            scale=48,
-            min_width=0,
-            elem_classes=[
-                "decision-column"
-            ],
-        ):
+            comment_html = ""
 
-            gr.HTML(
+            if comment:
+
+                comment_html = f"""
+                <div class="trace-feedback-comment">
+                    {comment}
+                </div>
                 """
-                <div class="workspace-heading">
 
-                    <div class="column-title">
-                        Agent Decision
-                    </div>
+            feedback_html = f"""
+            <div class="trace-feedback trace-feedback-negative">
 
-                    <div class="column-subtitle">
-                        Internal execution state
-                    </div>
+                <div class="trace-feedback-main">
+
+                    <span class="trace-feedback-label">
+                        Feedback
+                    </span>
+
+                    <span>
+                        👎 不满意 · {reason}
+                    </span>
 
                 </div>
-                """,
-                container=False,
-            )
 
-            with gr.Tabs(
-                elem_classes=[
-                    "decision-tabs"
-                ]
-            ):
+                {comment_html}
 
-                with gr.Tab(
-                    "当前决策"
-                ):
+            </div>
+            """
 
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
+        # ====================================================
+        # Turn
+        # ====================================================
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+
+                    <b>
+                        Turn {turn}
+                    </b>
+
+                    <span>
+                        {total:.2f}s
+                    </span>
+
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+
+                    {badge(
+                        query.get(
+                            "query_mode",
+                            "none",
                         ),
-                        container=False,
-                        elem_classes=[
-                            "decision-html"
-                        ],
-                    )
+                        "blue"
+                    )}
 
-                with gr.Tab(
-                    "运行轨迹"
-                ):
+                    <span class="flow-arrow">
+                        →
+                    </span>
 
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            "",
                         ),
-                        container=False,
-                        elem_classes=[
-                            "trace-html"
-                        ],
-                    )
+                        "gray"
+                    )}
 
-    # ========================================================
-    # Events
-    # ========================================================
+                    <span class="flow-arrow">
+                        →
+                    </span>
 
-    chat_outputs = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
+                    {badge(
+                        policy.get(
+                            "label",
+                            "",
+                        ),
+                        "green"
+                    )}
 
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-        api_name="chat",
-    )
+                </div>
 
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
+                {feedback_html}
 
-    # --------------------------------------------------------
-    # Developer Chat
-    # --------------------------------------------------------
+            </div>
+            """
+        )
 
-    developer_chat_outputs = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    # --------------------------------------------------------
-    # Feedback
-    # --------------------------------------------------------
-
-    positive_button.click(
-        fn=submit_positive,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-        ],
-    )
-
-    negative_button.click(
-        fn=show_negative_feedback,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            negative_feedback_panel,
-            feedback_result,
-        ],
-    )
-
-    feedback_submit.click(
-        fn=submit_negative,
-        inputs=[
-            feedback_reason,
-            feedback_comment,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Mode
-    # --------------------------------------------------------
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Reset
-    # --------------------------------------------------------
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-            feedback_hint,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Prefix
-    # --------------------------------------------------------
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
+    """
 
 
-# ============================================================
-# Launch
-# ============================================================
 
-if __name__ == "__main__":
 
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
-    )
+
+
+
+
+
+/* =========================================================
+   DEVELOPER TRACE FEEDBACK
+========================================================= */
+
+.trace-feedback {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 11px;
+
+    padding-top: 9px;
+
+    border-top: 1px solid var(--soft-line);
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 9px;
+
+    color: var(--muted);
+
+    font-size: 14px;
+
+    line-height: 1.5;
+}
+
+
+.trace-feedback-main {
+    width: 100%;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 9px;
+}
+
+
+.trace-feedback-label {
+    flex: 0 0 auto;
+
+    color: var(--muted);
+
+    font-size: 13px;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-positive {
+    color: #15803d;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-negative {
+    display: block;
+
+    color: #b42318;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-empty {
+    color: var(--muted);
+
+    font-weight: 400;
+}
+
+
+.trace-feedback-comment {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 7px;
+
+    padding: 8px 10px;
+
+    color: var(--text2);
+
+    background: #f8fafc;
+
+    border-radius: 7px;
+
+    font-size: 13px;
+
+    line-height: 1.55;
+
+    font-weight: 400;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: anywhere;
+}
