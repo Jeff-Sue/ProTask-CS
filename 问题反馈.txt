@@ -1,971 +1,183 @@
-import html
-import json
+/* =========================================================
+   USER FEEDBACK
+========================================================= */
 
+.feedback-area {
+    width: 100% !important;
 
-# ============================================================
-# Utils
-# ============================================================
+    box-sizing: border-box;
 
-def escape(value):
-    if value is None:
-        return ""
+    margin-top: 8px !important;
 
-    return html.escape(
-        str(value)
-    )
+    padding: 10px 12px !important;
 
+    background: #f8fafc;
 
-def json_text(value):
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            indent=2,
-        )
+    border: 1px solid var(--soft-line);
 
-    except Exception:
-        return str(value)
+    border-radius: 10px;
+}
 
 
-def badge(text, kind="gray"):
+.feedback-hint {
+    width: 100%;
 
-    if text is None:
-        text = ""
+    display: flex;
 
-    return (
-        f'<span class="badge badge-{kind}">'
-        f'{escape(text)}'
-        f'</span>'
-    )
+    align-items: center;
+    justify-content: space-between;
 
+    gap: 12px;
 
-# ============================================================
-# Header
-# ============================================================
+    box-sizing: border-box;
 
-def render_header():
+    color: var(--text2);
 
-    return """
-    <div class="app-header">
+    font-size: 15px;
 
-        <div class="header-left">
+    line-height: 1.5;
 
-            <div class="header-eyebrow">
-                Huawei IT Support · Agent Console
-            </div>
+    font-weight: 600;
+}
 
-            <div class="header-title">
-                IT 智能客服 Agent
-            </div>
 
-            <div class="header-desc">
-                Query · Evidence Retrieval · Topic Structure ·
-                Policy Decision · Response
-            </div>
+.feedback-hint-empty {
+    color: var(--muted);
 
-        </div>
+    font-weight: 500;
+}
 
-        <div class="online-status">
-            <span class="online-dot"></span>
-            Agent Online
-        </div>
 
-    </div>
-    """
+.feedback-turn {
+    flex: 0 0 auto;
 
+    color: var(--muted);
 
-# ============================================================
-# Session
-# ============================================================
+    font-size: 13px;
 
-def render_session(session_id, turns):
+    font-weight: 600;
+}
 
-    return f"""
-    <div class="session-inline">
 
-        <span class="session-status">
-            <span class="running-dot"></span>
-            Running
-        </span>
+.feedback-buttons {
+    width: 100% !important;
 
-        <span class="session-divider"></span>
+    gap: 8px !important;
 
-        <span>
-            Session
-            <b>{escape(session_id)}</b>
-        </span>
+    margin-top: 7px !important;
+}
 
-        <span class="session-divider"></span>
 
-        <span>
-            Turn
-            <b>{turns}</b>
-        </span>
+.feedback-button {
+    flex: 0 0 auto !important;
+}
 
-    </div>
-    """
 
+.feedback-button button {
+    min-height: 36px !important;
 
-# ============================================================
-# Chat
-# ============================================================
+    padding: 6px 14px !important;
 
-def render_empty_chat(user_mode=False):
+    border-radius: 9px !important;
 
-    if user_mode:
+    font-size: 14px !important;
 
-        title = "您好，有什么可以帮您？"
+    font-weight: 650 !important;
 
-        desc = (
-            "请描述您遇到的 IT 问题，"
-            "我会尽力协助您解决。"
-        )
+    background: white !important;
 
-    else:
+    border: 1px solid var(--line) !important;
 
-        title = "开始新的 IT 支持会话"
+    color: var(--text2) !important;
+}
 
-        desc = (
-            "输入用户问题后，Agent 将执行 Query、Retrieval、"
-            "Topic Analysis、Policy 和 Response。"
-        )
 
-    return f"""
-    <div class="chat-surface">
+.feedback-button button:hover {
+    border-color: #93c5fd !important;
 
-        <div class="empty-chat">
+    background: var(--blue-soft) !important;
+}
 
-            <div class="empty-symbol">
-                ✦
-            </div>
 
-            <div class="empty-title">
-                {title}
-            </div>
+.feedback-detail {
+    width: 100% !important;
 
-            <div class="empty-desc">
-                {desc}
-            </div>
+    box-sizing: border-box;
 
-        </div>
+    margin-top: 9px !important;
 
-    </div>
-    """
+    padding-top: 9px !important;
 
+    border-top: 1px solid var(--soft-line);
+}
 
-def render_chat(history, user_mode=False):
 
-    if not history:
-        return render_empty_chat(
-            user_mode=user_mode
-        )
+.feedback-reason label {
+    font-size: 14px !important;
 
-    rows = []
+    line-height: 1.5 !important;
+}
 
-    for message in history:
 
-        role = message.get(
-            "role"
-        )
+.feedback-comment textarea {
+    min-height: 62px !important;
 
-        content = escape(
-            message.get(
-                "content",
-                "",
-            )
-        )
+    max-height: 100px !important;
 
-        if role == "user":
+    padding: 10px 12px !important;
 
-            rows.append(
-                f"""
-                <div class="message-row user-row">
+    font-size: 14px !important;
 
-                    <div class="message-wrap user-wrap">
+    line-height: 1.5 !important;
 
-                        <div class="message-role user-role">
-                            用户
-                        </div>
+    border-radius: 9px !important;
+}
 
-                        <div class="message-bubble user-message">
-                            {content}
-                        </div>
 
-                    </div>
+.feedback-submit button {
+    min-height: 38px !important;
 
-                    <div class="avatar user-avatar">
-                        U
-                    </div>
+    padding: 6px 15px !important;
 
-                </div>
-                """
-            )
+    border-radius: 9px !important;
 
-        elif role == "assistant":
+    font-size: 14px !important;
 
-            rows.append(
-                f"""
-                <div class="message-row agent-row">
+    font-weight: 700 !important;
+}
 
-                    <div class="avatar agent-avatar">
-                        AI
-                    </div>
 
-                    <div class="message-wrap agent-wrap">
+.feedback-success,
+.feedback-error {
+    width: 100%;
 
-                        <div class="message-role">
-                            智能客服
-                        </div>
+    box-sizing: border-box;
 
-                        <div class="message-bubble agent-message">
-                            {content}
-                        </div>
+    margin-top: 7px;
 
-                    </div>
+    padding: 8px 10px;
 
-                </div>
-                """
-            )
+    border-radius: 8px;
 
-    return f"""
-    <div class="chat-surface">
+    font-size: 14px;
 
-        <div class="chat-scroll">
-            {''.join(rows)}
-        </div>
+    line-height: 1.5;
+}
 
-    </div>
-    """
 
+.feedback-success {
+    color: #027a48;
 
-# ============================================================
-# Feedback
-# ============================================================
+    background: #effdf3;
 
-def render_feedback_hint(turn=None):
+    border: 1px solid #abefc6;
+}
 
-    if not turn:
-        return """
-        <div class="feedback-hint feedback-hint-empty">
-            完成一次对话后，可对客服回复进行反馈。
-        </div>
-        """
 
-    return f"""
-    <div class="feedback-hint">
-        <span>对本次回复是否满意？</span>
-        <span class="feedback-turn">
-            Turn {escape(turn)}
-        </span>
-    </div>
-    """
+.feedback-error {
+    color: #be123c;
 
+    background: #fff1f3;
 
-def render_feedback_result(
-    success,
-    message,
-):
-
-    cls = (
-        "feedback-success"
-        if success
-        else "feedback-error"
-    )
-
-    return f"""
-    <div class="{cls}">
-        {escape(message)}
-    </div>
-    """
-
-
-# ============================================================
-# Topic Tree
-# ============================================================
-
-def render_topic_tree(tree):
-
-    if not tree:
-
-        return """
-        <div class="empty-small">
-            暂无 Topic Structure
-        </div>
-        """
-
-    def walk(node, depth=0):
-
-        topic = escape(
-            node.get(
-                "topic",
-                "",
-            )
-        )
-
-        dimension = escape(
-            node.get(
-                "dimension",
-                "",
-            )
-        )
-
-        case_ids = (
-            node.get("case_ids")
-            or []
-        )
-
-        if isinstance(
-            case_ids,
-            str,
-        ):
-            case_ids = [case_ids]
-
-        case_text = ", ".join(
-            escape(x)
-            for x in case_ids
-        )
-
-        leaf = bool(
-            node.get("leaf")
-        )
-
-        node_class = (
-            "tree-node tree-leaf"
-            if leaf
-            else "tree-node"
-        )
-
-        margin = depth * 20
-
-        dimension_html = ""
-
-        if dimension:
-            dimension_html = (
-                f'<span class="tree-dimension">'
-                f'{dimension}'
-                f'</span>'
-            )
-
-        case_html = ""
-
-        if case_text:
-            case_html = (
-                f'<span class="tree-case">'
-                f'{case_text}'
-                f'</span>'
-            )
-
-        current = f"""
-        <div
-            class="{node_class}"
-            style="margin-left:{margin}px"
-        >
-
-            <span class="tree-dot"></span>
-
-            <span class="tree-topic">
-                {topic}
-            </span>
-
-            {dimension_html}
-
-            {case_html}
-
-        </div>
-        """
-
-        children = (
-            node.get("children")
-            or []
-        )
-
-        return current + "".join(
-            walk(
-                child,
-                depth + 1,
-            )
-            for child in children
-        )
-
-    return f"""
-    <div class="topic-tree">
-        {walk(tree)}
-    </div>
-    """
-
-
-# ============================================================
-# Evidence
-# ============================================================
-
-def render_cases(cases):
-
-    if not cases:
-        return """
-        <div class="empty-small">
-            当前没有 Active Cases
-        </div>
-        """
-
-    items = []
-
-    for index, case in enumerate(cases):
-        if not isinstance(case, dict):
-            continue
-
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
-            or f"Case {index + 1}"
-        )
-
-        title = (
-            case.get("title")
-            or case.get("name")
-            or case.get("question")
-            or case.get("text")
-            or case.get("content")
-            or case.get("problem")
-            or ""
-        )
-
-        title = str(title).strip()
-
-        preview = title
-
-        if len(preview) > 100:
-            preview = preview[:100] + "..."
-
-        detail_rows = []
-
-        for key, value in case.items():
-
-            if value is None:
-                continue
-
-            if isinstance(
-                value,
-                (dict, list),
-            ):
-                value_text = json_text(
-                    value
-                )
-            else:
-                value_text = str(value)
-
-            if not value_text.strip():
-                continue
-
-            detail_rows.append(
-                f"""
-                <div class="case-detail-row">
-
-                    <div class="case-detail-key">
-                        {escape(key)}
-                    </div>
-
-                    <div class="case-detail-value">
-                        {escape(value_text)}
-                    </div>
-
-                </div>
-                """
-            )
-
-        details_html = "".join(
-            detail_rows
-        )
-
-        items.append(
-            f"""
-            <details class="case-card">
-
-                <summary class="case-card-summary">
-
-                    <div class="case-card-main">
-
-                        <div class="case-card-id">
-                            {escape(case_id)}
-                        </div>
-
-                        <div class="case-card-preview">
-                            {
-                                escape(preview)
-                                if preview
-                                else "点击查看案例详情"
-                            }
-                        </div>
-
-                    </div>
-
-                    <div class="case-card-action">
-
-                        <span class="case-expand-text">
-                            查看详情
-                        </span>
-
-                        <span class="case-chevron">
-                            ›
-                        </span>
-
-                    </div>
-
-                </summary>
-
-                <div class="case-detail">
-
-                    <div class="case-detail-header">
-                        Case Detail
-                    </div>
-
-                    {details_html}
-
-                </div>
-
-            </details>
-            """
-        )
-
-    if not items:
-        return """
-        <div class="empty-small">
-            当前没有可显示的 Active Cases
-        </div>
-        """
-
-    return "".join(items)
-
-
-# ============================================================
-# Latency
-# ============================================================
-
-def render_latency(latency):
-
-    latency = latency or {}
-
-    def ms_value(name):
-
-        value = latency.get(
-            name,
-            0,
-        )
-
-        try:
-            return float(value)
-
-        except Exception:
-            return 0.0
-
-    query_ms = ms_value("query_ms")
-    trigger_ms = ms_value("trigger_ms")
-    rag_ms = ms_value("rag_ms")
-    topic_ms = ms_value("topic_ms")
-    policy_ms = ms_value("policy_ms")
-    response_ms = ms_value("response_ms")
-    total_ms = ms_value("total_ms")
-
-    def seconds(ms):
-        return ms / 1000.0
-
-    return f"""
-    <div class="latency-total">
-        {seconds(total_ms):.2f}
-        <span>s</span>
-    </div>
-
-    <div class="latency-grid">
-
-        <div>
-            <span>Query</span>
-            <b>{seconds(query_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Trigger</span>
-            <b>{seconds(trigger_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>RAG</span>
-            <b>{seconds(rag_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Topic</span>
-            <b>{seconds(topic_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Policy</span>
-            <b>{seconds(policy_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Response</span>
-            <b>{seconds(response_ms):.2f}s</b>
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Decision
-# ============================================================
-
-def render_decision(snapshot):
-
-    if not snapshot:
-
-        return """
-        <div class="decision-surface">
-
-            <div class="decision-empty">
-
-                <div class="decision-empty-symbol">
-                    ◇
-                </div>
-
-                <div class="decision-empty-title">
-                    Waiting for interaction
-                </div>
-
-                <div class="decision-empty-desc">
-                    当前轮执行后，Query、Trigger、Evidence、
-                    Topic、Policy 和 Latency 将显示在这里。
-                </div>
-
-            </div>
-
-        </div>
-        """
-
-    query_state = (
-        snapshot.get("query_state")
-        or {}
-    )
-
-    trigger_state = (
-        snapshot.get("trigger_state")
-        or {}
-    )
-
-    policy_state = (
-        snapshot.get("policy_state")
-        or {}
-    )
-
-    evidence_state = (
-        snapshot.get("evidence_state")
-        or {}
-    )
-
-    active_cases = (
-        evidence_state.get(
-            "active_cases",
-            [],
-        )
-        or []
-    )
-
-    topic_structure = (
-        evidence_state.get(
-            "topic_structure",
-            {},
-        )
-        or {}
-    )
-
-    latency = (
-        snapshot.get("latency")
-        or {}
-    )
-
-    query_mode = query_state.get(
-        "query_mode",
-        "none",
-    )
-
-    query_text = query_state.get(
-        "query_text",
-        "",
-    )
-
-    trigger = trigger_state.get(
-        "trigger",
-        "",
-    )
-
-    evidence_mode = trigger_state.get(
-        "evidence_mode",
-        "",
-    )
-
-    policy = policy_state.get(
-        "label",
-        "",
-    )
-
-    information = policy_state.get(
-        "information"
-    )
-
-    return f"""
-    <div class="decision-surface">
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Query
-            </div>
-
-            <div class="decision-line">
-                {badge(query_mode, "blue")}
-            </div>
-
-            <div class="decision-text">
-                {escape(query_text) or "None"}
-            </div>
-
-        </div>
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Trigger
-            </div>
-
-            <div class="decision-row">
-                <span>Trigger</span>
-                {badge(trigger, "green")}
-            </div>
-
-            <div class="decision-row">
-                <span>Evidence Mode</span>
-                {badge(evidence_mode, "gray")}
-            </div>
-
-        </div>
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Evidence
-            </div>
-
-            <div class="case-list">
-                {render_cases(active_cases)}
-            </div>
-
-        </div>
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Topic Structure
-            </div>
-
-            {render_topic_tree(topic_structure)}
-
-        </div>
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Policy
-            </div>
-
-            <div class="decision-line">
-                {badge(policy, "blue")}
-            </div>
-
-            <div class="sub-label">
-                Information
-            </div>
-
-            <pre class="json-view">{escape(json_text(information))}</pre>
-
-        </div>
-
-        <div class="decision-section latency-section">
-
-            <div class="section-heading">
-                Latency
-            </div>
-
-            {render_latency(latency)}
-
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Trace
-# ============================================================
-
-def render_trace(trace):
-
-    if not trace:
-
-        return """
-        <div class="trace-surface">
-
-            <div class="decision-empty">
-
-                <div class="decision-empty-title">
-                    暂无运行轨迹
-                </div>
-
-                <div class="decision-empty-desc">
-                    每完成一轮交互，执行轨迹会显示在这里。
-                </div>
-
-            </div>
-
-        </div>
-        """
-
-    items = []
-
-    for index, item in enumerate(
-        reversed(trace),
-        start=1,
-    ):
-
-        turn = item.get(
-            "turn",
-            len(trace) - index + 1,
-        )
-
-        user = escape(
-            item.get(
-                "user",
-                "",
-            )
-        )
-
-        query = (
-            item.get("query_state")
-            or {}
-        )
-
-        trigger = (
-            item.get("trigger_state")
-            or {}
-        )
-
-        policy = (
-            item.get("policy_state")
-            or {}
-        )
-
-        latency = (
-            item.get("latency")
-            or {}
-        )
-
-        try:
-            total = (
-                float(
-                    latency.get(
-                        "total_ms",
-                        0,
-                    )
-                )
-                / 1000.0
-            )
-
-        except Exception:
-            total = 0.0
-
-        items.append(
-            f"""
-            <div class="trace-item">
-
-                <div class="trace-head">
-
-                    <b>
-                        Turn {turn}
-                    </b>
-
-                    <span>
-                        {total:.2f}s
-                    </span>
-
-                </div>
-
-                <div class="trace-user">
-                    {user}
-                </div>
-
-                <div class="trace-flow">
-
-                    {badge(
-                        query.get(
-                            "query_mode",
-                            "none",
-                        ),
-                        "blue"
-                    )}
-
-                    <span class="flow-arrow">
-                        →
-                    </span>
-
-                    {badge(
-                        trigger.get(
-                            "evidence_mode",
-                            "",
-                        ),
-                        "gray"
-                    )}
-
-                    <span class="flow-arrow">
-                        →
-                    </span>
-
-                    {badge(
-                        policy.get(
-                            "label",
-                            "",
-                        ),
-                        "green"
-                    )}
-
-                </div>
-
-            </div>
-            """
-        )
-
-    return f"""
-    <div class="trace-surface">
-        {''.join(items)}
-    </div>
-    """
-
-
-# ============================================================
-# Prefix
-# ============================================================
-
-def render_prefix_result(
-    success,
-    message,
-):
-
-    cls = (
-        "prefix-success"
-        if success
-        else "prefix-error"
-    )
-
-    return f"""
-    <div class="{cls}">
-        {escape(message)}
-    </div>
-    """
+    border: 1px solid #fecdd6;
+}
