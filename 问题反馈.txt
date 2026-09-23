@@ -1,864 +1,1553 @@
-import html
-import json
+CSS = r"""
 
+/* =========================================================
+   VARIABLES
+========================================================= */
 
-# ============================================================
-# Utils
-# ============================================================
+:root {
+    --bg: #f5f7fb;
+    --panel: #ffffff;
 
-def escape(value):
-    if value is None:
-        return ""
+    --line: #e2e8f0;
+    --soft-line: #edf1f5;
 
-    return html.escape(
-        str(value)
-    )
+    --text: #101828;
+    --text2: #344054;
+    --muted: #667085;
 
+    --blue: #2563eb;
+    --blue-dark: #1d4ed8;
+    --blue-soft: #eff6ff;
 
-def json_text(value):
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            indent=2,
-        )
+    --green: #16a34a;
+    --green-soft: #effdf3;
 
-    except Exception:
-        return str(value)
+    --gray-soft: #f4f6f8;
 
+    --shadow:
+        0 4px 16px
+        rgba(15, 23, 42, 0.05);
+}
 
-def badge(text, kind="gray"):
 
-    if text is None:
-        text = ""
+/* =========================================================
+   GLOBAL
+========================================================= */
 
-    return (
-        f'<span class="badge badge-{kind}">'
-        f'{escape(text)}'
-        f'</span>'
-    )
+html,
+body {
+    margin: 0 !important;
+    padding: 0 !important;
 
+    width: 100% !important;
+    min-height: 100% !important;
 
-# ============================================================
-# Header
-# ============================================================
+    background: var(--bg) !important;
 
-def render_header():
+    font-size: 18px !important;
+}
 
-    return """
-    <div class="app-header">
 
-        <div class="header-left">
+body {
+    overflow-x: hidden;
+}
 
-            <div class="header-eyebrow">
-                Huawei IT Support · Agent Console
-            </div>
 
-            <div class="header-title">
-                IT 智能客服 Agent
-            </div>
+.gradio-container {
+    width: 100% !important;
+    max-width: none !important;
 
-            <div class="header-desc">
-                Query · Evidence Retrieval · Topic Structure ·
-                Policy Decision · Response
-            </div>
+    margin: 0 !important;
 
-        </div>
+    padding:
+        14px
+        clamp(18px, 2vw, 34px)
+        20px
+        clamp(18px, 2vw, 34px)
+        !important;
+}
 
-        <div class="online-status">
-            <span class="online-dot"></span>
-            Agent Online
-        </div>
 
-    </div>
-    """
+.gradio-container > .main {
+    width: 100% !important;
+    max-width: none !important;
+}
 
 
-# ============================================================
-# Session
-# ============================================================
+.gradio-container .block {
+    box-shadow: none;
+}
 
-def render_session(session_id, turns):
 
-    return f"""
-    <div class="session-inline">
+footer {
+    display: none !important;
+}
 
-        <span class="session-status">
-            <span class="running-dot"></span>
-            Running
-        </span>
 
-        <span class="session-divider"></span>
+/* =========================================================
+   HEADER
+========================================================= */
 
-        <span>
-            Session
-            <b>{escape(session_id)}</b>
-        </span>
+.app-header {
+    width: 100%;
 
-        <span class="session-divider"></span>
+    box-sizing: border-box;
 
-        <span>
-            Turn
-            <b>{turns}</b>
-        </span>
+    display: flex;
 
-    </div>
-    """
+    align-items: center;
+    justify-content: space-between;
 
+    padding: 16px 22px;
 
-# ============================================================
-# Chat
-# ============================================================
+    margin-bottom: 12px;
 
-def render_empty_chat(user_mode=False):
+    background:
+        linear-gradient(
+            135deg,
+            #ffffff,
+            #f8faff
+        );
 
-    if user_mode:
+    border: 1px solid var(--line);
 
-        title = "您好，有什么可以帮您？"
+    border-radius: 16px;
 
-        desc = (
-            "请描述您遇到的 IT 问题，"
-            "我会尽力协助您解决。"
-        )
+    box-shadow: var(--shadow);
+}
 
-    else:
 
-        title = "开始新的 IT 支持会话"
+.header-eyebrow {
+    color: var(--blue);
 
-        desc = (
-            "输入用户问题后，Agent 将执行 Query、Retrieval、"
-            "Topic Analysis、Policy 和 Response。"
-        )
+    font-size: 15px;
 
-    return f"""
-    <div class="chat-surface">
+    line-height: 1.3;
 
-        <div class="empty-chat">
+    font-weight: 750;
 
-            <div class="empty-symbol">
-                ✦
-            </div>
+    margin-bottom: 4px;
+}
 
-            <div class="empty-title">
-                {title}
-            </div>
 
-            <div class="empty-desc">
-                {desc}
-            </div>
+.header-title {
+    color: var(--text);
 
-        </div>
+    font-size: 30px;
 
-    </div>
-    """
+    line-height: 1.15;
 
+    font-weight: 800;
+}
 
-def render_chat(history, user_mode=False):
 
-    if not history:
-        return render_empty_chat(
-            user_mode=user_mode
-        )
+.header-desc {
+    margin-top: 5px;
 
-    rows = []
+    color: var(--muted);
 
-    for message in history:
+    font-size: 15px;
 
-        role = message.get(
-            "role"
-        )
+    line-height: 1.4;
+}
 
-        content = escape(
-            message.get(
-                "content",
-                "",
-            )
-        )
 
-        if role == "user":
+.online-status {
+    display: flex;
 
-            rows.append(
-                f"""
-                <div class="message-row user-row">
+    align-items: center;
 
-                    <div class="message-wrap user-wrap">
+    gap: 8px;
 
-                        <div class="message-role user-role">
-                            用户
-                        </div>
+    color: var(--text2);
 
-                        <div class="message-bubble user-message">
-                            {content}
-                        </div>
+    font-size: 15px;
 
-                    </div>
+    font-weight: 600;
 
-                    <div class="avatar user-avatar">
-                        U
-                    </div>
+    white-space: nowrap;
+}
 
-                </div>
-                """
-            )
 
-        elif role == "assistant":
+.online-dot,
+.running-dot {
+    display: inline-block;
 
-            rows.append(
-                f"""
-                <div class="message-row agent-row">
+    width: 9px;
+    height: 9px;
 
-                    <div class="avatar agent-avatar">
-                        AI
-                    </div>
+    flex: 0 0 auto;
 
-                    <div class="message-wrap agent-wrap">
+    border-radius: 999px;
 
-                        <div class="message-role">
-                            智能客服
-                        </div>
+    background: #22c55e;
+}
 
-                        <div class="message-bubble agent-message">
-                            {content}
-                        </div>
 
-                    </div>
+/* =========================================================
+   MODE SWITCH
+========================================================= */
 
-                </div>
-                """
-            )
+.mode-switch {
+    width: 100% !important;
 
-    return f"""
-    <div class="chat-surface">
+    gap: 8px !important;
 
-        <div class="chat-scroll">
-            {''.join(rows)}
-        </div>
+    margin-bottom: 12px !important;
+}
 
-    </div>
-    """
 
+.mode-switch button {
+    min-height: 44px !important;
 
-# ============================================================
-# Topic Tree
-# ============================================================
+    font-size: 16px !important;
 
-def render_topic_tree(tree):
+    font-weight: 750 !important;
 
-    if not tree:
+    border-radius: 10px !important;
+}
 
-        return """
-        <div class="empty-small">
-            暂无 Topic Structure
-        </div>
-        """
 
-    def walk(node, depth=0):
+.mode-active {
+    background: var(--blue) !important;
 
-        topic = escape(
-            node.get(
-                "topic",
-                "",
-            )
-        )
+    color: white !important;
 
-        dimension = escape(
-            node.get(
-                "dimension",
-                "",
-            )
-        )
+    border-color: var(--blue) !important;
+}
 
-        case_ids = (
-            node.get("case_ids")
-            or []
-        )
 
-        if isinstance(
-            case_ids,
-            str,
-        ):
-            case_ids = [case_ids]
+.mode-inactive {
+    background: white !important;
 
-        case_text = ", ".join(
-            escape(x)
-            for x in case_ids
-        )
+    color: var(--text2) !important;
 
-        leaf = bool(
-            node.get("leaf")
-        )
+    border-color: var(--line) !important;
+}
 
-        node_class = (
-            "tree-node tree-leaf"
-            if leaf
-            else "tree-node"
-        )
 
-        margin = depth * 20
+/* =========================================================
+   WORKSPACE
+========================================================= */
 
-        dimension_html = ""
+.developer-workspace {
+    width: 100% !important;
 
-        if dimension:
-            dimension_html = (
-                f'<span class="tree-dimension">'
-                f'{dimension}'
-                f'</span>'
-            )
+    gap: 18px !important;
 
-        case_html = ""
+    align-items: stretch !important;
+}
 
-        if case_text:
-            case_html = (
-                f'<span class="tree-case">'
-                f'{case_text}'
-                f'</span>'
-            )
 
-        current = f"""
-        <div
-            class="{node_class}"
-            style="margin-left:{margin}px"
-        >
+.chat-column,
+.decision-column {
+    min-width: 0 !important;
 
-            <span class="tree-dot"></span>
+    box-sizing: border-box;
 
-            <span class="tree-topic">
-                {topic}
-            </span>
+    background: var(--panel);
 
-            {dimension_html}
+    border: 1px solid var(--line);
 
-            {case_html}
+    border-radius: 16px;
 
-        </div>
-        """
+    box-shadow: var(--shadow);
 
-        children = (
-            node.get("children")
-            or []
-        )
+    padding: 16px 18px;
+}
 
-        return current + "".join(
-            walk(
-                child,
-                depth + 1,
-            )
-            for child in children
-        )
 
-    return f"""
-    <div class="topic-tree">
-        {walk(tree)}
-    </div>
-    """
+.chat-column {
+    flex: 56 1 0% !important;
+}
 
 
-# ============================================================
-# Evidence
-# ============================================================
+.decision-column {
+    flex: 44 1 0% !important;
+}
 
-def render_cases(cases):
 
-    if not cases:
+.user-workspace {
+    width: min(1180px, 100%) !important;
 
-        return """
-        <div class="empty-small">
-            当前没有 Active Cases
-        </div>
-        """
+    margin: 0 auto !important;
 
-    items = []
+    box-sizing: border-box;
 
-    for case in cases:
+    background: white;
 
-        if not isinstance(
-            case,
-            dict,
-        ):
-            continue
+    border: 1px solid var(--line);
 
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
-            or ""
-        )
+    border-radius: 16px;
 
-        title = (
-            case.get("title")
-            or case.get("name")
-            or case.get("question")
-            or case.get("text")
-            or case.get("content")
-            or ""
-        )
+    padding: 18px;
 
-        title = str(title)
+    box-shadow: var(--shadow);
+}
 
-        if len(title) > 180:
-            title = (
-                title[:180]
-                + "..."
-            )
 
-        items.append(
-            f"""
-            <div class="case-item">
+/* =========================================================
+   PANEL HEADERS
+========================================================= */
 
-                <div class="case-id">
-                    {escape(case_id)}
-                </div>
+.workspace-heading {
+    padding: 0 2px 8px 2px;
+}
 
-                <div class="case-title">
-                    {escape(title)}
-                </div>
 
-            </div>
-            """
-        )
+.panel-heading-row {
+    width: 100% !important;
 
-    if not items:
+    align-items: center !important;
 
-        return """
-        <div class="empty-small">
-            当前没有可显示的 Active Cases
-        </div>
-        """
+    justify-content: space-between !important;
 
-    return "".join(items)
+    gap: 14px !important;
 
+    margin-bottom: 3px !important;
+}
 
-# ============================================================
-# Latency
-# ============================================================
 
-def render_latency(latency):
+.column-title {
+    color: var(--text);
 
-    latency = latency or {}
+    font-size: 22px;
 
-    def ms_value(name):
-        value = latency.get(
-            name,
-            0,
-        )
+    line-height: 1.25;
 
-        try:
-            return float(value)
-        except Exception:
-            return 0.0
+    font-weight: 800;
 
-    query_ms = ms_value("query_ms")
-    trigger_ms = ms_value("trigger_ms")
-    rag_ms = ms_value("rag_ms")
-    topic_ms = ms_value("topic_ms")
-    policy_ms = ms_value("policy_ms")
-    response_ms = ms_value("response_ms")
-    total_ms = ms_value("total_ms")
+    margin-bottom: 2px;
+}
 
-    def seconds(ms):
-        return ms / 1000.0
 
-    return f"""
-    <div class="latency-total">
-        {seconds(total_ms):.2f}
-        <span>s</span>
-    </div>
+.column-subtitle {
+    color: var(--muted);
 
-    <div class="latency-grid">
+    font-size: 15px;
 
-        <div>
-            <span>Query</span>
-            <b>{seconds(query_ms):.2f}s</b>
-        </div>
+    line-height: 1.4;
+}
 
-        <div>
-            <span>Trigger</span>
-            <b>{seconds(trigger_ms):.2f}s</b>
-        </div>
 
-        <div>
-            <span>RAG</span>
-            <b>{seconds(rag_ms):.2f}s</b>
-        </div>
+/* =========================================================
+   SESSION
+========================================================= */
 
-        <div>
-            <span>Topic</span>
-            <b>{seconds(topic_ms):.2f}s</b>
-        </div>
+.session-html {
+    flex: 0 0 auto !important;
+}
 
-        <div>
-            <span>Policy</span>
-            <b>{seconds(policy_ms):.2f}s</b>
-        </div>
 
-        <div>
-            <span>Response</span>
-            <b>{seconds(response_ms):.2f}s</b>
-        </div>
+.session-inline {
+    display: flex;
 
-    </div>
-    """
+    align-items: center;
 
+    justify-content: flex-end;
 
-# ============================================================
-# Decision
-# ============================================================
+    gap: 10px;
 
-def render_decision(snapshot):
+    flex-wrap: wrap;
 
-    if not snapshot:
+    padding: 7px 11px;
 
-        return """
-        <div class="decision-surface">
+    color: var(--muted);
 
-            <div class="decision-empty">
+    background: #f8fafc;
 
-                <div class="decision-empty-symbol">
-                    ◇
-                </div>
+    border: 1px solid var(--soft-line);
 
-                <div class="decision-empty-title">
-                    Waiting for interaction
-                </div>
+    border-radius: 9px;
 
-                <div class="decision-empty-desc">
-                    当前轮执行后，Query、Trigger、Evidence、
-                    Topic、Policy 和 Latency 将显示在这里。
-                </div>
+    font-size: 13px;
 
-            </div>
+    line-height: 1.3;
+}
 
-        </div>
-        """
 
-    query_state = (
-        snapshot.get("query_state")
-        or {}
-    )
+.session-status {
+    display: inline-flex;
 
-    trigger_state = (
-        snapshot.get("trigger_state")
-        or {}
-    )
+    align-items: center;
 
-    policy_state = (
-        snapshot.get("policy_state")
-        or {}
-    )
+    gap: 6px;
+}
 
-    evidence_state = (
-        snapshot.get("evidence_state")
-        or {}
-    )
 
-    active_cases = (
-        evidence_state.get(
-            "active_cases",
-            [],
-        )
-        or []
-    )
+.session-inline b {
+    color: var(--text2);
 
-    topic_structure = (
-        evidence_state.get(
-            "topic_structure",
-            {},
-        )
-        or {}
-    )
+    margin-left: 3px;
 
-    latency = (
-        snapshot.get("latency")
-        or {}
-    )
+    font-weight: 700;
+}
 
-    query_mode = query_state.get(
-        "query_mode",
-        "none",
-    )
 
-    query_text = query_state.get(
-        "query_text",
-        "",
-    )
+.session-divider {
+    display: block;
 
-    trigger = trigger_state.get(
-        "trigger",
-        "",
-    )
+    width: 1px;
+    height: 13px;
 
-    evidence_mode = trigger_state.get(
-        "evidence_mode",
-        "",
-    )
+    background: var(--line);
+}
 
-    policy = policy_state.get(
-        "label",
-        "",
-    )
 
-    information = policy_state.get(
-        "information"
-    )
+/* =========================================================
+   CHAT TOOLBAR
+========================================================= */
 
-    return f"""
-    <div class="decision-surface">
+.chat-toolbar {
+    min-height: 34px !important;
 
-        <div class="decision-section">
+    align-items: center !important;
 
-            <div class="section-heading">
-                Query
-            </div>
+    justify-content: flex-end !important;
 
-            <div class="decision-line">
-                {badge(query_mode, "blue")}
-            </div>
+    margin: 0 0 8px 0 !important;
+}
 
-            <div class="decision-text">
-                {escape(query_text) or "None"}
-            </div>
 
-        </div>
+.new-chat-button {
+    flex: 0 0 auto !important;
+}
 
 
-        <div class="decision-section">
+.new-chat-button button {
+    min-height: 34px !important;
 
-            <div class="section-heading">
-                Trigger
-            </div>
+    padding: 5px 13px !important;
 
-            <div class="decision-row">
-                <span>Trigger</span>
-                {badge(trigger, "green")}
-            </div>
+    font-size: 14px !important;
+}
 
-            <div class="decision-row">
-                <span>Evidence Mode</span>
-                {badge(evidence_mode, "gray")}
-            </div>
 
-        </div>
+/* =========================================================
+   CHAT SURFACE
+========================================================= */
 
+.chat-html {
+    width: 100% !important;
 
-        <div class="decision-section">
+    min-width: 0 !important;
+}
 
-            <div class="section-heading">
-                Evidence
-            </div>
 
-            <div class="case-list">
-                {render_cases(active_cases)}
-            </div>
+.chat-surface {
+    width: 100%;
 
-        </div>
+    box-sizing: border-box;
 
+    height: clamp(
+        410px,
+        calc(100vh - 350px),
+        650px
+    );
 
-        <div class="decision-section">
+    overflow-y: auto;
 
-            <div class="section-heading">
-                Topic Structure
-            </div>
+    overflow-x: hidden;
 
-            {render_topic_tree(topic_structure)}
+    background: #fbfcfe;
 
-        </div>
+    border: 1px solid var(--soft-line);
 
+    border-radius: 13px;
 
-        <div class="decision-section">
+    padding: 18px 20px;
 
-            <div class="section-heading">
-                Policy
-            </div>
+    scroll-behavior: smooth;
+}
 
-            <div class="decision-line">
-                {badge(policy, "blue")}
-            </div>
 
-            <div class="sub-label">
-                Information
-            </div>
+.user-chat-html .chat-surface {
+    height: clamp(
+        450px,
+        calc(100vh - 310px),
+        700px
+    );
+}
 
-            <pre class="json-view">{escape(json_text(information))}</pre>
 
-        </div>
+/* =========================================================
+   EMPTY CHAT
+========================================================= */
 
+.empty-chat {
+    width: 100%;
+    height: 100%;
 
-        <div class="decision-section latency-section">
+    min-height: 300px;
 
-            <div class="section-heading">
-                Latency
-            </div>
+    display: flex;
 
-            {render_latency(latency)}
+    flex-direction: column;
 
-        </div>
+    align-items: center;
+    justify-content: center;
 
-    </div>
-    """
+    text-align: center;
 
+    color: var(--muted);
+}
 
-# ============================================================
-# Trace
-# ============================================================
 
-def render_trace(trace):
+.empty-symbol {
+    display: flex;
 
-    if not trace:
+    align-items: center;
+    justify-content: center;
 
-        return """
-        <div class="trace-surface">
+    width: 52px;
+    height: 52px;
 
-            <div class="decision-empty">
+    margin-bottom: 13px;
 
-                <div class="decision-empty-title">
-                    暂无运行轨迹
-                </div>
+    border-radius: 15px;
 
-                <div class="decision-empty-desc">
-                    每完成一轮交互，执行轨迹会显示在这里。
-                </div>
+    background: var(--blue-soft);
 
-            </div>
+    color: var(--blue);
 
-        </div>
-        """
+    font-size: 25px;
 
-    items = []
+    font-weight: 800;
+}
 
-    for index, item in enumerate(
-        reversed(trace),
-        start=1,
-    ):
 
-        turn = item.get(
-            "turn",
-            len(trace) - index + 1,
-        )
+.empty-title {
+    margin-bottom: 7px;
 
-        user = escape(
-            item.get(
-                "user",
-                "",
-            )
-        )
+    color: var(--text);
 
-        query = (
-            item.get("query_state")
-            or {}
-        )
+    font-size: 21px;
 
-        trigger = (
-            item.get("trigger_state")
-            or {}
-        )
+    line-height: 1.3;
 
-        policy = (
-            item.get("policy_state")
-            or {}
-        )
+    font-weight: 800;
+}
 
-        latency = (
-            item.get("latency")
-            or {}
-        )
 
-        try:
-            total = (
-                float(
-                    latency.get(
-                        "total_ms",
-                        0,
-                    )
-                )
-                / 1000.0
-            )
-        except Exception:
-            total = 0.0
+.empty-desc {
+    max-width: 540px;
 
-        items.append(
-            f"""
-            <div class="trace-item">
+    color: var(--muted);
 
-                <div class="trace-head">
+    font-size: 15px;
 
-                    <b>
-                        Turn {turn}
-                    </b>
+    line-height: 1.6;
+}
 
-                    <span>
-                        {total:.2f}s
-                    </span>
 
-                </div>
+/* =========================================================
+   CHAT MESSAGES
+========================================================= */
 
-                <div class="trace-user">
-                    {user}
-                </div>
+.chat-scroll {
+    width: 100%;
 
-                <div class="trace-flow">
+    display: flex;
 
-                    {badge(
-                        query.get(
-                            "query_mode",
-                            "none",
-                        ),
-                        "blue"
-                    )}
+    flex-direction: column;
 
-                    <span class="flow-arrow">
-                        →
-                    </span>
+    gap: 20px;
+}
 
-                    {badge(
-                        trigger.get(
-                            "evidence_mode",
-                            "",
-                        ),
-                        "gray"
-                    )}
 
-                    <span class="flow-arrow">
-                        →
-                    </span>
+.message-row {
+    width: 100%;
 
-                    {badge(
-                        policy.get(
-                            "label",
-                            "",
-                        ),
-                        "green"
-                    )}
+    display: flex;
 
-                </div>
+    align-items: flex-start;
 
-            </div>
-            """
-        )
+    gap: 10px;
 
-    return f"""
-    <div class="trace-surface">
-        {''.join(items)}
-    </div>
-    """
+    box-sizing: border-box;
+}
 
 
-# ============================================================
-# Prefix
-# ============================================================
+.user-row {
+    justify-content: flex-end;
+}
 
-def render_prefix_result(
-    success,
-    message,
-):
 
-    cls = (
-        "prefix-success"
-        if success
-        else "prefix-error"
-    )
+.agent-row {
+    justify-content: flex-start;
+}
 
-    return f"""
-    <div class="{cls}">
-        {escape(message)}
-    </div>
-    """
+
+.avatar {
+    width: 36px;
+    height: 36px;
+
+    flex: 0 0 36px;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    border-radius: 50%;
+
+    font-size: 12px;
+
+    line-height: 1;
+
+    font-weight: 800;
+}
+
+
+.user-avatar {
+    color: #1d4ed8;
+
+    background: #dbeafe;
+}
+
+
+.agent-avatar {
+    color: #344054;
+
+    background: #e9edf3;
+}
+
+
+/*
+   这里是之前布局的关键问题之一。
+
+   message-wrap 不再占满整行。
+   短消息外层跟随内容；
+   长消息最多占可用宽度的约 80%。
+*/
+
+.message-wrap {
+    display: flex;
+
+    flex-direction: column;
+
+    align-items: flex-start;
+
+    width: fit-content;
+
+    min-width: 0;
+
+    max-width: min(
+        80%,
+        760px
+    );
+}
+
+
+.user-wrap {
+    align-items: flex-end;
+}
+
+
+.message-role {
+    margin:
+        0
+        3px
+        4px
+        3px;
+
+    color: var(--muted);
+
+    font-size: 13px;
+
+    line-height: 1.2;
+
+    font-weight: 700;
+}
+
+
+.message-bubble {
+    display: inline-block;
+
+    width: fit-content;
+
+    max-width: 100%;
+
+    box-sizing: border-box;
+
+    padding: 10px 14px;
+
+    border-radius: 14px;
+
+    font-size: 17px;
+
+    line-height: 1.62;
+
+    text-align: left;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: break-word;
+
+    word-break: normal;
+}
+
+
+/*
+   用户消息右对齐，但文字本身左对齐。
+*/
+
+.user-message {
+    color: white;
+
+    background: var(--blue);
+
+    border-bottom-right-radius: 5px;
+}
+
+
+.agent-message {
+    color: var(--text);
+
+    background: white;
+
+    border: 1px solid var(--line);
+
+    border-bottom-left-radius: 5px;
+}
+
+
+/* =========================================================
+   INPUT
+========================================================= */
+
+.chat-input-row {
+    width: 100% !important;
+
+    align-items: stretch !important;
+
+    gap: 9px !important;
+
+    margin-top: 9px !important;
+}
+
+
+.chat-input {
+    min-width: 0 !important;
+
+    margin: 0 !important;
+}
+
+
+.chat-input textarea {
+    min-height: 52px !important;
+
+    max-height: 100px !important;
+
+    padding: 11px 13px !important;
+
+    font-size: 17px !important;
+
+    line-height: 1.5 !important;
+
+    border-radius: 10px !important;
+}
+
+
+.send-button {
+    flex: 0 0 105px !important;
+}
+
+
+.send-button button {
+    width: 100% !important;
+
+    min-height: 52px !important;
+
+    padding: 8px 14px !important;
+
+    border-radius: 10px !important;
+
+    font-size: 16px !important;
+
+    font-weight: 750 !important;
+}
+
+
+/* =========================================================
+   HISTORY LOADER
+========================================================= */
+
+.history-loader {
+    margin-top: 9px !important;
+
+    border-radius: 10px !important;
+}
+
+
+.history-loader textarea {
+    font-size: 15px !important;
+
+    line-height: 1.55 !important;
+}
+
+
+/* =========================================================
+   DECISION TABS
+========================================================= */
+
+.decision-tabs {
+    width: 100% !important;
+}
+
+
+.decision-tabs button {
+    font-size: 15px !important;
+
+    font-weight: 700 !important;
+}
+
+
+.decision-html,
+.trace-html {
+    width: 100% !important;
+
+    min-width: 0 !important;
+}
+
+
+/* =========================================================
+   DECISION SURFACE
+========================================================= */
+
+.decision-surface,
+.trace-surface {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    max-height: clamp(
+        500px,
+        calc(100vh - 260px),
+        760px
+    );
+
+    overflow-y: auto;
+
+    overflow-x: hidden;
+
+    padding: 4px 4px 8px 1px;
+}
+
+
+.decision-section {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-bottom: 10px;
+
+    padding: 13px 14px;
+
+    background: white;
+
+    border: 1px solid var(--soft-line);
+
+    border-radius: 11px;
+}
+
+
+.section-heading {
+    margin-bottom: 10px;
+
+    color: var(--text);
+
+    font-size: 17px;
+
+    line-height: 1.3;
+
+    font-weight: 800;
+}
+
+
+.decision-line {
+    margin-bottom: 7px;
+}
+
+
+.decision-row {
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    gap: 14px;
+
+    margin: 7px 0;
+
+    color: var(--muted);
+
+    font-size: 15px;
+
+    line-height: 1.4;
+}
+
+
+.decision-text {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 7px;
+
+    padding: 9px 11px;
+
+    color: var(--text2);
+
+    background: #f8fafc;
+
+    border-radius: 8px;
+
+    font-size: 15px;
+
+    line-height: 1.55;
+
+    overflow-wrap: anywhere;
+}
+
+
+.sub-label {
+    margin-top: 10px;
+
+    margin-bottom: 5px;
+
+    color: var(--muted);
+
+    font-size: 13px;
+
+    line-height: 1.4;
+
+    font-weight: 700;
+}
+
+
+/* =========================================================
+   BADGES
+========================================================= */
+
+.badge {
+    display: inline-flex;
+
+    align-items: center;
+
+    max-width: 100%;
+
+    box-sizing: border-box;
+
+    padding: 4px 9px;
+
+    border-radius: 999px;
+
+    font-size: 13px;
+
+    line-height: 1.3;
+
+    font-weight: 750;
+
+    overflow-wrap: anywhere;
+}
+
+
+.badge-blue {
+    color: #1d4ed8;
+
+    background: var(--blue-soft);
+}
+
+
+.badge-green {
+    color: #15803d;
+
+    background: var(--green-soft);
+}
+
+
+.badge-gray {
+    color: #475467;
+
+    background: var(--gray-soft);
+}
+
+
+/* =========================================================
+   EVIDENCE
+========================================================= */
+
+.case-list {
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 7px;
+}
+
+
+.case-item {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    padding: 9px 10px;
+
+    background: #fafbfc;
+
+    border: 1px solid var(--soft-line);
+
+    border-radius: 8px;
+}
+
+
+.case-id {
+    color: var(--blue);
+
+    font-size: 13px;
+
+    line-height: 1.3;
+
+    font-weight: 800;
+}
+
+
+.case-title {
+    margin-top: 3px;
+
+    color: var(--text2);
+
+    font-size: 14px;
+
+    line-height: 1.5;
+
+    overflow-wrap: anywhere;
+}
+
+
+.empty-small {
+    padding: 10px 11px;
+
+    color: var(--muted);
+
+    background: #f8fafc;
+
+    border-radius: 8px;
+
+    font-size: 14px;
+
+    line-height: 1.5;
+}
+
+
+/* =========================================================
+   TOPIC TREE
+========================================================= */
+
+.topic-tree {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    padding: 1px 0;
+}
+
+
+.tree-node {
+    position: relative;
+
+    box-sizing: border-box;
+
+    padding: 5px 5px;
+
+    color: var(--text2);
+
+    font-size: 14px;
+
+    line-height: 1.5;
+
+    overflow-wrap: anywhere;
+}
+
+
+.tree-dot {
+    display: inline-block;
+
+    width: 7px;
+    height: 7px;
+
+    margin-right: 6px;
+
+    border-radius: 50%;
+
+    background: #94a3b8;
+}
+
+
+.tree-leaf .tree-dot {
+    background: #22c55e;
+}
+
+
+.tree-topic {
+    font-weight: 650;
+}
+
+
+.tree-dimension {
+    display: inline-block;
+
+    margin-left: 6px;
+
+    padding: 2px 6px;
+
+    color: var(--blue);
+
+    background: var(--blue-soft);
+
+    border-radius: 5px;
+
+    font-size: 12px;
+
+    line-height: 1.35;
+}
+
+
+.tree-case {
+    display: inline;
+
+    margin-left: 6px;
+
+    color: var(--muted);
+
+    font-size: 12px;
+}
+
+
+/* =========================================================
+   JSON
+========================================================= */
+
+.json-view {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin: 0;
+
+    padding: 9px 10px;
+
+    color: var(--text2);
+
+    background: #f8fafc;
+
+    border-radius: 8px;
+
+    font-size: 13px;
+
+    line-height: 1.5;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: anywhere;
+}
+
+
+/* =========================================================
+   LATENCY
+========================================================= */
+
+.latency-section {
+    margin-bottom: 0;
+}
+
+
+.latency-total {
+    margin-bottom: 9px;
+
+    color: var(--blue);
+
+    font-size: 29px;
+
+    line-height: 1.1;
+
+    font-weight: 800;
+}
+
+
+.latency-total span {
+    margin-left: 2px;
+
+    color: var(--muted);
+
+    font-size: 15px;
+
+    font-weight: 650;
+}
+
+
+.latency-grid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, minmax(0, 1fr));
+
+    gap: 6px;
+}
+
+
+.latency-grid > div {
+    min-width: 0;
+
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 2px;
+
+    box-sizing: border-box;
+
+    padding: 8px 9px;
+
+    background: #f8fafc;
+
+    border-radius: 8px;
+}
+
+
+.latency-grid span {
+    color: var(--muted);
+
+    font-size: 12px;
+}
+
+
+.latency-grid b {
+    color: var(--text2);
+
+    font-size: 14px;
+
+    font-weight: 750;
+}
+
+
+/* =========================================================
+   TRACE
+========================================================= */
+
+.trace-item {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-bottom: 9px;
+
+    padding: 12px 13px;
+
+    background: white;
+
+    border: 1px solid var(--soft-line);
+
+    border-radius: 10px;
+}
+
+
+.trace-head {
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    gap: 10px;
+
+    color: var(--muted);
+
+    font-size: 13px;
+}
+
+
+.trace-head b {
+    color: var(--text);
+
+    font-size: 15px;
+}
+
+
+.trace-user {
+    margin: 8px 0;
+
+    color: var(--text2);
+
+    font-size: 15px;
+
+    line-height: 1.5;
+}
+
+
+.trace-flow {
+    display: flex;
+
+    align-items: center;
+
+    gap: 6px;
+
+    flex-wrap: wrap;
+}
+
+
+.flow-arrow {
+    color: #98a2b3;
+
+    font-size: 14px;
+}
+
+
+/* =========================================================
+   EMPTY DECISION
+========================================================= */
+
+.decision-empty {
+    min-height: 360px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    align-items: center;
+    justify-content: center;
+
+    padding: 24px;
+
+    text-align: center;
+
+    color: var(--muted);
+}
+
+
+.decision-empty-symbol {
+    margin-bottom: 10px;
+
+    color: var(--blue);
+
+    font-size: 30px;
+}
+
+
+.decision-empty-title {
+    margin-bottom: 7px;
+
+    color: var(--text);
+
+    font-size: 19px;
+
+    line-height: 1.3;
+
+    font-weight: 800;
+}
+
+
+.decision-empty-desc {
+    max-width: 420px;
+
+    color: var(--muted);
+
+    font-size: 14px;
+
+    line-height: 1.6;
+}
+
+
+/* =========================================================
+   PREFIX
+========================================================= */
+
+.prefix-success,
+.prefix-error {
+    box-sizing: border-box;
+
+    padding: 10px;
+
+    border-radius: 8px;
+
+    font-size: 14px;
+
+    line-height: 1.5;
+}
+
+
+.prefix-success {
+    color: #027a48;
+
+    background: #effdf3;
+
+    border: 1px solid #abefc6;
+}
+
+
+.prefix-error {
+    color: #be123c;
+
+    background: #fff1f3;
+
+    border: 1px solid #fecdd6;
+}
+
+
+/* =========================================================
+   GENERIC BUTTONS
+========================================================= */
+
+button {
+    font-size: 15px !important;
+
+    font-weight: 700 !important;
+}
+
+
+/* =========================================================
+   SCROLLBAR
+========================================================= */
+
+.chat-surface::-webkit-scrollbar,
+.decision-surface::-webkit-scrollbar,
+.trace-surface::-webkit-scrollbar {
+    width: 7px;
+}
+
+
+.chat-surface::-webkit-scrollbar-thumb,
+.decision-surface::-webkit-scrollbar-thumb,
+.trace-surface::-webkit-scrollbar-thumb {
+    background: #d0d5dd;
+
+    border-radius: 999px;
+}
+
+
+/* =========================================================
+   RESPONSIVE
+========================================================= */
+
+@media (max-width: 1200px) {
+
+    .gradio-container {
+        padding:
+            12px
+            16px
+            18px
+            16px
+            !important;
+    }
+
+    .developer-workspace {
+        gap: 12px !important;
+    }
+
+    .chat-column,
+    .decision-column {
+        padding: 14px;
+    }
+
+    .message-wrap {
+        max-width: 86%;
+    }
+
+    .latency-grid {
+        grid-template-columns:
+            repeat(2, minmax(0, 1fr));
+    }
+}
+
+
+@media (max-width: 900px) {
+
+    .developer-workspace {
+        flex-direction: column !important;
+    }
+
+    .chat-column,
+    .decision-column {
+        width: 100% !important;
+
+        flex: 1 1 auto !important;
+    }
+
+    .panel-heading-row {
+        align-items: flex-start !important;
+
+        flex-direction: column !important;
+    }
+
+    .session-inline {
+        justify-content: flex-start;
+    }
+
+    .message-wrap {
+        max-width: 88%;
+    }
+}
+
+
+@media (max-width: 700px) {
+
+    .gradio-container {
+        padding: 8px !important;
+    }
+
+    .app-header {
+        padding: 14px 15px;
+
+        align-items: flex-start;
+
+        flex-direction: column;
+
+        gap: 9px;
+    }
+
+    .header-title {
+        font-size: 25px;
+    }
+
+    .header-desc {
+        font-size: 14px;
+    }
+
+    .chat-column,
+    .decision-column,
+    .user-workspace {
+        padding: 11px;
+
+        border-radius: 12px;
+    }
+
+    .chat-surface {
+        padding: 13px 11px;
+
+        height: calc(100vh - 330px);
+    }
+
+    .message-wrap {
+        max-width: 91%;
+    }
+
+    .message-bubble {
+        font-size: 16px;
+
+        padding: 9px 12px;
+    }
+
+    .avatar {
+        width: 32px;
+        height: 32px;
+
+        flex-basis: 32px;
+    }
+
+    .latency-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+}
+
+"""
