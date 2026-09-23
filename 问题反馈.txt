@@ -1,642 +1,837 @@
-import html
 import json
+import time
+from pathlib import Path
+
+from Agent.utils.scu_rag import batch_zefeng_rag
+from Agent.utils.qwen_api_multi import single_inference, parallel_inference
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def escape(value):
-    if value is None:
-        return ""
-    return html.escape(str(value))
+def parse_json(text):
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str):
+        return {}
 
+    text = text.strip()
+    if not text:
+        return {}
 
-def json_text(value):
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            indent=2,
-        )
+        return json.loads(text)
     except Exception:
-        return str(value)
+        pass
+
+    if "```json" in text:
+        try:
+            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    if "```" in text:
+        try:
+            text = text.split("```", 1)[1].split("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    return {}
 
 
-def badge(text, kind="gray"):
-    return (
-        f'<span class="badge badge-{kind}">'
-        f'{escape(text)}'
-        f'</span>'
-    )
+def parse_llm_output(output):
+    parsed = parse_json(output)
+    if not parsed:
+        return {}
+    if "response" not in parsed:
+        return parsed
+    return parse_json(parsed.get("response", ""))
 
 
-# ============================================================
-# Header
-# ============================================================
-
-def render_header():
-    return """
-    <div class="app-header">
-        <div>
-            <div class="header-eyebrow">
-                Huawei IT Support · Agent Console
-            </div>
-
-            <div class="header-title">
-                IT 智能客服 Agent
-            </div>
-
-            <div class="header-desc">
-                Query · Evidence Retrieval · Topic Structure ·
-                Policy Decision · Response
-            </div>
-        </div>
-
-        <div class="online-status">
-            <span class="online-dot"></span>
-            Agent Online
-        </div>
-    </div>
-    """
+def prompt_read(path):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8").strip()
 
 
-# ============================================================
-# Session
-# ============================================================
-
-def render_session(session_id, turns):
-    return f"""
-    <div class="session-inline">
-        <span class="running-dot"></span>
-        <span>Running</span>
-
-        <span class="session-divider">·</span>
-
-        <span>
-            Session
-            <b>{escape(session_id)}</b>
-        </span>
-
-        <span class="session-divider">·</span>
-
-        <span>
-            Turn
-            <b>{turns}</b>
-        </span>
-    </div>
-    """
+def build_messages(system_prompt, data):
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+    ]
 
 
-# ============================================================
-# Chat
-# ============================================================
-
-def render_empty_chat(user_mode=False):
-    if user_mode:
-        title = "您好，有什么可以帮您？"
-        desc = "请描述您遇到的 IT 问题，我会尽力协助您解决。"
-    else:
-        title = "开始新的 IT 支持会话"
-        desc = (
-            "输入用户问题后，Agent 将执行 Query、Retrieval、"
-            "Topic Analysis、Policy 和 Response。"
-        )
-
-    return f"""
-    <div class="chat-surface">
-        <div class="empty-chat">
-            <div class="empty-symbol">✦</div>
-            <div class="empty-title">{title}</div>
-            <div class="empty-desc">{desc}</div>
-        </div>
-    </div>
-    """
+def history_to_text(history):
+    lines = []
+    for msg in history:
+        if msg.get("role") == "user":
+            lines.append(f"用户: {msg.get('content', '')}")
+        elif msg.get("role") == "assistant":
+            lines.append(f"客服: {msg.get('content', '')}")
+    return "\n".join(lines)
 
 
-def render_chat(history, user_mode=False):
-    if not history:
-        return render_empty_chat(user_mode=user_mode)
+def get_case_id(case):
+    if not isinstance(case, dict):
+        return ""
+    return str(case.get("case_id") or case.get("id") or case.get("caseId") or "").strip()
 
-    rows = []
 
-    for message in history:
-        role = message.get("role")
-        content = escape(message.get("content", ""))
+def case_map_from_cases(cases):
+    return {get_case_id(case): case for case in cases or [] if get_case_id(case)}
 
-        if role == "user":
-            rows.append(
-                f"""
-                <div class="message-row user-row">
-                    <div class="message-wrap user-wrap">
-                        <div class="message-role">用户</div>
-                        <div class="message-bubble user-message">
-                            {content}
-                        </div>
-                    </div>
 
-                    <div class="avatar user-avatar">
-                        U
-                    </div>
-                </div>
-                """
-            )
+def get_policy_case_ids(policy_state):
+    information = policy_state.get("information")
+    if not isinstance(information, dict):
+        return []
 
-        elif role == "assistant":
-            rows.append(
-                f"""
-                <div class="message-row agent-row">
-                    <div class="avatar agent-avatar">
-                        AI
-                    </div>
+    value = information.get("case_id")
+    if value is None:
+        value = information.get("case_ids")
 
-                    <div class="message-wrap">
-                        <div class="message-role">智能客服</div>
-                        <div class="message-bubble agent-message">
-                            {content}
-                        </div>
-                    </div>
-                </div>
-                """
-            )
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
 
-    return f"""
-    <div class="chat-surface">
-        <div class="chat-scroll">
-            {''.join(rows)}
-        </div>
-    </div>
-    """
+    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
+
+
+def get_selected_evidence(policy_state, active_cases):
+    if policy_state.get("label") not in {"CaseRecommendation", "ExplainedResponse"}:
+        return None
+
+    case_ids = get_policy_case_ids(policy_state)
+    if not case_ids:
+        return None
+
+    case_map = case_map_from_cases(active_cases)
+    selected = [case_map[cid] for cid in case_ids if cid in case_map]
+
+    if not selected:
+        return None
+    if len(selected) == 1:
+        return selected[0]
+    return selected
 
 
 # ============================================================
-# Topic Tree
+# Memory
 # ============================================================
 
-def render_topic_tree(tree):
+def init_memory():
+    return {
+        "issue_state": {
+            "current_issue": "",
+            "query_history": [],
+        },
+        "evidence_state": {
+            "active_cases": [],
+            "topic_structure": {},
+        },
+        "interaction_state": {
+            "stage": "Start",
+            "last_policy": None,
+            "policy_history": [],
+        },
+        "dialogue_state": {
+            "recent_history": [],
+        },
+    }
+
+
+# ============================================================
+# Topic Structure
+# ============================================================
+
+def build_topic_split_input(query, cases, parent_path, depth):
+    return {
+        "query": query,
+        "parent_path": parent_path,
+        "depth": depth,
+        "cases": cases,
+    }
+
+
+def make_leaf(case_id, topic=None):
+    return {
+        "topic": topic or case_id,
+        "case_ids": [case_id],
+        "leaf": True,
+        "case_id": case_id,
+        "children": [],
+    }
+
+
+def normalize_split(split_result, expected_case_ids):
+    if not isinstance(split_result, dict):
+        return None, "output is not a dict"
+
+    split = split_result.get("split")
+    if not isinstance(split, bool):
+        return None, "missing or invalid split"
+
+    if not split:
+        return {
+            "split": False,
+            "dimension": "",
+            "children": [],
+        }, ""
+
+    dimension = str(split_result.get("dimension", "")).strip()
+    assignments = split_result.get("assignments", [])
+
+    if not dimension:
+        return None, "missing dimension"
+
+    if not isinstance(assignments, list):
+        return None, "assignments must be a list"
+
+    expected_set = set(expected_case_ids)
+    assignment_map = {}
+
+    for item in assignments:
+        if not isinstance(item, dict):
+            return None, "assignment is not a dict"
+
+        case_id = str(item.get("case_id", "")).strip()
+        topic = str(item.get("topic", "")).strip()
+
+        if not case_id or not topic:
+            return None, "assignment missing case_id or topic"
+
+        if case_id not in expected_set:
+            return None, f"unknown case_id: {case_id}"
+
+        if case_id in assignment_map:
+            return None, f"duplicated case_id: {case_id}"
+
+        assignment_map[case_id] = topic
+
+    missing = [
+        case_id
+        for case_id in expected_case_ids
+        if case_id not in assignment_map
+    ]
+
+    if missing:
+        return None, f"missing case_ids: {missing}"
+
+    groups = {}
+
+    for case_id in expected_case_ids:
+        topic = assignment_map[case_id]
+        groups.setdefault(topic, []).append(case_id)
+
+    if len(groups) < 2:
+        return None, "fewer than 2 valid topic groups"
+
+    children = [
+        {
+            "topic": topic,
+            "case_ids": case_ids,
+        }
+        for topic, case_ids in groups.items()
+    ]
+
+    return {
+        "split": True,
+        "dimension": dimension,
+        "children": children,
+    }, ""
+
+
+def stop_topic_refinement(node, split_status):
+    node["leaf"] = True
+    node["dimension"] = ""
+    node["children"] = []
+    node["split_status"] = split_status
+
+
+def normalize_case_ids(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
+
+
+def format_topic_tree(tree):
     if not tree:
-        return """
-        <div class="empty-small">
-            暂无 Topic Structure
-        </div>
-        """
+        return "None"
 
-    def walk(node, depth=0):
-        topic = escape(node.get("topic", ""))
-        dimension = escape(node.get("dimension", ""))
+    lines = []
 
-        case_ids = node.get("case_ids") or []
+    def node_text(node):
+        topic = str(node.get("topic", "")).strip()
+        dimension = str(node.get("dimension", "")).strip()
+        case_ids = normalize_case_ids(node.get("case_ids"))
 
-        if isinstance(case_ids, str):
-            case_ids = [case_ids]
-
-        case_text = ", ".join(
-            escape(x) for x in case_ids
-        )
-
-        leaf = bool(node.get("leaf"))
-
-        node_class = (
-            "tree-node tree-leaf"
-            if leaf
-            else "tree-node"
-        )
-
-        margin = depth * 18
-
-        dimension_html = ""
+        if node.get("leaf"):
+            if case_ids:
+                ids = ", ".join(case_ids)
+                return f"{topic}  [{ids}]" if topic and topic not in case_ids else f"[{ids}]"
+            return topic or "Unknown"
 
         if dimension:
-            dimension_html = (
-                f'<span class="tree-dimension">'
-                f'{dimension}'
-                f'</span>'
-            )
+            return f"{topic}  <{dimension}>"
 
-        case_html = ""
+        return topic or "Unknown"
 
-        if case_text:
-            case_html = (
-                f'<span class="tree-case">'
-                f'{case_text}'
-                f'</span>'
-            )
+    def walk(node, prefix="", is_last=True, root=False):
+        if root:
+            lines.append(node_text(node))
+        else:
+            lines.append(prefix + ("└─ " if is_last else "├─ ") + node_text(node))
 
-        current = f"""
-        <div
-            class="{node_class}"
-            style="margin-left:{margin}px"
-        >
-            <span class="tree-dot"></span>
-            <span class="tree-topic">{topic}</span>
-            {dimension_html}
-            {case_html}
-        </div>
-        """
+        children = node.get("children", [])
+        if not children:
+            return
 
-        children = node.get("children") or []
+        child_prefix = prefix if root else prefix + ("   " if is_last else "│  ")
 
-        return current + "".join(
-            walk(child, depth + 1)
-            for child in children
-        )
+        for i, child in enumerate(children):
+            walk(child, child_prefix, i == len(children) - 1, False)
 
-    return f"""
-    <div class="topic-tree">
-        {walk(tree)}
-    </div>
+    walk(tree, root=True)
+    return "\n".join(lines)
+
+
+# ============================================================
+# Memory Agent
+# ============================================================
+
+class MemoryAgent:
+    """
+    Stateful customer-service agent.
+
+    One instance corresponds to one dialogue.
+    Call reset() before starting a new dialogue if reusing it.
     """
 
-
-# ============================================================
-# Evidence
-# ============================================================
-
-def render_cases(cases):
-    if not cases:
-        return """
-        <div class="empty-small">
-            当前没有 Active Cases
-        </div>
-        """
-
-    items = []
-
-    for case in cases:
-        if not isinstance(case, dict):
-            continue
-
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
-            or ""
-        )
-
-        title = (
-            case.get("title")
-            or case.get("name")
-            or case.get("question")
-            or case.get("text")
-            or ""
-        )
-
-        title = str(title)
-
-        if len(title) > 110:
-            title = title[:110] + "..."
-
-        items.append(
-            f"""
-            <div class="case-item">
-                <div class="case-id">
-                    {escape(case_id)}
-                </div>
-
-                <div class="case-title">
-                    {escape(title)}
-                </div>
-            </div>
-            """
-        )
-
-    return "".join(items)
-
-
-# ============================================================
-# Latency
-# ============================================================
-
-def render_latency(latency):
-    latency = latency or {}
-
-    print("latency: ", latency)
-    total = latency.get("total_ms", 0)
-
-    def get_time(*names):
-        for name in names:
-            if name in latency:
-                return latency[name]
-        return 0
-
-    query = get_time("query")
-    trigger = get_time("trigger")
-    rag = get_time("rag", "retrieval")
-    topic = get_time("topic", "topic_structure")
-    policy = get_time("policy")
-    response = get_time("response")
-
-    return f"""
-    <div class="latency-total">
-        {float(total):.2f}
-        <span>s</span>
-    </div>
-
-    <div class="latency-grid">
-        <div>
-            <span>Query</span>
-            <b>{float(query):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Trigger</span>
-            <b>{float(trigger):.2f}s</b>
-        </div>
-
-        <div>
-            <span>RAG</span>
-            <b>{float(rag):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Topic</span>
-            <b>{float(topic):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Policy</span>
-            <b>{float(policy):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Response</span>
-            <b>{float(response):.2f}s</b>
-        </div>
-    </div>
-    """
-
-
-# ============================================================
-# Decision
-# ============================================================
-
-def render_decision(snapshot):
-    if not snapshot:
-        return """
-        <div class="decision-surface">
-            <div class="decision-empty">
-                <div class="decision-empty-title">
-                    Waiting for interaction
-                </div>
-
-                <div class="decision-empty-desc">
-                    当前轮执行后，Query、Trigger、Evidence、
-                    Topic、Policy 和 Latency 将显示在这里。
-                </div>
-            </div>
-        </div>
-        """
-
-    query_state = snapshot.get("query_state", {})
-    trigger_state = snapshot.get("trigger_state", {})
-    policy_state = snapshot.get("policy_state", {})
-
-    evidence_state = snapshot.get(
-        "evidence_state",
-        {},
-    )
-
-    active_cases = evidence_state.get(
-        "active_cases",
-        [],
-    )
-
-    topic_structure = evidence_state.get(
-        "topic_structure",
-        {},
-    )
-
-    latency = snapshot.get("latency", {})
-
-    query_mode = query_state.get(
-        "query_mode",
-        "none",
-    )
-
-    query_text = query_state.get(
-        "query_text",
-        "",
-    )
-
-    trigger = trigger_state.get(
-        "trigger",
-        "",
-    )
-
-    evidence_mode = trigger_state.get(
-        "evidence_mode",
-        "",
-    )
-
-    policy = policy_state.get(
-        "label",
-        "",
-    )
-
-    information = policy_state.get(
-        "information",
-    )
-
-    return f"""
-    <div class="decision-surface">
-
-        <div class="decision-section">
-            <div class="section-heading">
-                Query
-            </div>
-
-            <div class="decision-line">
-                {badge(query_mode, "blue")}
-            </div>
-
-            <div class="decision-text">
-                {escape(query_text) or "None"}
-            </div>
-        </div>
-
-
-        <div class="decision-section">
-            <div class="section-heading">
-                Trigger
-            </div>
-
-            <div class="decision-row">
-                <span>Trigger</span>
-                {badge(trigger, "green")}
-            </div>
-
-            <div class="decision-row">
-                <span>Evidence Mode</span>
-                {badge(evidence_mode, "gray")}
-            </div>
-        </div>
-
-
-        <div class="decision-section">
-            <div class="section-heading">
-                Evidence
-            </div>
-
-            {render_cases(active_cases)}
-        </div>
-
-
-        <div class="decision-section">
-            <div class="section-heading">
-                Topic Structure
-            </div>
-
-            {render_topic_tree(topic_structure)}
-        </div>
-
-
-        <div class="decision-section">
-            <div class="section-heading">
-                Policy
-            </div>
-
-            <div class="decision-line">
-                {badge(policy, "blue")}
-            </div>
-
-            <div class="sub-label">
-                Information
-            </div>
-
-            <pre class="json-view">{escape(json_text(information))}</pre>
-        </div>
-
-
-        <div class="decision-section latency-section">
-            <div class="section-heading">
-                Latency
-            </div>
-
-            {render_latency(latency)}
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Trace
-# ============================================================
-
-def render_trace(trace):
-    if not trace:
-        return """
-        <div class="trace-surface">
-            <div class="decision-empty">
-                暂无运行轨迹
-            </div>
-        </div>
-        """
-
-    items = []
-
-    for index, item in enumerate(
-        reversed(trace),
-        start=1,
+    def __init__(
+        self,
+        prompt_dir="Agent/promptsv2_3",
+        mode="single",
+        max_topic_depth=8,
+        show_state=True,
     ):
-        turn = item.get(
-            "turn",
-            len(trace) - index + 1,
+        prompt_dir = Path(prompt_dir)
+
+        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
+        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
+        self.topic_prompt = prompt_read(prompt_dir / "topic.prompt")
+        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
+        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
+
+        if mode not in {"single", "parallel"}:
+            raise ValueError(f"Unsupported mode: {mode}")
+
+        self.mode = mode
+        self.max_topic_depth = max_topic_depth
+        self.show_state = show_state
+
+        self.memory = init_memory()
+
+        # 对外暴露当前轮状态，供 Project / Web UI 使用。
+        # 不参与 Agent 内部决策。
+        self.last_turn_state = {}
+
+    # ========================================================
+    # LLM
+    # ========================================================
+
+    def call_llm(self, prompt, data):
+        messages = build_messages(prompt, data)
+
+        if self.mode == "single":
+            output = single_inference(messages)
+        else:
+            output = parallel_inference([messages])[0]
+
+        return parse_llm_output(output)
+
+    def call_llm_batch(self, messages):
+        if not messages:
+            return []
+
+        if self.mode == "single":
+            outputs = [single_inference(message) for message in messages]
+        else:
+            outputs = parallel_inference(messages)
+
+        return [parse_llm_output(output) for output in outputs]
+
+    # ========================================================
+    # Memory Update
+    # ========================================================
+
+    def update_issue(self, query_state):
+        mode = str(query_state.get("query_mode", "none")).strip()
+        query = str(query_state.get("query_text", "")).strip()
+
+        if mode in {"rewrite", "refine"} and query:
+            self.memory["issue_state"]["current_issue"] = query
+            self.memory["issue_state"]["query_history"].append(query)
+
+    def update_evidence(self, trigger_state, evidence, topic_structure=None):
+        if trigger_state.get("evidence_mode") != "retrieve_new_evidence":
+            return
+
+        self.memory["evidence_state"]["active_cases"] = evidence
+        self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
+
+    def update_interaction(self, policy_state):
+        label = str(policy_state.get("label", "")).strip()
+        information = policy_state.get("information")
+
+        policy = {
+            "label": label,
+            "information": information,
+        }
+
+        interaction = self.memory["interaction_state"]
+        interaction["last_policy"] = policy
+        interaction["policy_history"].append(policy)
+
+        if label in {"AskMissingSlot", "AskClarification"}:
+            interaction["stage"] = "Clarification"
+        elif label in {"ExplainedResponse", "CaseRecommendation"}:
+            interaction["stage"] = "Resolution"
+        elif label == "Handoff":
+            interaction["stage"] = "End"
+
+    def update_dialogue(self, user, response):
+        history = self.memory["dialogue_state"]["recent_history"]
+
+        history.append({
+            "user": user,
+            "assistant": response,
+        })
+
+        self.memory["dialogue_state"]["recent_history"] = history[-5:]
+
+    # ========================================================
+    # Topic Structure Generation
+    # ========================================================
+
+    def generate_topic_structure(self, query, cases):
+        case_map = case_map_from_cases(cases)
+        case_ids = list(case_map)
+
+        root = {
+            "query": query,
+            "topic": query,
+            "case_ids": case_ids,
+            "leaf": len(case_ids) <= 1,
+            "children": [],
+        }
+
+        if not case_ids:
+            return root
+
+        if len(case_ids) == 1:
+            root["case_id"] = case_ids[0]
+            root["split_status"] = "single_case"
+            return root
+
+        frontier = [{
+            "node": root,
+            "case_ids": case_ids,
+            "depth": 0,
+            "parent_path": [],
+        }]
+
+        round_id = 0
+
+        while frontier:
+            print(f"[TopicStructure] Round {round_id}: {len(frontier)} nodes")
+
+            active_frontier = []
+
+            for task in frontier:
+                if task["depth"] >= self.max_topic_depth:
+                    print(f"[TopicStructure Warning] max_depth reached: {task['case_ids']}")
+                    stop_topic_refinement(task["node"], "max_depth")
+                else:
+                    active_frontier.append(task)
+
+            if not active_frontier:
+                break
+
+            messages = []
+
+            for task in active_frontier:
+                node_cases = [case_map[case_id] for case_id in task["case_ids"]]
+
+                split_input = build_topic_split_input(
+                    query=query,
+                    cases=node_cases,
+                    parent_path=task["parent_path"],
+                    depth=task["depth"],
+                )
+
+                messages.append(build_messages(self.topic_prompt, split_input))
+
+            outputs = self.call_llm_batch(messages)
+
+            valid_results = {}
+
+            for idx, (task, output) in enumerate(zip(active_frontier, outputs)):
+                valid_split, error = normalize_split(output, task["case_ids"])
+
+                if valid_split:
+                    valid_results[idx] = valid_split
+                else:
+                    print(f"[TopicStructure Invalid] {error}")
+                    print("output:", output, flush=True)
+
+            next_frontier = []
+
+            for idx, task in enumerate(active_frontier):
+                node = task["node"]
+                valid_split = valid_results.get(idx)
+
+                if not valid_split:
+                    print(
+                        "[TopicStructure Warning] "
+                        f"invalid output, stop refinement: {task['case_ids']}"
+                    )
+                    stop_topic_refinement(node, "invalid_output")
+                    continue
+
+                if valid_split["split"] is False:
+                    print(
+                        "[TopicStructure] "
+                        f"no meaningful split: {task['case_ids']}"
+                    )
+                    stop_topic_refinement(node, "no_meaningful_split")
+                    continue
+
+                node["leaf"] = False
+                node["dimension"] = valid_split["dimension"]
+                node["children"] = []
+                node["split_status"] = "valid"
+
+                for child_info in valid_split["children"]:
+                    child_case_ids = child_info["case_ids"]
+                    child_topic = child_info["topic"]
+
+                    child_node = {
+                        "topic": child_topic,
+                        "case_ids": child_case_ids,
+                        "leaf": len(child_case_ids) == 1,
+                        "children": [],
+                    }
+
+                    node["children"].append(child_node)
+
+                    if len(child_case_ids) == 1:
+                        child_node["case_id"] = child_case_ids[0]
+                        child_node["split_status"] = "single_case"
+                        continue
+
+                    next_frontier.append({
+                        "node": child_node,
+                        "case_ids": child_case_ids,
+                        "depth": task["depth"] + 1,
+                        "parent_path": task["parent_path"] + [child_topic],
+                    })
+
+            frontier = next_frontier
+            round_id += 1
+
+        return root
+
+    # ========================================================
+    # State Display
+    # ========================================================
+
+    def print_state(self, query_state, trigger_state, policy_state):
+        if not self.show_state:
+            return
+
+        query_mode = query_state.get("query_mode", "")
+        query_text = query_state.get("query_text", "")
+        trigger = trigger_state.get("trigger", "")
+        evidence_mode = trigger_state.get("evidence_mode", "")
+
+        active_cases = self.memory["evidence_state"]["active_cases"]
+        case_ids = [get_case_id(case) for case in active_cases if get_case_id(case)]
+
+        policy = policy_state.get("label", "")
+        information = policy_state.get("information")
+        topic_tree = format_topic_tree(self.memory["evidence_state"]["topic_structure"])
+
+        print("\n╔══════════════ AGENT STATE ══════════════╗")
+        print(f" Query    : {query_mode} | {query_text}")
+        print(f" Trigger  : {trigger}")
+        print(f" Evidence : {evidence_mode}")
+        print(f" Cases    : {', '.join(case_ids) if case_ids else 'None'}")
+
+        print("\n Topic Tree")
+        for line in topic_tree.splitlines():
+            print(f" {line}")
+
+        print(f"\n Policy   : {policy}")
+        print(f" Info     : {information if information is not None else 'None'}")
+        print("╚══════════════════════════════════════════╝")
+
+    # ========================================================
+    # Reply
+    # ========================================================
+
+    def reply(self, dialogue_history):
+        """
+        dialogue_history:
+        [
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "..."},
+            ...
+            {"role": "user", "content": "..."},
+        ]
+
+        Returns:
+            str: customer-service response
+        """
+
+        if not dialogue_history:
+            raise ValueError("dialogue_history is empty")
+
+        last_msg = dialogue_history[-1]
+
+        if last_msg.get("role") != "user":
+            raise ValueError("The last message in dialogue_history must be from user.")
+
+        user = str(last_msg.get("content", "")).strip()
+
+        if not user:
+            raise ValueError("Current user message is empty")
+
+        # 每轮开始时重置对外状态。
+        self.last_turn_state = {}
+
+        latency = {
+            "query_ms": 0,
+            "trigger_ms": 0,
+            "rag_ms": 0,
+            "topic_ms": 0,
+            "policy_ms": 0,
+            "response_ms": 0,
+            "total_ms": 0,
+        }
+
+        total_start = time.perf_counter()
+
+        # ----------------------------------------------------
+        # 1. Query
+        # ----------------------------------------------------
+
+        start = time.perf_counter()
+
+        query_state = self.call_llm(
+            self.query_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "dialogue_state": self.memory["dialogue_state"],
+                "current": {"u": user},
+            },
         )
 
-        user = escape(
-            item.get("user", "")
+        latency["query_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
-        query = item.get(
-            "query_state",
-            {},
+        self.update_issue(query_state)
+
+        # ----------------------------------------------------
+        # 2. Trigger
+        # ----------------------------------------------------
+
+        start = time.perf_counter()
+
+        trigger_state = self.call_llm(
+            self.trigger_prompt,
+            {
+                "query": {
+                    "query_mode": query_state.get("query_mode", "none"),
+                    "query_text": query_state.get("query_text", ""),
+                },
+                "active_cases": self.memory["evidence_state"]["active_cases"],
+            },
         )
 
-        trigger = item.get(
-            "trigger_state",
-            {},
+        latency["trigger_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
-        policy = item.get(
-            "policy_state",
-            {},
+        # ----------------------------------------------------
+        # 3. RAG + Topic
+        # ----------------------------------------------------
+
+        evidence_mode = trigger_state.get("evidence_mode", "")
+
+        if evidence_mode == "retrieve_new_evidence":
+            query = str(query_state.get("query_text", "")).strip()
+
+            if not query:
+                query = self.memory["issue_state"]["current_issue"].strip()
+
+            if not query:
+                raise ValueError("RAG query is empty")
+
+            # ---------------- RAG ----------------
+
+            start = time.perf_counter()
+
+            evidence = batch_zefeng_rag(
+                [history_to_text(dialogue_history)],
+                [query],
+            )[0]
+
+            latency["rag_ms"] = round(
+                (time.perf_counter() - start) * 1000
+            )
+
+            # ---------------- Topic ----------------
+
+            start = time.perf_counter()
+
+            topic_structure = self.generate_topic_structure(
+                query=query,
+                cases=evidence,
+            )
+
+            latency["topic_ms"] = round(
+                (time.perf_counter() - start) * 1000
+            )
+
+        else:
+            evidence = self.memory["evidence_state"]["active_cases"]
+            topic_structure = self.memory["evidence_state"]["topic_structure"]
+
+        self.update_evidence(trigger_state, evidence, topic_structure)
+
+        # ----------------------------------------------------
+        # 4. Policy
+        # ----------------------------------------------------
+
+        if evidence_mode == "no_evidence_needed":
+            policy_evidence = {
+                "active_cases": [],
+                "topic_structure": {},
+            }
+        else:
+            policy_evidence = {
+                "active_cases": self.memory["evidence_state"]["active_cases"],
+                "topic_structure": self.memory["evidence_state"]["topic_structure"],
+            }
+
+        start = time.perf_counter()
+
+        policy_state = self.call_llm(
+            self.policy_prompt,
+            {
+                "issue_state": self.memory["issue_state"],
+                "evidence_state": policy_evidence,
+                "interaction_state": self.memory["interaction_state"],
+                "dialogue_state": self.memory["dialogue_state"],
+                "current": {"u": user},
+            },
         )
 
-        latency = item.get(
-            "latency",
-            {},
+        latency["policy_ms"] = round(
+            (time.perf_counter() - start) * 1000
         )
 
-        total = latency.get(
-            "total",
-            0,
+        self.update_interaction(policy_state)
+
+        # ----------------------------------------------------
+        # 5. Response
+        # ----------------------------------------------------
+
+        selected_evidence = get_selected_evidence(
+            policy_state,
+            self.memory["evidence_state"]["active_cases"],
         )
 
-        items.append(
-            f"""
-            <div class="trace-item">
+        response_dialogue = {
+            "recent_history": self.memory["dialogue_state"]["recent_history"],
+            "current": {"u": user},
+        }
 
-                <div class="trace-head">
-                    <b>Turn {turn}</b>
-                    <span>{float(total):.2f}s</span>
-                </div>
+        response_policy = {
+            "label": policy_state.get("label", ""),
+            "information": policy_state.get("information"),
+        }
 
-                <div class="trace-user">
-                    {user}
-                </div>
+        start = time.perf_counter()
 
-                <div class="trace-flow">
-                    {badge(
-                        query.get("query_mode", "none"),
-                        "blue"
-                    )}
-
-                    <span class="flow-arrow">→</span>
-
-                    {badge(
-                        trigger.get(
-                            "evidence_mode",
-                            ""
-                        ),
-                        "gray"
-                    )}
-
-                    <span class="flow-arrow">→</span>
-
-                    {badge(
-                        policy.get("label", ""),
-                        "green"
-                    )}
-                </div>
-
-            </div>
-            """
+        response_state = self.call_llm(
+            self.response_prompt,
+            {
+                "dialogue_state": response_dialogue,
+                "policy": response_policy,
+                "evidence": selected_evidence,
+            },
         )
 
-    return f"""
-    <div class="trace-surface">
-        {''.join(items)}
-    </div>
-    """
+        latency["response_ms"] = round(
+            (time.perf_counter() - start) * 1000
+        )
 
+        response = (
+            response_state.get("response")
+            or response_state.get("text")
+            or response_state.get("content")
+            or ""
+        )
 
-# ============================================================
-# Prefix
-# ============================================================
+        response = str(response).strip()
 
-def render_prefix_result(
-    success,
-    message,
-):
-    cls = (
-        "prefix-success"
-        if success
-        else "prefix-error"
-    )
+        self.update_dialogue(user, response)
 
-    return f"""
-    <div class="{cls}">
-        {escape(message)}
-    </div>
-    """
+        # ----------------------------------------------------
+        # 6. Latency + External Turn State
+        # ----------------------------------------------------
+
+        latency["total_ms"] = round(
+            (time.perf_counter() - total_start) * 1000
+        )
+
+        self.last_turn_state = {
+            "query": query_state,
+            "trigger": trigger_state,
+            "evidence": {
+                "active_cases": self.memory["evidence_state"]["active_cases"],
+                "topic_structure": self.memory["evidence_state"]["topic_structure"],
+            },
+            "policy": policy_state,
+            "response": response,
+            "latency": latency,
+        }
+
+        # ----------------------------------------------------
+        # Display
+        # ----------------------------------------------------
+
+        self.print_state(
+            query_state=query_state,
+            trigger_state=trigger_state,
+            policy_state=policy_state,
+        )
+
+        return response
+
+    def reset(self):
+        self.memory = init_memory()
+        self.last_turn_state = {}
