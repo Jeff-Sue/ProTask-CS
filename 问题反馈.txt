@@ -1,851 +1,864 @@
-from __future__ import annotations
-
-import sys
-import uuid
-from pathlib import Path
-
-import gradio as gr
+import html
+import json
 
 
 # ============================================================
-# Project Path
+# Utils
 # ============================================================
 
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
+def escape(value):
+    if value is None:
+        return ""
 
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+    return html.escape(
+        str(value)
+    )
 
 
-from Agent.agentv2_3 import MemoryAgent
-from project.styles import CSS
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-)
+def json_text(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    except Exception:
+        return str(value)
+
+
+def badge(text, kind="gray"):
+
+    if text is None:
+        text = ""
+
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{escape(text)}'
+        f'</span>'
+    )
+
+
+# ============================================================
+# Header
+# ============================================================
+
+def render_header():
+
+    return """
+    <div class="app-header">
+
+        <div class="header-left">
+
+            <div class="header-eyebrow">
+                Huawei IT Support · Agent Console
+            </div>
+
+            <div class="header-title">
+                IT 智能客服 Agent
+            </div>
+
+            <div class="header-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+
+        </div>
+
+        <div class="online-status">
+            <span class="online-dot"></span>
+            Agent Online
+        </div>
+
+    </div>
+    """
 
 
 # ============================================================
 # Session
 # ============================================================
 
-def new_session():
-    return {
-        "session_id": "web_" + uuid.uuid4().hex[:10],
+def render_session(session_id, turns):
 
-        "agent": MemoryAgent(
-            mode="single",
-            show_state=False,
-        ),
+    return f"""
+    <div class="session-inline">
 
-        "history": [],
-        "trace": [],
-        "turns": 0,
-        "mode": "user",
-    }
+        <span class="session-status">
+            <span class="running-dot"></span>
+            Running
+        </span>
 
+        <span class="session-divider"></span>
 
-# ============================================================
-# Agent Snapshot
-# ============================================================
+        <span>
+            Session
+            <b>{escape(session_id)}</b>
+        </span>
 
-def get_last_run(agent):
+        <span class="session-divider"></span>
+
+        <span>
+            Turn
+            <b>{turns}</b>
+        </span>
+
+    </div>
     """
-    MemoryAgent.reply() 当前实际暴露的是：
-
-    agent.last_turn_state = {
-        "query": ...,
-        "trigger": ...,
-        "evidence": ...,
-        "policy": ...,
-        "response": ...,
-        "latency": ...
-    }
-
-    UI 内部统一转换成：
-        query_state
-        trigger_state
-        evidence_state
-        policy_state
-        response
-        latency
-    """
-
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
-
-    if turn_state:
-        return {
-            "query_state": turn_state.get(
-                "query",
-                {},
-            ) or {},
-
-            "trigger_state": turn_state.get(
-                "trigger",
-                {},
-            ) or {},
-
-            "evidence_state": turn_state.get(
-                "evidence",
-                {},
-            ) or {},
-
-            "policy_state": turn_state.get(
-                "policy",
-                {},
-            ) or {},
-
-            "response": turn_state.get(
-                "response",
-                "",
-            ),
-
-            "latency": turn_state.get(
-                "latency",
-                {},
-            ) or {},
-        }
-
-    # fallback
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    ) or {}
-
-    return {
-        "query_state": {},
-        "trigger_state": {},
-
-        "evidence_state": memory.get(
-            "evidence_state",
-            {},
-        ) or {},
-
-        "policy_state": (
-            memory
-            .get("interaction_state", {})
-            .get("last_policy", {})
-            or {}
-        ),
-
-        "response": "",
-        "latency": {},
-    }
-
-
-# ============================================================
-# History Parser
-# ============================================================
-
-def parse_prefix(text):
-    history = []
-
-    if not text:
-        return history
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("用户:"):
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("用户："):
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("客服:"):
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-        elif line.startswith("客服："):
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-    return history
-
-
-# ============================================================
-# Render Helpers
-# ============================================================
-
-def session_html(state):
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
-
-
-def developer_chat_html(state):
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
-
-
-def user_chat_html(state):
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
-
-
-def current_decision_html(state):
-    if not state["trace"]:
-        return render_decision(None)
-
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
-def trace_html(state):
-    return render_trace(
-        state["trace"]
-    )
 
 
 # ============================================================
 # Chat
 # ============================================================
 
-def chat(user_input, state):
+def render_empty_chat(user_mode=False):
 
-    if state is None:
-        state = new_session()
+    if user_mode:
 
-    user_input = str(
-        user_input or ""
-    ).strip()
+        title = "您好，有什么可以帮您？"
 
-    if not user_input:
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
+        desc = (
+            "请描述您遇到的 IT 问题，"
+            "我会尽力协助您解决。"
         )
 
-    history = list(
-        state["history"]
-    )
+    else:
 
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
+        title = "开始新的 IT 支持会话"
 
-    try:
-        response = state["agent"].reply(
-            history
+        desc = (
+            "输入用户问题后，Agent 将执行 Query、Retrieval、"
+            "Topic Analysis、Policy 和 Response。"
         )
 
-    except Exception as exc:
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
+    return f"""
+    <div class="chat-surface">
 
-    response = str(
-        response or ""
-    ).strip()
+        <div class="empty-chat">
 
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
+            <div class="empty-symbol">
+                ✦
+            </div>
 
-    state["history"] = history
-    state["turns"] += 1
+            <div class="empty-title">
+                {title}
+            </div>
 
-    snapshot = get_last_run(
-        state["agent"]
-    )
+            <div class="empty-desc">
+                {desc}
+            </div>
 
-    snapshot = dict(snapshot)
+        </div>
 
-    snapshot["turn"] = state["turns"]
-    snapshot["user"] = user_input
-    snapshot["response"] = response
-
-    state["trace"].append(
-        snapshot
-    )
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-    )
+    </div>
+    """
 
 
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        "",
-    )
-
-
-# ============================================================
-# Load Prefix
-# ============================================================
-
-def load_prefix(prefix_text, state):
-
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
-    )
+def render_chat(history, user_mode=False):
 
     if not history:
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
+        return render_empty_chat(
+            user_mode=user_mode
         )
 
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
+    rows = []
 
-    state["history"] = history
-    state["trace"] = []
+    for message in history:
 
-    state["turns"] = sum(
-        1
-        for item in history
-        if item.get("role") == "user"
-    )
+        role = message.get(
+            "role"
+        )
 
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-    )
+        content = escape(
+            message.get(
+                "content",
+                "",
+            )
+        )
+
+        if role == "user":
+
+            rows.append(
+                f"""
+                <div class="message-row user-row">
+
+                    <div class="message-wrap user-wrap">
+
+                        <div class="message-role user-role">
+                            用户
+                        </div>
+
+                        <div class="message-bubble user-message">
+                            {content}
+                        </div>
+
+                    </div>
+
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
+
+                </div>
+                """
+            )
+
+        elif role == "assistant":
+
+            rows.append(
+                f"""
+                <div class="message-row agent-row">
+
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
+
+                    <div class="message-wrap agent-wrap">
+
+                        <div class="message-role">
+                            智能客服
+                        </div>
+
+                        <div class="message-bubble agent-message">
+                            {content}
+                        </div>
+
+                    </div>
+
+                </div>
+                """
+            )
+
+    return f"""
+    <div class="chat-surface">
+
+        <div class="chat-scroll">
+            {''.join(rows)}
+        </div>
+
+    </div>
+    """
 
 
 # ============================================================
-# View Switching
+# Topic Tree
 # ============================================================
 
-def show_user_view():
-    return (
-        gr.update(visible=True),
-        gr.update(visible=False),
+def render_topic_tree(tree):
 
-        gr.update(
-            elem_classes=["mode-active"]
-        ),
+    if not tree:
 
-        gr.update(
-            elem_classes=["mode-inactive"]
-        ),
-    )
+        return """
+        <div class="empty-small">
+            暂无 Topic Structure
+        </div>
+        """
 
+    def walk(node, depth=0):
 
-def show_developer_view():
-    return (
-        gr.update(visible=False),
-        gr.update(visible=True),
+        topic = escape(
+            node.get(
+                "topic",
+                "",
+            )
+        )
 
-        gr.update(
-            elem_classes=["mode-inactive"]
-        ),
+        dimension = escape(
+            node.get(
+                "dimension",
+                "",
+            )
+        )
 
-        gr.update(
-            elem_classes=["mode-active"]
-        ),
-    )
+        case_ids = (
+            node.get("case_ids")
+            or []
+        )
+
+        if isinstance(
+            case_ids,
+            str,
+        ):
+            case_ids = [case_ids]
+
+        case_text = ", ".join(
+            escape(x)
+            for x in case_ids
+        )
+
+        leaf = bool(
+            node.get("leaf")
+        )
+
+        node_class = (
+            "tree-node tree-leaf"
+            if leaf
+            else "tree-node"
+        )
+
+        margin = depth * 20
+
+        dimension_html = ""
+
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
+            )
+
+        case_html = ""
+
+        if case_text:
+            case_html = (
+                f'<span class="tree-case">'
+                f'{case_text}'
+                f'</span>'
+            )
+
+        current = f"""
+        <div
+            class="{node_class}"
+            style="margin-left:{margin}px"
+        >
+
+            <span class="tree-dot"></span>
+
+            <span class="tree-topic">
+                {topic}
+            </span>
+
+            {dimension_html}
+
+            {case_html}
+
+        </div>
+        """
+
+        children = (
+            node.get("children")
+            or []
+        )
+
+        return current + "".join(
+            walk(
+                child,
+                depth + 1,
+            )
+            for child in children
+        )
+
+    return f"""
+    <div class="topic-tree">
+        {walk(tree)}
+    </div>
+    """
 
 
 # ============================================================
-# UI
+# Evidence
 # ============================================================
 
-initial_state = new_session()
+def render_cases(cases):
+
+    if not cases:
+
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
+
+    items = []
+
+    for case in cases:
+
+        if not isinstance(
+            case,
+            dict,
+        ):
+            continue
+
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or ""
+        )
+
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or case.get("content")
+            or ""
+        )
+
+        title = str(title)
+
+        if len(title) > 180:
+            title = (
+                title[:180]
+                + "..."
+            )
+
+        items.append(
+            f"""
+            <div class="case-item">
+
+                <div class="case-id">
+                    {escape(case_id)}
+                </div>
+
+                <div class="case-title">
+                    {escape(title)}
+                </div>
+
+            </div>
+            """
+        )
+
+    if not items:
+
+        return """
+        <div class="empty-small">
+            当前没有可显示的 Active Cases
+        </div>
+        """
+
+    return "".join(items)
 
 
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
+# ============================================================
+# Latency
+# ============================================================
 
-    session_state = gr.State(
-        initial_state
+def render_latency(latency):
+
+    latency = latency or {}
+
+    def ms_value(name):
+        value = latency.get(
+            name,
+            0,
+        )
+
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    query_ms = ms_value("query_ms")
+    trigger_ms = ms_value("trigger_ms")
+    rag_ms = ms_value("rag_ms")
+    topic_ms = ms_value("topic_ms")
+    policy_ms = ms_value("policy_ms")
+    response_ms = ms_value("response_ms")
+    total_ms = ms_value("total_ms")
+
+    def seconds(ms):
+        return ms / 1000.0
+
+    return f"""
+    <div class="latency-total">
+        {seconds(total_ms):.2f}
+        <span>s</span>
+    </div>
+
+    <div class="latency-grid">
+
+        <div>
+            <span>Query</span>
+            <b>{seconds(query_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Trigger</span>
+            <b>{seconds(trigger_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>RAG</span>
+            <b>{seconds(rag_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Topic</span>
+            <b>{seconds(topic_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Policy</span>
+            <b>{seconds(policy_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Response</span>
+            <b>{seconds(response_ms):.2f}s</b>
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Decision
+# ============================================================
+
+def render_decision(snapshot):
+
+    if not snapshot:
+
+        return """
+        <div class="decision-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-symbol">
+                    ◇
+                </div>
+
+                <div class="decision-empty-title">
+                    Waiting for interaction
+                </div>
+
+                <div class="decision-empty-desc">
+                    当前轮执行后，Query、Trigger、Evidence、
+                    Topic、Policy 和 Latency 将显示在这里。
+                </div>
+
+            </div>
+
+        </div>
+        """
+
+    query_state = (
+        snapshot.get("query_state")
+        or {}
     )
 
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        render_header(),
-        container=False,
+    trigger_state = (
+        snapshot.get("trigger_state")
+        or {}
     )
 
-    # ========================================================
-    # Mode Switch
-    # ========================================================
+    policy_state = (
+        snapshot.get("policy_state")
+        or {}
+    )
 
-    with gr.Row(
-        elem_classes=["mode-switch"]
+    evidence_state = (
+        snapshot.get("evidence_state")
+        or {}
+    )
+
+    active_cases = (
+        evidence_state.get(
+            "active_cases",
+            [],
+        )
+        or []
+    )
+
+    topic_structure = (
+        evidence_state.get(
+            "topic_structure",
+            {},
+        )
+        or {}
+    )
+
+    latency = (
+        snapshot.get("latency")
+        or {}
+    )
+
+    query_mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query_state.get(
+        "query_text",
+        "",
+    )
+
+    trigger = trigger_state.get(
+        "trigger",
+        "",
+    )
+
+    evidence_mode = trigger_state.get(
+        "evidence_mode",
+        "",
+    )
+
+    policy = policy_state.get(
+        "label",
+        "",
+    )
+
+    information = policy_state.get(
+        "information"
+    )
+
+    return f"""
+    <div class="decision-surface">
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Query
+            </div>
+
+            <div class="decision-line">
+                {badge(query_mode, "blue")}
+            </div>
+
+            <div class="decision-text">
+                {escape(query_text) or "None"}
+            </div>
+
+        </div>
+
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Trigger
+            </div>
+
+            <div class="decision-row">
+                <span>Trigger</span>
+                {badge(trigger, "green")}
+            </div>
+
+            <div class="decision-row">
+                <span>Evidence Mode</span>
+                {badge(evidence_mode, "gray")}
+            </div>
+
+        </div>
+
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Evidence
+            </div>
+
+            <div class="case-list">
+                {render_cases(active_cases)}
+            </div>
+
+        </div>
+
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Topic Structure
+            </div>
+
+            {render_topic_tree(topic_structure)}
+
+        </div>
+
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Policy
+            </div>
+
+            <div class="decision-line">
+                {badge(policy, "blue")}
+            </div>
+
+            <div class="sub-label">
+                Information
+            </div>
+
+            <pre class="json-view">{escape(json_text(information))}</pre>
+
+        </div>
+
+
+        <div class="decision-section latency-section">
+
+            <div class="section-heading">
+                Latency
+            </div>
+
+            {render_latency(latency)}
+
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(trace):
+
+    if not trace:
+
+        return """
+        <div class="trace-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-title">
+                    暂无运行轨迹
+                </div>
+
+                <div class="decision-empty-desc">
+                    每完成一轮交互，执行轨迹会显示在这里。
+                </div>
+
+            </div>
+
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
     ):
 
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=["mode-active"],
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
         )
 
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=["mode-inactive"],
+        user = escape(
+            item.get(
+                "user",
+                "",
+            )
         )
 
-    # ========================================================
-    # USER VIEW
-    # ========================================================
+        query = (
+            item.get("query_state")
+            or {}
+        )
 
-    with gr.Column(
-        visible=True,
-        elem_classes=["user-workspace"],
-    ) as user_view:
+        trigger = (
+            item.get("trigger_state")
+            or {}
+        )
 
-        gr.HTML(
-            """
-            <div class="workspace-heading">
-                <div class="column-title">
-                    IT 智能客服
+        policy = (
+            item.get("policy_state")
+            or {}
+        )
+
+        latency = (
+            item.get("latency")
+            or {}
+        )
+
+        try:
+            total = (
+                float(
+                    latency.get(
+                        "total_ms",
+                        0,
+                    )
+                )
+                / 1000.0
+            )
+        except Exception:
+            total = 0.0
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+
+                    <b>
+                        Turn {turn}
+                    </b>
+
+                    <span>
+                        {total:.2f}s
+                    </span>
+
                 </div>
 
-                <div class="column-subtitle">
-                    Huawei IT Support
+                <div class="trace-user">
+                    {user}
                 </div>
+
+                <div class="trace-flow">
+
+                    {badge(
+                        query.get(
+                            "query_mode",
+                            "none",
+                        ),
+                        "blue"
+                    )}
+
+                    <span class="flow-arrow">
+                        →
+                    </span>
+
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            "",
+                        ),
+                        "gray"
+                    )}
+
+                    <span class="flow-arrow">
+                        →
+                    </span>
+
+                    {badge(
+                        policy.get(
+                            "label",
+                            "",
+                        ),
+                        "green"
+                    )}
+
+                </div>
+
             </div>
-            """,
-            container=False,
+            """
         )
 
-        user_chat = gr.HTML(
-            user_chat_html(
-                initial_state
-            ),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-html",
-            ],
-        )
-
-        with gr.Row(
-            elem_classes=["chat-input-row"]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder="请输入您的 IT 问题...",
-                show_label=False,
-                lines=2,
-                max_lines=4,
-                elem_classes=["chat-input"],
-                scale=12,
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=["send-button"],
-                scale=1,
-                min_width=110,
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=["developer-workspace"],
-        equal_height=True,
-    ) as developer_view:
-
-        # ====================================================
-        # LEFT
-        # ====================================================
-
-        with gr.Column(
-            scale=56,
-            min_width=0,
-            elem_classes=["chat-column"],
-        ):
-
-            # -----------------------------------------------
-            # Conversation Header
-            # -----------------------------------------------
-
-            with gr.Row(
-                elem_classes=["panel-heading-row"]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-                        <div class="column-title">
-                            Conversation
-                        </div>
-
-                        <div class="column-subtitle">
-                            Current dialogue
-                        </div>
-                    </div>
-                    """,
-                    container=False,
-                )
-
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                    elem_classes=["session-html"],
-                )
-
-            # -----------------------------------------------
-            # Toolbar
-            # -----------------------------------------------
-
-            with gr.Row(
-                elem_classes=["chat-toolbar"]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                    elem_classes=["new-chat-button"],
-                )
-
-            # -----------------------------------------------
-            # Conversation
-            # -----------------------------------------------
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html",
-                    "developer-chat-html",
-                ],
-            )
-
-            # -----------------------------------------------
-            # Input
-            # -----------------------------------------------
-
-            with gr.Row(
-                elem_classes=["chat-input-row"]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder="请输入 IT 问题...",
-                    show_label=False,
-                    lines=2,
-                    max_lines=4,
-                    elem_classes=["chat-input"],
-                    scale=12,
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=["send-button"],
-                    scale=1,
-                    min_width=105,
-                )
-
-            # -----------------------------------------------
-            # History
-            # -----------------------------------------------
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=["history-loader"],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
-                    "",
-                    container=False,
-                    elem_classes=["prefix-area"],
-                )
-
-        # ====================================================
-        # RIGHT
-        # ====================================================
-
-        with gr.Column(
-            scale=44,
-            min_width=0,
-            elem_classes=["decision-column"],
-        ):
-
-            gr.HTML(
-                """
-                <div class="workspace-heading">
-                    <div class="column-title">
-                        Agent Decision
-                    </div>
-
-                    <div class="column-subtitle">
-                        Internal execution state
-                    </div>
-                </div>
-                """,
-                container=False,
-            )
-
-            with gr.Tabs(
-                elem_classes=["decision-tabs"]
-            ):
-
-                with gr.Tab(
-                    "当前决策"
-                ):
-
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=["decision-html"],
-                    )
-
-                with gr.Tab(
-                    "运行轨迹"
-                ):
-
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=["trace-html"],
-                    )
-
-    # ========================================================
-    # Events
-    # ========================================================
-
-    chat_outputs = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-    ]
-
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-        api_name="chat",
-    )
-
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
-
-    developer_chat_outputs = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
+    """
 
 
 # ============================================================
-# Launch
+# Prefix
 # ============================================================
 
-if __name__ == "__main__":
+def render_prefix_result(
+    success,
+    message,
+):
 
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
     )
+
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
