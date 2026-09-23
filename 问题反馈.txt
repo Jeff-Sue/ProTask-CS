@@ -1,600 +1,642 @@
+import html
+import json
+
+
 # ============================================================
-# Web / Interactive Agent
+# Utils
 # ============================================================
 
-class MemoryAgent:
+def escape(value):
+    if value is None:
+        return ""
+    return html.escape(str(value))
+
+
+def json_text(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+        )
+    except Exception:
+        return str(value)
+
+
+def badge(text, kind="gray"):
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{escape(text)}'
+        f'</span>'
+    )
+
+
+# ============================================================
+# Header
+# ============================================================
+
+def render_header():
+    return """
+    <div class="app-header">
+        <div>
+            <div class="header-eyebrow">
+                Huawei IT Support · Agent Console
+            </div>
+
+            <div class="header-title">
+                IT 智能客服 Agent
+            </div>
+
+            <div class="header-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+        </div>
+
+        <div class="online-status">
+            <span class="online-dot"></span>
+            Agent Online
+        </div>
+    </div>
     """
-    Stateful wrapper for Web / Gradio interaction.
 
-    Important:
-    - 不修改原来的 batch pipeline
-    - 不修改原来的 memory / query / trigger / RAG / topic / policy / response 逻辑
-    - 每次 reply() 只执行一个用户 turn
+
+# ============================================================
+# Session
+# ============================================================
+
+def render_session(session_id, turns):
+    return f"""
+    <div class="session-inline">
+        <span class="running-dot"></span>
+        <span>Running</span>
+
+        <span class="session-divider">·</span>
+
+        <span>
+            Session
+            <b>{escape(session_id)}</b>
+        </span>
+
+        <span class="session-divider">·</span>
+
+        <span>
+            Turn
+            <b>{turns}</b>
+        </span>
+    </div>
     """
 
-    def __init__(self):
-        # --------------------------------------------------------
-        # Prompts
-        # --------------------------------------------------------
-        self.query_prompt = prompt_read(
-            Path("prompts/query.prompt")
+
+# ============================================================
+# Chat
+# ============================================================
+
+def render_empty_chat(user_mode=False):
+    if user_mode:
+        title = "您好，有什么可以帮您？"
+        desc = "请描述您遇到的 IT 问题，我会尽力协助您解决。"
+    else:
+        title = "开始新的 IT 支持会话"
+        desc = (
+            "输入用户问题后，Agent 将执行 Query、Retrieval、"
+            "Topic Analysis、Policy 和 Response。"
         )
 
-        self.trigger_prompt = prompt_read(
-            Path("prompts/trigger.prompt")
-        )
-
-        self.topic_prompt = prompt_read(
-            Path("prompts/topic.prompt")
-        )
-
-        # 与 run_memory_agent 保持一致
-        self.policy_prompt = prompt_read(
-            Path("prompts/policy_v2.prompt")
-        )
-
-        self.response_prompt = prompt_read(
-            Path("prompts/response.prompt")
-        )
-
-        # --------------------------------------------------------
-        # Runtime State
-        # --------------------------------------------------------
-        self.reset()
+    return f"""
+    <div class="chat-surface">
+        <div class="empty-chat">
+            <div class="empty-symbol">✦</div>
+            <div class="empty-title">{title}</div>
+            <div class="empty-desc">{desc}</div>
+        </div>
+    </div>
+    """
 
 
-    # ========================================================
-    # Reset
-    # ========================================================
+def render_chat(history, user_mode=False):
+    if not history:
+        return render_empty_chat(user_mode=user_mode)
 
-    def reset(self):
-        self.memory = init_memory()
+    rows = []
 
-        # 与 batch 中 dialogue_history 的语义保持一致
-        self.dialogue_history = ""
+    for message in history:
+        role = message.get("role")
+        content = escape(message.get("content", ""))
 
-        # 网页显示用
-        self.turns = []
+        if role == "user":
+            rows.append(
+                f"""
+                <div class="message-row user-row">
+                    <div class="message-wrap user-wrap">
+                        <div class="message-role">用户</div>
+                        <div class="message-bubble user-message">
+                            {content}
+                        </div>
+                    </div>
 
-        # 当前 turn
-        self.turn_id = 0
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
+                </div>
+                """
+            )
 
-        # 当前轮中间结果
-        self.last_query = {}
-        self.last_trigger = {}
-        self.last_evidence = []
-        self.last_topic_structure = {}
-        self.last_policy = {}
-        self.last_response = {}
+        elif role == "assistant":
+            rows.append(
+                f"""
+                <div class="message-row agent-row">
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
 
-        # 当前轮 latency
-        self.last_latency = {}
+                    <div class="message-wrap">
+                        <div class="message-role">智能客服</div>
+                        <div class="message-bubble agent-message">
+                            {content}
+                        </div>
+                    </div>
+                </div>
+                """
+            )
 
-        return self.memory
-
-
-    # ========================================================
-    # Load Existing Dialogue
-    # ========================================================
-
-    def load_history(self, history):
-        """
-        给网页端“加载已有对话”使用。
-
-        history 支持：
-
-        [
-            {"user": "...", "assistant": "..."},
-            ...
-        ]
-
-        注意：
-        这里主要恢复 dialogue history。
-        不重新推断历史 Query / Evidence / Policy 状态。
-        """
-
-        self.reset()
-
-        if not history:
-            return self.memory
-
-        for item in history:
-            user = str(item.get("user", "")).strip()
-            assistant = str(item.get("assistant", "")).strip()
-
-            if user:
-                self.dialogue_history += (
-                    f"用户: {user}\n"
-                )
-
-            if assistant:
-                self.dialogue_history += (
-                    f"客服: {assistant}\n"
-                )
-
-            if user or assistant:
-                self.memory = update_dialogue_memory(
-                    self.memory,
-                    user,
-                    assistant
-                )
-
-                self.turns.append({
-                    "turn_id": self.turn_id,
-                    "user": user,
-                    "response": assistant
-                })
-
-                self.turn_id += 1
-
-        return self.memory
+    return f"""
+    <div class="chat-surface">
+        <div class="chat-scroll">
+            {''.join(rows)}
+        </div>
+    </div>
+    """
 
 
-    # ========================================================
-    # One Interactive Turn
-    # ========================================================
+# ============================================================
+# Topic Tree
+# ============================================================
 
-    def reply(self, user: str):
-        """
-        执行一个完整用户 turn：
-
-        Query
-          ↓
-        Trigger
-          ↓
-        RAG
-          ↓
-        Topic Structure
-          ↓
-        Policy
-          ↓
-        Response
-          ↓
-        Memory Update
-
-        与原始 run_memory_agent / batch pipeline 保持相同逻辑。
+def render_topic_tree(tree):
+    if not tree:
+        return """
+        <div class="empty-small">
+            暂无 Topic Structure
+        </div>
         """
 
-        user = "" if user is None else str(user).strip()
+    def walk(node, depth=0):
+        topic = escape(node.get("topic", ""))
+        dimension = escape(node.get("dimension", ""))
 
-        if not user:
-            raise ValueError("User input is empty.")
+        case_ids = node.get("case_ids") or []
 
-        # ----------------------------------------------------
-        # Total Timer
-        # ----------------------------------------------------
+        if isinstance(case_ids, str):
+            case_ids = [case_ids]
 
-        total_start = time.perf_counter()
-
-        latency = {
-            "query": 0.0,
-            "trigger": 0.0,
-            "rag": 0.0,
-            "topic": 0.0,
-            "policy": 0.0,
-            "response": 0.0,
-            "total": 0.0
-        }
-
-        # ----------------------------------------------------
-        # Add Current User to Dialogue History
-        # ----------------------------------------------------
-
-        self.dialogue_history += (
-            f"用户: {user}\n"
+        case_text = ", ".join(
+            escape(x) for x in case_ids
         )
 
-        # ====================================================
-        # 1. Query
-        # ====================================================
+        leaf = bool(node.get("leaf"))
 
-        stage_start = time.perf_counter()
-
-        query_input = build_query_input(
-            self.memory,
-            user
+        node_class = (
+            "tree-node tree-leaf"
+            if leaf
+            else "tree-node"
         )
 
-        query_messages = build_messages(
-            self.query_prompt,
-            query_input
-        )
+        margin = depth * 18
 
-        query_output = parallel_inference(
-            [query_messages]
-        )[0]
+        dimension_html = ""
 
-        query_state = parse_llm_output(
-            query_output
-        )
-
-        self.memory = update_issue_memory(
-            self.memory,
-            query_state
-        )
-
-        latency["query"] = (
-            time.perf_counter() - stage_start
-        )
-
-        # ====================================================
-        # 2. Trigger
-        # ====================================================
-
-        stage_start = time.perf_counter()
-
-        trigger_input = build_trigger_input(
-            self.memory
-        )
-
-        trigger_messages = build_messages(
-            self.trigger_prompt,
-            trigger_input
-        )
-
-        trigger_output = parallel_inference(
-            [trigger_messages]
-        )[0]
-
-        trigger_state = parse_llm_output(
-            trigger_output
-        )
-
-        latency["trigger"] = (
-            time.perf_counter() - stage_start
-        )
-
-        # ====================================================
-        # 3. RAG
-        # ====================================================
-
-        evidence = (
-            self.memory["evidence_state"]
-            ["active_cases"]
-        )
-
-        topic_structure = copy.deepcopy(
-            self.memory["evidence_state"]
-            ["topic_structure"]
-        )
-
-        if (
-            trigger_state.get("evidence_mode")
-            == "retrieve_new_evidence"
-        ):
-            query = (
-                self.memory["issue_state"]
-                ["current_issue"]
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
             )
 
-            debug_x = {
-                "dialog_id": "web",
-                "user": user,
-                "query_raw": query_output,
-                "query": query_state,
-                "trigger": trigger_state,
-                "dialogue_history":
-                    self.dialogue_history
-            }
+        case_html = ""
 
-            query = validate_rag_query(
-                query,
-                debug_x,
-                self.memory,
-                self.turn_id
+        if case_text:
+            case_html = (
+                f'<span class="tree-case">'
+                f'{case_text}'
+                f'</span>'
             )
 
-            # ----------------------------------------------
-            # RAG timer
-            # ----------------------------------------------
-
-            stage_start = time.perf_counter()
-
-            evidence = batch_zefeng_rag(
-                [self.dialogue_history],
-                [query]
-            )[0]
-
-            latency["rag"] = (
-                time.perf_counter() - stage_start
-            )
-
-            # =================================================
-            # 3.5 Topic Structure
-            # =================================================
-
-            stage_start = time.perf_counter()
-
-            structures = (
-                generate_topic_structures_batch(
-                    [
-                        {
-                            "query": query,
-                            "cases": evidence
-                        }
-                    ],
-                    self.topic_prompt
-                )
-            )
-
-            topic_structure = structures[0]
-
-            latency["topic"] = (
-                time.perf_counter() - stage_start
-            )
-
-        # ====================================================
-        # Update Evidence Memory
-        # ====================================================
-
-        self.memory = update_evidence_memory(
-            self.memory,
-            trigger_state,
-            evidence,
-            topic_structure
-        )
-
-        # ====================================================
-        # 4. Policy
-        # ====================================================
-
-        stage_start = time.perf_counter()
-
-        policy_input = build_policy_input(
-            self.memory,
-            user
-        )
-
-        policy_messages = build_messages(
-            self.policy_prompt,
-            policy_input
-        )
-
-        policy_output = parallel_inference(
-            [policy_messages]
-        )[0]
-
-        policy_state = parse_llm_output(
-            policy_output
-        )
-
-        self.memory = update_interaction_memory(
-            self.memory,
-            policy_state
-        )
-
-        latency["policy"] = (
-            time.perf_counter() - stage_start
-        )
-
-        # ====================================================
-        # 5. Response
-        # ====================================================
-
-        stage_start = time.perf_counter()
-
-        response_input = build_response_input(
-            self.memory,
-            user
-        )
-
-        response_messages = build_messages(
-            self.response_prompt,
-            response_input
-        )
-
-        response_output = parallel_inference(
-            [response_messages]
-        )[0]
-
-        response = parse_llm_output(
-            response_output
-        )
-
-        latency["response"] = (
-            time.perf_counter() - stage_start
-        )
-
-        # ====================================================
-        # Response Text
-        # ====================================================
-
-        # 保留原始 response dict
-        # 同时提取网页需要显示的文字
-
-        if isinstance(response, dict):
-            response_text = str(
-                response.get("response", "")
-            ).strip()
-
-            # 防止 response.prompt 返回的不是
-            # {"response": "..."} 格式
-            if not response_text:
-                response_text = str(
-                    response.get("content", "")
-                ).strip()
-
-            if not response_text:
-                response_text = json.dumps(
-                    response,
-                    ensure_ascii=False
-                )
-        else:
-            response_text = str(response).strip()
-
-        # ====================================================
-        # Dialogue Memory
-        # ====================================================
-
-        # 网页端没有 golden response，
-        # 因此这里写入模型实际生成的 response。
-        #
-        # 这是交互模式和离线 evaluation 唯一必然的区别：
-        # 离线使用 golden_response；
-        # 在线只能使用真实 Agent response。
-
-        self.memory = update_dialogue_memory(
-            self.memory,
-            user,
-            response_text
-        )
-
-        self.dialogue_history += (
-            f"客服: {response_text}\n"
-        )
-
-        # ====================================================
-        # Total Latency
-        # ====================================================
-
-        latency["total"] = (
-            time.perf_counter() - total_start
-        )
-
-        # ====================================================
-        # Save Current Turn State
-        # ====================================================
-
-        self.last_query = copy.deepcopy(
-            query_state
-        )
-
-        self.last_trigger = copy.deepcopy(
-            trigger_state
-        )
-
-        self.last_evidence = copy.deepcopy(
-            evidence
-        )
-
-        self.last_topic_structure = copy.deepcopy(
-            self.memory["evidence_state"]
-            ["topic_structure"]
-        )
-
-        self.last_policy = copy.deepcopy(
-            policy_state
-        )
-
-        self.last_response = copy.deepcopy(
-            response
-        )
-
-        # 这里就是之前 UI latency={} 的关键
-        self.last_latency = copy.deepcopy(
-            latency
-        )
-
-        # ====================================================
-        # Save Turn
-        # ====================================================
-
-        turn_result = {
-            "turn_id": self.turn_id,
-            "user": user,
-
-            "query": copy.deepcopy(
-                query_state
-            ),
-
-            "trigger": copy.deepcopy(
-                trigger_state
-            ),
-
-            "evidence": copy.deepcopy(
-                evidence
-            ),
-
-            "topic_structure": copy.deepcopy(
-                self.last_topic_structure
-            ),
-
-            "policy": copy.deepcopy(
-                policy_state
-            ),
-
-            "response": copy.deepcopy(
-                response
-            ),
-
-            "latency": copy.deepcopy(
-                latency
-            )
-        }
-
-        self.turns.append(
-            turn_result
-        )
-
-        self.turn_id += 1
-
-        # ====================================================
-        # Debug
-        # ====================================================
-
-        print(
-            "[MemoryAgent] latency =",
-            json.dumps(
-                self.last_latency,
-                ensure_ascii=False,
-                indent=2
-            )
-        )
-
-        # ====================================================
-        # Return
-        # ====================================================
-
-        return response_text
-
-
-    # ========================================================
-    # State for Web UI
-    # ========================================================
-
-    def get_current_state(self):
-        """
-        web_gradio.py 统一从这里拿数据，
-        避免 UI 到处 getattr。
+        current = f"""
+        <div
+            class="{node_class}"
+            style="margin-left:{margin}px"
+        >
+            <span class="tree-dot"></span>
+            <span class="tree-topic">{topic}</span>
+            {dimension_html}
+            {case_html}
+        </div>
         """
 
-        return {
-            "query": copy.deepcopy(
-                self.last_query
-            ),
+        children = node.get("children") or []
 
-            "trigger": copy.deepcopy(
-                self.last_trigger
-            ),
+        return current + "".join(
+            walk(child, depth + 1)
+            for child in children
+        )
 
-            "evidence": copy.deepcopy(
-                self.last_evidence
-            ),
+    return f"""
+    <div class="topic-tree">
+        {walk(tree)}
+    </div>
+    """
 
-            "topic_structure": copy.deepcopy(
-                self.last_topic_structure
-            ),
 
-            "policy": copy.deepcopy(
-                self.last_policy
-            ),
+# ============================================================
+# Evidence
+# ============================================================
 
-            "response": copy.deepcopy(
-                self.last_response
-            ),
+def render_cases(cases):
+    if not cases:
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
 
-            "latency": copy.deepcopy(
-                self.last_latency
-            ),
+    items = []
 
-            "memory": copy.deepcopy(
-                self.memory
-            ),
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
 
-            "turns": copy.deepcopy(
-                self.turns
-            ),
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or ""
+        )
 
-            "dialogue_history":
-                self.dialogue_history
-        }
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or ""
+        )
+
+        title = str(title)
+
+        if len(title) > 110:
+            title = title[:110] + "..."
+
+        items.append(
+            f"""
+            <div class="case-item">
+                <div class="case-id">
+                    {escape(case_id)}
+                </div>
+
+                <div class="case-title">
+                    {escape(title)}
+                </div>
+            </div>
+            """
+        )
+
+    return "".join(items)
+
+
+# ============================================================
+# Latency
+# ============================================================
+
+def render_latency(latency):
+    latency = latency or {}
+
+    print("latency: ", latency)
+    total = latency.get("total_ms", 0)
+
+    def get_time(*names):
+        for name in names:
+            if name in latency:
+                return latency[name]
+        return 0
+
+    query = get_time("query")
+    trigger = get_time("trigger")
+    rag = get_time("rag", "retrieval")
+    topic = get_time("topic", "topic_structure")
+    policy = get_time("policy")
+    response = get_time("response")
+
+    return f"""
+    <div class="latency-total">
+        {float(total):.2f}
+        <span>s</span>
+    </div>
+
+    <div class="latency-grid">
+        <div>
+            <span>Query</span>
+            <b>{float(query):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Trigger</span>
+            <b>{float(trigger):.2f}s</b>
+        </div>
+
+        <div>
+            <span>RAG</span>
+            <b>{float(rag):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Topic</span>
+            <b>{float(topic):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Policy</span>
+            <b>{float(policy):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Response</span>
+            <b>{float(response):.2f}s</b>
+        </div>
+    </div>
+    """
+
+
+# ============================================================
+# Decision
+# ============================================================
+
+def render_decision(snapshot):
+    if not snapshot:
+        return """
+        <div class="decision-surface">
+            <div class="decision-empty">
+                <div class="decision-empty-title">
+                    Waiting for interaction
+                </div>
+
+                <div class="decision-empty-desc">
+                    当前轮执行后，Query、Trigger、Evidence、
+                    Topic、Policy 和 Latency 将显示在这里。
+                </div>
+            </div>
+        </div>
+        """
+
+    query_state = snapshot.get("query_state", {})
+    trigger_state = snapshot.get("trigger_state", {})
+    policy_state = snapshot.get("policy_state", {})
+
+    evidence_state = snapshot.get(
+        "evidence_state",
+        {},
+    )
+
+    active_cases = evidence_state.get(
+        "active_cases",
+        [],
+    )
+
+    topic_structure = evidence_state.get(
+        "topic_structure",
+        {},
+    )
+
+    latency = snapshot.get("latency", {})
+
+    query_mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query_state.get(
+        "query_text",
+        "",
+    )
+
+    trigger = trigger_state.get(
+        "trigger",
+        "",
+    )
+
+    evidence_mode = trigger_state.get(
+        "evidence_mode",
+        "",
+    )
+
+    policy = policy_state.get(
+        "label",
+        "",
+    )
+
+    information = policy_state.get(
+        "information",
+    )
+
+    return f"""
+    <div class="decision-surface">
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Query
+            </div>
+
+            <div class="decision-line">
+                {badge(query_mode, "blue")}
+            </div>
+
+            <div class="decision-text">
+                {escape(query_text) or "None"}
+            </div>
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Trigger
+            </div>
+
+            <div class="decision-row">
+                <span>Trigger</span>
+                {badge(trigger, "green")}
+            </div>
+
+            <div class="decision-row">
+                <span>Evidence Mode</span>
+                {badge(evidence_mode, "gray")}
+            </div>
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Evidence
+            </div>
+
+            {render_cases(active_cases)}
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Topic Structure
+            </div>
+
+            {render_topic_tree(topic_structure)}
+        </div>
+
+
+        <div class="decision-section">
+            <div class="section-heading">
+                Policy
+            </div>
+
+            <div class="decision-line">
+                {badge(policy, "blue")}
+            </div>
+
+            <div class="sub-label">
+                Information
+            </div>
+
+            <pre class="json-view">{escape(json_text(information))}</pre>
+        </div>
+
+
+        <div class="decision-section latency-section">
+            <div class="section-heading">
+                Latency
+            </div>
+
+            {render_latency(latency)}
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(trace):
+    if not trace:
+        return """
+        <div class="trace-surface">
+            <div class="decision-empty">
+                暂无运行轨迹
+            </div>
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
+    ):
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
+        )
+
+        user = escape(
+            item.get("user", "")
+        )
+
+        query = item.get(
+            "query_state",
+            {},
+        )
+
+        trigger = item.get(
+            "trigger_state",
+            {},
+        )
+
+        policy = item.get(
+            "policy_state",
+            {},
+        )
+
+        latency = item.get(
+            "latency",
+            {},
+        )
+
+        total = latency.get(
+            "total",
+            0,
+        )
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+                    <b>Turn {turn}</b>
+                    <span>{float(total):.2f}s</span>
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+                    {badge(
+                        query.get("query_mode", "none"),
+                        "blue"
+                    )}
+
+                    <span class="flow-arrow">→</span>
+
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            ""
+                        ),
+                        "gray"
+                    )}
+
+                    <span class="flow-arrow">→</span>
+
+                    {badge(
+                        policy.get("label", ""),
+                        "green"
+                    )}
+                </div>
+
+            </div>
+            """
+        )
+
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
+    """
+
+
+# ============================================================
+# Prefix
+# ============================================================
+
+def render_prefix_result(
+    success,
+    message,
+):
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
+    )
+
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
