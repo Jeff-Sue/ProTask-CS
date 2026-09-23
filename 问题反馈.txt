@@ -1,626 +1,1261 @@
-def render_cases(cases):
+import argparse
+import json
+import re
+from collections import Counter
+from pathlib import Path
 
-    if not cases:
-        return """
-        <div class="empty-small">
-            当前没有 Active Cases
-        </div>
-        """
 
-    items = []
+# ============================================================
+# Config
+# ============================================================
 
-    for index, case in enumerate(cases):
+KNOWLEDGE_POLICY = {"ExplainedResponse", "CaseRecommendation"}
 
-        if not isinstance(case, dict):
-            continue
 
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
-            or f"Case {index + 1}"
+# ============================================================
+# Utils
+# ============================================================
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
         )
 
-        # ----------------------------------------------------
-        # 尝试寻找适合作为卡片摘要的字段
-        # ----------------------------------------------------
 
-        title = (
-            case.get("title")
-            or case.get("name")
-            or case.get("question")
-            or case.get("text")
-            or case.get("content")
-            or case.get("problem")
-            or ""
+def extract_case_ids(text):
+    if not text:
+        return []
+    return re.findall(r"KT\d+", text)
+
+
+def normalize_case_ids(value):
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        value = [value]
+
+    if not isinstance(value, list):
+        return []
+
+    return list(
+        dict.fromkeys(
+            str(x).strip()
+            for x in value
+            if str(x).strip()
+        )
+    )
+
+
+def get_policy_label(policy):
+    if not isinstance(policy, dict):
+        return ""
+
+    return str(
+        policy.get("label", "")
+    ).strip()
+
+
+def get_policy_information(policy):
+    if not isinstance(policy, dict):
+        return {}
+
+    information = policy.get("information")
+
+    return (
+        information
+        if isinstance(information, dict)
+        else {}
+    )
+
+
+def get_pred_cases(policy):
+    if get_policy_label(policy) not in KNOWLEDGE_POLICY:
+        return []
+
+    information = get_policy_information(policy)
+
+    return normalize_case_ids(
+        information.get("case_id")
+        or information.get("case_ids")
+    )
+
+
+def get_retrieved_case_ids(turn):
+    return [
+        str(case.get("case_id", "")).strip()
+        for case in turn.get("evidence", [])
+        if (
+            isinstance(case, dict)
+            and str(case.get("case_id", "")).strip()
+        )
+    ]
+
+
+def get_case_rank(case_id, retrieved):
+    """
+    1-based rank.
+    None means the case is not retrieved.
+    """
+    try:
+        return retrieved.index(case_id) + 1
+    except ValueError:
+        return None
+
+
+def rate(values):
+    return (
+        sum(values) / len(values)
+        if values
+        else 0
+    )
+
+
+def counter_to_dict(counter):
+    """
+    按错误次数从高到低保存。
+    """
+    return {
+        key: value
+        for key, value in counter.most_common()
+    }
+
+
+def make_turn_record(
+    dialog_id,
+    turn,
+    golden_cases=None,
+    pred_cases=None,
+    retrieved_cases=None,
+):
+    """
+    保存一个足够完整的错误样本。
+
+    这里故意保留：
+    - user
+    - golden response
+    - query
+    - trigger
+    - retrieval
+    - topic structure
+    - policy
+    - response
+
+    方便之后不重新打开原始结果文件，
+    直接从 details.json 分析错误。
+    """
+
+    if golden_cases is None:
+        golden_cases = extract_case_ids(
+            turn.get("golden_response", "")
         )
 
-        title = str(title).strip()
+    if pred_cases is None:
+        pred_cases = get_pred_cases(
+            turn.get("policy", {})
+        )
 
-        # 卡片外面只显示摘要
-        preview = title
+    if retrieved_cases is None:
+        retrieved_cases = get_retrieved_case_ids(turn)
 
-        if len(preview) > 100:
-            preview = preview[:100] + "..."
+    golden_ranks = {
+        case_id: get_case_rank(
+            case_id,
+            retrieved_cases
+        )
+        for case_id in golden_cases
+    }
 
-        # ----------------------------------------------------
-        # 完整内容
-        # ----------------------------------------------------
+    return {
+        "dialog_id": dialog_id,
+        "turn_id": turn.get("turn_id"),
 
-        detail_rows = []
+        "user": turn.get("user", ""),
 
-        for key, value in case.items():
+        "golden_response": turn.get(
+            "golden_response",
+            ""
+        ),
 
-            if value is None:
-                continue
+        "golden_cases": golden_cases,
 
-            if isinstance(value, (dict, list)):
-                value_text = json_text(value)
-            else:
-                value_text = str(value)
+        "predicted_cases": pred_cases,
 
-            if not value_text.strip():
-                continue
+        "retrieved_cases": retrieved_cases,
 
-            detail_rows.append(
-                f"""
-                <div class="case-detail-row">
+        "golden_ranks": golden_ranks,
 
-                    <div class="case-detail-key">
-                        {escape(key)}
-                    </div>
+        "query": turn.get(
+            "query",
+            {}
+        ),
 
-                    <div class="case-detail-value">
-                        {escape(value_text)}
-                    </div>
+        "trigger": turn.get(
+            "trigger",
+            {}
+        ),
 
-                </div>
-                """
+        "topic_structure": turn.get(
+            "topic_structure",
+            {}
+        ),
+
+        "policy": turn.get(
+            "policy",
+            {}
+        ),
+
+        "response": turn.get(
+            "response",
+            {}
+        ),
+    }
+
+
+# ============================================================
+# Case Turn Evaluation
+# ============================================================
+
+def evaluate_case_turn(data, details=None):
+    total_case_turn = 0
+
+    trigger_hit = 0
+
+    top5_hit = 0
+    top3_hit = 0
+    top1_hit = 0
+
+    policy_hit = 0
+    selection_hit = 0
+
+    for dialog_id, dialog in data.items():
+
+        for turn in dialog["turns"]:
+
+            golden_cases = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
+                )
             )
 
-        details_html = "".join(detail_rows)
+            # ------------------------------------------------
+            # 只统计 Golden Response 中包含案例的轮次
+            # ------------------------------------------------
 
-        items.append(
-            f"""
-            <details class="case-card">
+            if not golden_cases:
+                continue
 
-                <summary class="case-card-summary">
+            total_case_turn += 1
 
-                    <div class="case-card-main">
+            # 保持原评估逻辑：
+            # 如果 Golden Response 中有多个 Case，
+            # 使用第一个。
+            golden_case = golden_cases[0]
 
-                        <div class="case-card-id">
-                            {escape(case_id)}
-                        </div>
+            policy = turn.get(
+                "policy",
+                {}
+            )
 
-                        <div class="case-card-preview">
-                            {escape(preview) if preview else "点击查看案例详情"}
-                        </div>
+            pred_cases = get_pred_cases(
+                policy
+            )
 
-                    </div>
+            retrieved = get_retrieved_case_ids(
+                turn
+            )
 
-                    <div class="case-card-action">
-                        <span class="case-expand-text">
-                            查看详情
-                        </span>
+            # =================================================
+            # Trigger
+            # =================================================
 
-                        <span class="case-chevron">
-                            ›
-                        </span>
-                    </div>
+            trigger = (
+                turn
+                .get("trigger", {})
+                .get("trigger", False)
+            )
 
-                </summary>
+            if not trigger:
+
+                if details is not None:
+
+                    details[
+                        "case_turn_errors"
+                    ][
+                        "trigger_miss"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                            golden_cases,
+                            pred_cases,
+                            retrieved,
+                        )
+                    )
+
+                    details[
+                        "case_frequency"
+                    ][
+                        "trigger_miss"
+                    ][golden_case] += 1
+
+                continue
+
+            trigger_hit += 1
+
+            # =================================================
+            # Retrieval
+            # =================================================
+
+            hit5 = golden_case in retrieved[:5]
+            hit3 = golden_case in retrieved[:3]
+            hit1 = golden_case in retrieved[:1]
+
+            top5_hit += hit5
+            top3_hit += hit3
+            top1_hit += hit1
+
+            # -------------------------------------------------
+            # Top-5 Retrieval Miss
+            # -------------------------------------------------
+
+            if not hit5:
+
+                if details is not None:
+
+                    details[
+                        "case_turn_errors"
+                    ][
+                        "retrieval_top5_miss"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                            golden_cases,
+                            pred_cases,
+                            retrieved,
+                        )
+                    )
+
+                    details[
+                        "case_frequency"
+                    ][
+                        "retrieval_top5_miss"
+                    ][golden_case] += 1
+
+                continue
+
+            # =================================================
+            # Policy
+            # =================================================
+
+            policy_label = get_policy_label(
+                policy
+            )
+
+            if policy_label not in KNOWLEDGE_POLICY:
+
+                if details is not None:
+
+                    details[
+                        "case_turn_errors"
+                    ][
+                        "policy_error"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                            golden_cases,
+                            pred_cases,
+                            retrieved,
+                        )
+                    )
+
+                    details[
+                        "case_frequency"
+                    ][
+                        "policy_error"
+                    ][golden_case] += 1
+
+                continue
+
+            policy_hit += 1
+
+            # =================================================
+            # Selection
+            # =================================================
+
+            if golden_case in pred_cases:
+
+                selection_hit += 1
+
+            else:
+
+                if details is not None:
+
+                    details[
+                        "case_turn_errors"
+                    ][
+                        "selection_error"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                            golden_cases,
+                            pred_cases,
+                            retrieved,
+                        )
+                    )
+
+                    details[
+                        "case_frequency"
+                    ][
+                        "selection_error"
+                    ][golden_case] += 1
+
+                    # -----------------------------------------
+                    # Golden -> Predicted confusion
+                    # -----------------------------------------
+
+                    if pred_cases:
+
+                        for pred_case in pred_cases:
+
+                            key = (
+                                f"{golden_case} -> "
+                                f"{pred_case}"
+                            )
+
+                            details[
+                                "case_confusion"
+                            ][key] += 1
+
+                    else:
+
+                        key = (
+                            f"{golden_case} -> "
+                            f"NO_CASE"
+                        )
+
+                        details[
+                            "case_confusion"
+                        ][key] += 1
+
+    return {
+        "案例轮数量":
+            total_case_turn,
+
+        "知识链路触发率":
+            trigger_hit / total_case_turn
+            if total_case_turn
+            else 0,
+
+        "Top-5有效案例召回率":
+            top5_hit / trigger_hit
+            if trigger_hit
+            else 0,
+
+        "Top-3有效案例召回率":
+            top3_hit / trigger_hit
+            if trigger_hit
+            else 0,
+
+        "Top-1有效案例召回率":
+            top1_hit / trigger_hit
+            if trigger_hit
+            else 0,
+
+        "知识型策略命中率":
+            policy_hit / top5_hit
+            if top5_hit
+            else 0,
+
+        "案例选择准确率":
+            selection_hit / policy_hit
+            if policy_hit
+            else 0,
+
+        "最终案例推荐准确率":
+            selection_hit / total_case_turn
+            if total_case_turn
+            else 0,
+    }
 
 
-                <div class="case-detail">
+# ============================================================
+# All Turn Timing
+# ============================================================
 
-                    <div class="case-detail-header">
-                        Case Detail
-                    </div>
+def evaluate_timing(data, details=None):
 
-                    {details_html}
+    pred = []
+    gold = []
 
-                </div>
+    for dialog_id, dialog in data.items():
 
-            </details>
-            """
+        for turn in dialog["turns"]:
+
+            golden_cases = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
+                )
+            )
+
+            golden_case = bool(
+                golden_cases
+            )
+
+            policy = turn.get(
+                "policy",
+                {}
+            )
+
+            policy_label = get_policy_label(
+                policy
+            )
+
+            predicted = (
+                policy_label
+                in KNOWLEDGE_POLICY
+            )
+
+            gold.append(
+                golden_case
+            )
+
+            pred.append(
+                predicted
+            )
+
+            # =================================================
+            # False Positive
+            # 不应该推荐，但推荐了
+            # =================================================
+
+            if predicted and not golden_case:
+
+                if details is not None:
+
+                    details[
+                        "timing_errors"
+                    ][
+                        "false_positive"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                        )
+                    )
+
+            # =================================================
+            # False Negative
+            # 应该推荐，但没有推荐
+            # =================================================
+
+            if not predicted and golden_case:
+
+                if details is not None:
+
+                    details[
+                        "timing_errors"
+                    ][
+                        "false_negative"
+                    ].append(
+                        make_turn_record(
+                            dialog_id,
+                            turn,
+                        )
+                    )
+
+    tp = sum(
+        p and g
+        for p, g in zip(
+            pred,
+            gold
+        )
+    )
+
+    fp = sum(
+        p and not g
+        for p, g in zip(
+            pred,
+            gold
+        )
+    )
+
+    fn = sum(
+        not p and g
+        for p, g in zip(
+            pred,
+            gold
+        )
+    )
+
+    precision = (
+        tp / (tp + fp)
+        if tp + fp
+        else 0
+    )
+
+    recall = (
+        tp / (tp + fn)
+        if tp + fn
+        else 0
+    )
+
+    f1 = (
+        2 * precision * recall
+        / (precision + recall)
+        if precision + recall
+        else 0
+    )
+
+    return {
+        "推荐时机Precision":
+            precision,
+
+        "推荐时机Recall":
+            recall,
+
+        "推荐时机F1":
+            f1,
+
+        "过早推荐率":
+            fp / (tp + fp)
+            if tp + fp
+            else 0,
+
+        "漏推荐率":
+            fn / (tp + fn)
+            if tp + fn
+            else 0,
+    }
+
+
+# ============================================================
+# Dialogue Level
+# ============================================================
+
+def evaluate_dialogue(data, details=None):
+
+    success = []
+
+    golden_first = []
+    pred_first = []
+
+    # 额外诊断信息，不改变原指标
+    turn_differences = []
+
+    for dialog_id, dialog in data.items():
+
+        golden_cases = set()
+        predicted_cases = set()
+
+        g_turn = None
+        p_turn = None
+
+        golden_turn_records = []
+        predicted_turn_records = []
+
+        for turn in dialog["turns"]:
+
+            # =================================================
+            # Golden Cases
+            # =================================================
+
+            g_cases = extract_case_ids(
+                turn.get(
+                    "golden_response",
+                    ""
+                )
+            )
+
+            for case_id in g_cases:
+                golden_cases.add(
+                    case_id
+                )
+
+            if g_cases:
+
+                golden_turn_records.append({
+                    "turn_id":
+                        turn.get("turn_id"),
+
+                    "case_ids":
+                        g_cases,
+
+                    "golden_response":
+                        turn.get(
+                            "golden_response",
+                            ""
+                        ),
+                })
+
+            if (
+                g_cases
+                and g_turn is None
+            ):
+                g_turn = turn["turn_id"]
+
+            # =================================================
+            # Predicted Cases
+            # =================================================
+
+            policy = turn.get(
+                "policy",
+                {}
+            )
+
+            p_cases = get_pred_cases(
+                policy
+            )
+
+            for case_id in p_cases:
+                predicted_cases.add(
+                    case_id
+                )
+
+            if p_cases:
+
+                predicted_turn_records.append({
+                    "turn_id":
+                        turn.get("turn_id"),
+
+                    "case_ids":
+                        p_cases,
+
+                    "policy":
+                        policy,
+                })
+
+            if (
+                p_cases
+                and p_turn is None
+            ):
+                p_turn = turn["turn_id"]
+
+        # =====================================================
+        # Original Success Definition
+        # =====================================================
+
+        dialog_success = bool(
+            golden_cases
+            & predicted_cases
         )
 
-    if not items:
-        return """
-        <div class="empty-small">
-            当前没有可显示的 Active Cases
-        </div>
-        """
+        success.append(
+            dialog_success
+        )
 
-    return "".join(items)
+        if g_turn is not None:
+            golden_first.append(
+                g_turn
+            )
 
+        if p_turn is not None:
+            pred_first.append(
+                p_turn
+            )
 
+        # =====================================================
+        # Timing Difference
+        # =====================================================
 
+        turn_difference = None
+        timing_type = None
 
+        if (
+            g_turn is not None
+            and p_turn is not None
+        ):
+
+            turn_difference = (
+                p_turn - g_turn
+            )
+
+            turn_differences.append(
+                turn_difference
+            )
+
+            if turn_difference < 0:
+                timing_type = "early"
 
+            elif turn_difference > 0:
+                timing_type = "late"
+
+            else:
+                timing_type = "same_turn"
+
+        elif (
+            g_turn is not None
+            and p_turn is None
+        ):
+            timing_type = "never_recommend"
+
+        elif (
+            g_turn is None
+            and p_turn is not None
+        ):
+            timing_type = "unnecessary_recommend"
 
-/* =========================================================
-   FONT SYSTEM
-========================================================= */
-
-html,
-body,
-.gradio-container,
-.gradio-container *,
-button,
-input,
-textarea,
-select {
-    font-family:
-        "Segoe UI",
-        "Microsoft YaHei UI",
-        "Microsoft YaHei",
-        "PingFang SC",
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        Arial,
-        sans-serif !important;
-
-    font-synthesis: none;
-}
-
-
-
-
-
-/* =========================================================
-   LARGE CONVERSATION TYPOGRAPHY
-========================================================= */
-
-.chat-column .column-title {
-    font-size: 28px;
-}
-
-.chat-column .column-subtitle {
-    font-size: 19px;
-}
-
-
-/* 用户 / 智能客服 */
-
-.chat-column .message-role {
-    font-size: 18px;
-
-    font-weight: 600;
-
-    margin-bottom: 6px;
-}
-
-
-/* 对话正文 */
-
-.chat-column .message-bubble {
-    font-size: 25px;
-
-    line-height: 1.6;
-
-    padding: 13px 18px;
-
-    border-radius: 16px;
-}
-
-
-/* 头像同步稍微变大 */
-
-.chat-column .avatar {
-    width: 46px;
-    height: 46px;
-
-    flex-basis: 46px;
-
-    font-size: 15px;
-}
-
-
-/* 消息之间距离 */
-
-.chat-column .chat-scroll {
-    gap: 27px;
-}
-
-
-/* 输入框 */
-
-.chat-column .chat-input textarea {
-    font-size: 22px !important;
-
-    line-height: 1.5 !important;
-
-    min-height: 64px !important;
-
-    padding: 14px 16px !important;
-}
-
-
-.chat-column .send-button button {
-    min-height: 64px !important;
-
-    font-size: 19px !important;
-}
-
-
-
-
-
-/* =========================================================
-   LARGE DECISION TYPOGRAPHY
-========================================================= */
-
-/* Agent Decision */
-
-.decision-column .column-title {
-    font-size: 30px;
-}
-
-.decision-column .column-subtitle {
-    font-size: 19px;
-}
-
-
-/* Query / Trigger / Evidence / Topic Structure / Policy */
-
-.decision-column .section-heading {
-    font-size: 24px;
-
-    font-weight: 800;
-
-    margin-bottom: 14px;
-}
-
-
-/* Trigger / Evidence Mode 左边文字 */
-
-.decision-column .decision-row {
-    font-size: 20px;
-
-    line-height: 1.5;
-
-    margin: 10px 0;
-}
-
-
-/* Query 正文 */
-
-.decision-column .decision-text {
-    font-size: 20px;
-
-    line-height: 1.6;
-
-    padding: 12px 14px;
-}
-
-
-/* rewrite / true / retrieve_new_evidence 等 */
-
-.decision-column .badge {
-    font-size: 18px;
-
-    line-height: 1.35;
-
-    padding: 6px 11px;
-
-    font-weight: 700;
-}
-
-
-/* Information */
-
-.decision-column .sub-label {
-    font-size: 18px;
-
-    margin-top: 14px;
-
-    margin-bottom: 8px;
-}
-
-
-/* JSON */
-
-.decision-column .json-view {
-    font-size: 18px;
-
-    line-height: 1.6;
-
-    padding: 12px;
-}
-
-
-
-
-
-/* =========================================================
-   EVIDENCE CASE CARDS
-========================================================= */
-
-.case-list {
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 10px;
-}
-
-
-.case-card {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background: #ffffff;
-
-    border: 1px solid #e2e8f0;
-
-    border-radius: 12px;
-
-    overflow: hidden;
-
-    transition:
-        border-color 0.15s ease,
-        box-shadow 0.15s ease,
-        transform 0.15s ease;
-}
-
-
-.case-card:hover {
-    border-color: #bfdbfe;
-
-    box-shadow:
-        0 3px 10px
-        rgba(37, 99, 235, 0.08);
-}
-
-
-.case-card[open] {
-    border-color: #93c5fd;
-
-    box-shadow:
-        0 4px 14px
-        rgba(37, 99, 235, 0.08);
-}
-
-
-/* 去掉浏览器默认三角 */
-
-.case-card summary {
-    list-style: none;
-}
-
-
-.case-card summary::-webkit-details-marker {
-    display: none;
-}
-
-
-.case-card-summary {
-    display: flex;
-
-    align-items: center;
-
-    justify-content: space-between;
-
-    gap: 14px;
-
-    padding: 14px 15px;
-
-    cursor: pointer;
-
-    user-select: none;
-}
-
-
-.case-card-main {
-    min-width: 0;
-
-    flex: 1;
-}
-
-
-.case-card-id {
-    color: var(--blue);
-
-    font-size: 19px;
-
-    line-height: 1.35;
-
-    font-weight: 700;
-
-    margin-bottom: 5px;
-}
-
-
-.case-card-preview {
-    color: var(--text2);
-
-    font-size: 18px;
-
-    line-height: 1.55;
-
-    overflow-wrap: anywhere;
-}
-
-
-.case-card-action {
-    flex: 0 0 auto;
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 5px;
-
-    color: var(--blue);
-
-    font-size: 16px;
-
-    white-space: nowrap;
-}
-
-
-.case-chevron {
-    display: inline-block;
-
-    font-size: 24px;
-
-    line-height: 1;
-
-    transition: transform 0.18s ease;
-}
-
-
-.case-card[open] .case-chevron {
-    transform: rotate(90deg);
-}
-
-
-/* =========================================================
-   CASE DETAIL
-========================================================= */
-
-.case-detail {
-    padding: 14px 15px 16px 15px;
-
-    background: #f8fafc;
-
-    border-top: 1px solid var(--soft-line);
-}
-
-
-.case-detail-header {
-    color: var(--text);
-
-    font-size: 20px;
-
-    font-weight: 700;
-
-    margin-bottom: 12px;
-}
-
-
-.case-detail-row {
-    display: grid;
-
-    grid-template-columns: 130px minmax(0, 1fr);
-
-    gap: 12px;
-
-    padding: 9px 0;
-
-    border-bottom: 1px solid #edf1f5;
-}
-
-
-.case-detail-row:last-child {
-    border-bottom: none;
-}
-
-
-.case-detail-key {
-    color: var(--muted);
-
-    font-size: 16px;
-
-    line-height: 1.5;
-
-    font-weight: 600;
-
-    overflow-wrap: anywhere;
-}
-
-
-.case-detail-value {
-    color: var(--text2);
-
-    font-size: 18px;
-
-    line-height: 1.6;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-
-
-
-
-
-
-
-/* =========================================================
-   LARGE TOPIC TREE
-========================================================= */
-
-.decision-column .tree-node {
-    font-size: 19px;
-
-    line-height: 1.6;
-
-    padding: 7px 6px;
-}
-
-
-.decision-column .tree-topic {
-    font-weight: 600;
-}
-
-
-.decision-column .tree-dimension {
-    font-size: 16px;
-
-    padding: 3px 7px;
-}
-
-
-.decision-column .tree-case {
-    font-size: 16px;
-}
-
-
-.decision-column .tree-dot {
-    width: 9px;
-    height: 9px;
-
-    margin-right: 8px;
-}
-
-
-
-
-
-
-/* =========================================================
-   LARGE LATENCY
-========================================================= */
-
-.decision-column .latency-total {
-    font-size: 38px;
-
-    margin-bottom: 13px;
-}
-
-
-.decision-column .latency-total span {
-    font-size: 20px;
-}
-
-
-.decision-column .latency-grid span {
-    font-size: 16px;
-}
-
-
-.decision-column .latency-grid b {
-    font-size: 18px;
-}
-
-
-.decision-column .latency-grid > div {
-    padding: 11px 12px;
-
-    gap: 4px;
-}
+        else:
+            timing_type = "no_case_required"
+
+        # =====================================================
+        # Dialogue Details
+        # =====================================================
+
+        if details is not None:
+
+            dialog_record = {
+                "dialog_id":
+                    dialog_id,
+
+                "success":
+                    dialog_success,
+
+                "golden_cases":
+                    sorted(golden_cases),
+
+                "predicted_cases":
+                    sorted(predicted_cases),
+
+                "golden_first_turn":
+                    g_turn,
+
+                "predicted_first_turn":
+                    p_turn,
+
+                "turn_difference":
+                    turn_difference,
+
+                "timing_type":
+                    timing_type,
+
+                "golden_turns":
+                    golden_turn_records,
+
+                "predicted_turns":
+                    predicted_turn_records,
+            }
+
+            details[
+                "dialogue_analysis"
+            ][
+                "all_dialogues"
+            ].append(
+                dialog_record
+            )
+
+            # ---------------------------------------------
+            # Dialogue Failure
+            # ---------------------------------------------
+
+            if not dialog_success:
+
+                # 对失败原因做简单分类
+                if not golden_cases:
+                    failure_type = (
+                        "no_golden_case"
+                    )
+
+                elif not predicted_cases:
+                    failure_type = (
+                        "never_recommend"
+                    )
+
+                else:
+                    failure_type = (
+                        "wrong_case"
+                    )
+
+                dialog_record = dict(
+                    dialog_record
+                )
+
+                dialog_record[
+                    "failure_type"
+                ] = failure_type
+
+                details[
+                    "dialogue_analysis"
+                ][
+                    "failures"
+                ].append(
+                    dialog_record
+                )
+
+    return {
+        "对话成功率":
+            rate(success),
+
+        "Golden案例首次推荐平均轮数":
+            rate(golden_first),
+
+        "Predicted案例首次推荐平均轮数":
+            rate(pred_first),
+    }
+
+
+# ============================================================
+# Detail Summary
+# ============================================================
+
+def build_detail_summary(
+    data,
+    case_result,
+    timing_result,
+    dialogue_result,
+    details,
+):
+
+    total_dialogues = len(data)
+
+    total_turns = sum(
+        len(dialog.get("turns", []))
+        for dialog in data.values()
+    )
+
+    trigger_miss = len(
+        details[
+            "case_turn_errors"
+        ][
+            "trigger_miss"
+        ]
+    )
+
+    retrieval_miss = len(
+        details[
+            "case_turn_errors"
+        ][
+            "retrieval_top5_miss"
+        ]
+    )
+
+    policy_error = len(
+        details[
+            "case_turn_errors"
+        ][
+            "policy_error"
+        ]
+    )
+
+    selection_error = len(
+        details[
+            "case_turn_errors"
+        ][
+            "selection_error"
+        ]
+    )
+
+    fp = len(
+        details[
+            "timing_errors"
+        ][
+            "false_positive"
+        ]
+    )
+
+    fn = len(
+        details[
+            "timing_errors"
+        ][
+            "false_negative"
+        ]
+    )
+
+    dialogue_failures = len(
+        details[
+            "dialogue_analysis"
+        ][
+            "failures"
+        ]
+    )
+
+    # Timing distribution
+    timing_distribution = Counter()
+
+    for item in details[
+        "dialogue_analysis"
+    ][
+        "all_dialogues"
+    ]:
+        timing_distribution[
+            item["timing_type"]
+        ] += 1
+
+    return {
+        "dataset": {
+            "dialogues":
+                total_dialogues,
+
+            "turns":
+                total_turns,
+        },
+
+        "metrics": {
+            "case_turn":
+                case_result,
+
+            "timing":
+                timing_result,
+
+            "dialogue":
+                dialogue_result,
+        },
+
+        "error_counts": {
+            "trigger_miss":
+                trigger_miss,
+
+            "retrieval_top5_miss":
+                retrieval_miss,
+
+            "policy_error":
+                policy_error,
+
+            "selection_error":
+                selection_error,
+
+            "timing_false_positive":
+                fp,
+
+            "timing_false_negative":
+                fn,
+
+            "dialogue_failure":
+                dialogue_failures,
+        },
+
+        "dialogue_timing_distribution":
+            dict(
+                timing_distribution
+            ),
+    }
+
+
+# ============================================================
+# Finalize Details
+# ============================================================
+
+def finalize_details(details):
+
+    # Counter 无法直接按我们想要的形式输出，
+    # 在保存前转换为普通 dict。
+
+    details["case_frequency"] = {
+        name: counter_to_dict(counter)
+        for name, counter
+        in details["case_frequency"].items()
+    }
+
+    details["case_confusion"] = (
+        counter_to_dict(
+            details["case_confusion"]
+        )
+    )
+
+    return details
+
+
+# ============================================================
+# Print
+# ============================================================
+
+def print_result(title, result):
+
+    print(
+        f"\n========== {title} =========="
+    )
+
+    for key, value in result.items():
+
+        if isinstance(value, float):
+            print(
+                f"{key}: {value:.4f}"
+            )
+
+        else:
+            print(
+                f"{key}: {value}"
+            )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input",
+        required=True
+    )
+
+    parser.add_argument(
+        "--details_output",
+        default=None,
+        help=(
+            "详细错误分析 JSON 输出路径。"
+            "如果不指定，则自动保存到 "
+            "<input>_details.json"
+        )
+    )
+
+    args = parser.parse_args()
+
+    # --------------------------------------------------------
+    # Load
+    # --------------------------------------------------------
+
+    data = load_json(
+        args.input
+    )
+
+    # --------------------------------------------------------
+    # Detail Collector
+    # --------------------------------------------------------
+
+    details = {
+        "summary": {},
+
+        "case_turn_errors": {
+            "trigger_miss": [],
+            "retrieval_top5_miss": [],
+            "policy_error": [],
+            "selection_error": [],
+        },
+
+        "timing_errors": {
+            "false_positive": [],
+            "false_negative": [],
+        },
+
+        "dialogue_analysis": {
+            "all_dialogues": [],
+            "failures": [],
+        },
+
+        "case_frequency": {
+            "trigger_miss": Counter(),
+            "retrieval_top5_miss": Counter(),
+            "policy_error": Counter(),
+            "selection_error": Counter(),
+        },
+
+        "case_confusion": Counter(),
+    }
+
+    # --------------------------------------------------------
+    # Evaluation
+    # --------------------------------------------------------
+
+    case_result = evaluate_case_turn(
+        data,
+        details
+    )
+
+    timing_result = evaluate_timing(
+        data,
+        details
+    )
+
+    dialogue_result = evaluate_dialogue(
+        data,
+        details
+    )
+
+    # --------------------------------------------------------
+    # 保持原来的终端输出
+    # --------------------------------------------------------
+
+    print_result(
+        "案例轮指标",
+        case_result
+    )
+
+    print_result(
+        "所有轮推荐时机",
+        timing_result
+    )
+
+    print_result(
+        "对话级指标",
+        dialogue_result
+    )
+
+    # --------------------------------------------------------
+    # Build Detail Summary
+    # --------------------------------------------------------
+
+    details["summary"] = (
+        build_detail_summary(
+            data,
+            case_result,
+            timing_result,
+            dialogue_result,
+            details,
+        )
+    )
+
+    details = finalize_details(
+        details
+    )
+
+    # --------------------------------------------------------
+    # Output Path
+    # --------------------------------------------------------
+
+    if args.details_output:
+
+        details_path = Path(
+            args.details_output
+        )
+
+    else:
+
+        input_path = Path(
+            args.input
+        )
+
+        details_path = (
+            input_path.parent
+            / (
+                input_path.stem
+                + "_details.json"
+            )
+        )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    save_json(
+        details_path,
+        details
+    )
+
+    print(
+        f"\n详细错误分析已保存到: "
+        f"{details_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
