@@ -1,80 +1,188 @@
-def normalize_split(split_result, expected_case_ids):
-    if not isinstance(split_result, dict):
-        return None, "output is not a dict"
+      "selection_error": [
+        {
+          "error_type": "selection_error",
+          "dialog_id": "220637958",
+          "turn_id": 1,
+          "user": "好的。\n想要更新谷歌浏览器这个要怎么操作呀。",
+          "golden_response": "[案例链接: KT00241855]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若有问题请反馈给我（工号h60099387），谢谢！",
+          "golden_cases": [
+            "KT00241855"
+          ],
+          "predicted_cases": [
+            "KT00412269"
+          ],
+          "retrieved_cases": [
+            "KT00029634",
+            "KT00412269",
+            "KT00126060",
+            "KT00241855",
+            "KT00288698"
+          ],
+          "golden_ranks": {
+            "KT00241855": 4
+          },
+          "query": {
+            "query_mode": "rewrite",
+            "query_text": "谷歌浏览器更新方法",
+            "reason": "用户当前意图已从新电脑登录微信切换为谷歌浏览器的更新操作，需重新构造 Query。"
+          },
+          "trigger": {
+            "trigger": true,
+            "evidence_mode": "retrieve_new_evidence",
+            "reason": "当前 Query 不需要案例知识；现有案例与谷歌浏览器更新方法无直接关联，无法覆盖当前具体问题。"
+          },
+          "topic_structure": {
+            "query": "谷歌浏览器更新方法",
+            "topic": "谷歌浏览器更新方法",
+            "case_ids": [
+              "KT00029634",
+              "KT00412269",
+              "KT00126060",
+              "KT00241855",
+              "KT00288698"
+            ],
+            "leaf": false,
+            "children": [
+              {
+                "topic": "安装与卸载",
+                "case_ids": [
+                  "KT00029634"
+                ],
+                "leaf": true,
+                "children": [],
+                "case_id": "KT00029634"
+              },
+              {
+                "topic": "升级与安装",
+                "case_ids": [
+                  "KT00412269"
+                ],
+                "leaf": true,
+                "children": [],
+                "case_id": "KT00412269"
+              },
+              {
+                "topic": "下载最新版本",
+                "case_ids": [
+                  "KT00126060"
+                ],
+                "leaf": true,
+                "children": [],
+                "case_id": "KT00126060"
+              },
+              {
+                "topic": "下载并使用最新版解决兼容性问题",
+                "case_ids": [
+                  "KT00241855"
+                ],
+                "leaf": true,
+                "children": [],
+                "case_id": "KT00241855"
+              },
+              {
+                "topic": "安装失败及组策略问题",
+                "case_ids": [
+                  "KT00288698"
+                ],
+                "leaf": true,
+                "children": [],
+                "case_id": "KT00288698"
+              }
+            ],
+            "dimension": "操作类型",
+            "split_status": "valid"
+          },
+          "policy": {
+            "label": "CaseRecommendation",
+            "information": {
+              "case_id": "KT00412269"
+            },
+            "reason": "用户询问谷歌浏览器更新方法，案例 KT00412269 明确描述了升级和安装谷歌浏览器的步骤，与当前问题整体匹配。"
+          },
+          "response": "您可以参考案例 [KT00412269]，通过 iDesk 软件搜索 Google Chrome 或谷歌关键词下载安装最新版本。如果无法使用该方法，也可以直接点击链接下载安装包进行升级：https://onebox.huawei.com/p/a8528f3307df58b445aca08f8a4ff5ee。"
+        },
 
-    dimension = str(split_result.get("dimension", "")).strip()
-    children = split_result.get("children", [])
 
-    if not dimension:
-        return None, "missing dimension"
 
-    if not isinstance(children, list):
-        return None, "children is not a list"
+    "KT00029634": {
+        "case_name": "Chrome浏览器安装和卸载（适用win10，win11系统）",
+        "text": [
+            "1、如卸载谷歌浏览器，需要备份书签，请参考“如何备份和导入chrome浏览器收藏夹（书签）”。",
+            "2、如安装过程中报错请参考“该计算机已安装了更高版本的谷歌浏览器”",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "双击打开桌面右下角iDesk图标，点击【软件】一【软件宝库】，搜索“chrome”，选择“Google Chrome”然后点击下载安装即可。",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R3S781D00021313920201116135910747278511",
+            "温馨提示：若idesk中无法搜索到chrome安装包，请参考：iDesk下载软件失败或找不到软件的解决方法",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N706715755446992897",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "点击【开始】—【控制面板】 一【程序和功能】，找到“ Google Chrome ”，右键点击选择“卸载”。",
+            "温馨提示：若chrome浏览器卸载提示报错，则参考案例该计算机已安装了更高版本的谷歌浏览器删除Google相关的文件夹，清除注册表后，重启电脑后再进行卸载。",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R3S781D00021313920201119105842363258995"
+        ]
+    },
 
-    if len(children) < 2:
-        return None, "fewer than 2 valid children"
 
-    expected_set = set(expected_case_ids)
-    normalized_children = []
-    observed = []
+    "KT00412269": {
+        "case_name": "chrome谷歌浏览器升级和安装",
+        "text": [
+            "用户自检发现未安装谷歌浏览器，或浏览器版本过低时，可根据本案例指导进行安装或升级。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1209817618045997273",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "打开电脑iDesk软件，搜索Google Chrome、谷歌等关键词查询，并下载安装，详情可参考https://12345.huawei.com/unidesk/portal/#/case_details?caseId=KT00029634",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1209818569544831017",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "进入谷歌官方页面下载，此方法适用于有外网权限的用户，",
+            "下载地址如下：",
+            "https://www.google.cn/chrome/thank-you.html?installdataindex=empty&platform=win64&standalone=1&statcb=0&defaultbrowser=0https://www.google.cn/chrome/thank-you.html?installdataindex=empty&platform=win64&standalone=1&statcb=0&defaultbrowser=0",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1209812694385479696",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "若您无法使用上述方法，可点击下方链接直接下载安装包，下载完成后双击文件安装，安装完成后，谷歌浏览器将会自动升级至可执行的最新版本。升级完成后，需重启浏览器方可生效。",
+            "https://onebox.huawei.com/p/a8528f3307df58b445aca08f8a4ff5ee",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1209819853907566720"
+        ]
+    },
 
-    for child in children:
-        if not isinstance(child, dict):
-            return None, "child is not a dict"
 
-        topic = str(child.get("topic", "")).strip()
-        case_ids = child.get("case_ids", [])
+    "KT00126060": {
+        "case_name": "下载最新版本的谷歌浏览器",
+        "text": [
+            "谷歌浏览器版本会在iDesk软件库中定时更新，请到idesk中下载，若出现无法下载或版本较低，请到nshelp.huawei.com中更新idesk客户端。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=R0S781D0020021852021092816153946923853"
+        ]
+    },
 
-        if not topic:
-            return None, "child topic is empty"
+    "KT00241855": {
+        "case_name": "如何下载最新版本谷歌/edge浏览器？",
+        "text": [
+            "一、问题现象：",
+            "ASC备件专员在使用国产浏览器、火狐浏览器或者低版本谷歌/egde浏览器进去CSPM系统时，遇到提示“加载EDM JS失败，请联系IT支持”，页面空白等情况。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N888821995605991612",
+            "二、解决方案：",
+            "由于系统兼容性问题，请用最新版本的谷歌/edge浏览器操作",
+            "(截止2023年7月：谷歌/edge浏览器版本号为115)",
+            "查看谷歌里浏览器版本方法：",
+            "谷歌浏览器地址栏输入：chrome://settings/help",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N888826920535105616",
+            "查看edge浏览器版本方法：",
+            "edge浏览器地址栏输入:edge://settings/help",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N890192563075326184",
+            "最新版谷歌浏览器下载链接：Google Chrome 网络浏览器",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N888822788162039997",
+            "最新版edge浏览器(win10/11内置浏览器)下载链接：下载 Microsoft Edge",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N921722494153744527"
+        ]
+    },
 
-        if not isinstance(case_ids, list):
-            return None, f"case_ids of topic '{topic}' is not a list"
-
-        clean_ids = []
-
-        for case_id in case_ids:
-            case_id = str(case_id).strip()
-
-            if not case_id:
-                continue
-
-            if case_id not in expected_set:
-                return None, f"unexpected case_id: {case_id}"
-
-            clean_ids.append(case_id)
-
-        clean_ids = list(dict.fromkeys(clean_ids))
-
-        if not clean_ids:
-            return None, f"topic '{topic}' has no valid case_ids"
-
-        normalized_children.append({
-            "topic": topic,
-            "case_ids": clean_ids
-        })
-
-        observed.extend(clean_ids)
-
-    duplicates = list(dict.fromkeys(
-        case_id
-        for case_id in observed
-        if observed.count(case_id) > 1
-    ))
-
-    if duplicates:
-        return None, f"duplicated case_ids: {duplicates}"
-
-    missing = [
-        case_id
-        for case_id in expected_case_ids
-        if case_id not in observed
-    ]
-
-    if missing:
-        return None, f"missing case_ids: {missing}"
-
-    return {
-        "dimension": dimension,
-        "children": normalized_children
-    }, ""
+    "KT00288698": {
+        "case_name": "谷歌浏览器安装失败 组策略",
+        "text": [
+            "谷歌浏览器无法安装，由于注册表路径    计算机\\HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome\\update",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N988083900796002474",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "搜索框输入  regedit ，打开注册表  ，打开如下路径",
+            "计算机\\HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome\\",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N748978476775997725",
+            "右键 update   删除 ，重新安装谷歌浏览器或者重启电脑再进行安装",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M2T1S781N988084226244858024"
+        ]
+    },
