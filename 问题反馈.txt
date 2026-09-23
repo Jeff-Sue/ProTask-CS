@@ -1,1706 +1,347 @@
-from __future__ import annotations
+## Role
 
-import sys
-import uuid
-from datetime import datetime
-from pathlib import Path
+你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
 
-import gradio as gr
+你的任务是：在已有 Topic Structure 的当前节点下，根据当前 Query 和 Cases，继续向下生成一层 Topic 划分。
 
-
-# ============================================================
-# Project Path
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+你每次只生成当前节点的直接下一层结构，不生成完整 Topic Tree。
 
 
-from Agent.agentv2_3 import MemoryAgent
-from project.logger import save_session
-from project.styles import CSS
+## Objective
 
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-    render_feedback_hint,
-    render_feedback_result,
-)
+根据 query、parent_path 和当前 cases，识别这些 Cases 在当前语义范围内最主要的下一层差异，并形成一层清晰的 Case Partition。
+
+Topic Structure 用于组织：
+
+不同 Cases 围绕当前 Query 存在哪些层级语义差异。
+
+它的作用是将语义相近的 Cases 组织在一起，并逐层暴露能够区分不同 Case Groups 的主要差异，供后续 Policy 理解和比较候选 Cases。
+
+Topic Structure 应形成有意义的 Case Grouping，而不是简单地为每个 Case 分别生成一个新的描述。
 
 
-# ============================================================
-# Feedback
-# ============================================================
+## Input
 
-FEEDBACK_REASONS = {
-    "没理解我的问题": "misunderstanding",
-    "重复或多余询问": "repeated_or_unnecessary_question",
-    "推荐结果不对": "wrong_result",
-    "回复内容有问题": "response_problem",
-    "其他": "other",
+输入包含以下字段：
+
+### 1. query
+
+当前用户问题对应的检索 Query。
+
+query 是整个 Topic Structure 的全局语义 Anchor。
+
+
+### 2. parent_path
+
+已有 Topic Structure 中，从上层到当前节点的完整 Topic Path。
+
+例如：
+
+["登录场景", "Windows 登录", "密码问题"]
+
+最后一个 Topic 表示当前需要继续细化的节点。
+
+第一层划分时，parent_path 可以为空。
+
+query 和 parent_path 共同限定当前节点的语义范围。
+
+
+### 3. depth
+
+当前 Topic Structure 的递归深度。
+
+
+### 4. cases
+
+当前节点下需要进一步区分的 Cases。
+
+每个 Case 包含：
+
+* case_id
+* title
+* keywords
+* content
+
+生成 Topic 划分时综合使用这些信息。
+
+
+## Topic Structure
+
+每次只判断当前节点是否存在一个合理的下一层 Case Partition。
+
+一个 Partition 包含：
+
+Parent → Dimension → Sibling Topics → Case Assignments
+
+
+### Dimension
+
+Dimension 表示当前 Cases 之间用于形成下一层分组的共同语义维度。
+
+它应该明确回答：
+
+“当前这些 Cases 是在哪一个方面存在主要差异？”
+
+例如：
+
+* 问题类型
+* 功能目标
+* 操作对象
+* 适用设备
+* 适用平台
+* 故障表现
+* 处理方式
+* 网络环境
+
+这些只是示例，不构成固定集合。
+
+Dimension 应表示明确的比较属性。
+
+如果仅看到 Dimension 名称仍无法理解 Cases 是在哪个方面进行比较，应使用更明确的表达。
+
+
+### Sibling Topics
+
+Sibling Topics 是同一个 Dimension 下形成的不同 Case Groups。
+
+例如：
+
+Dimension = 适用设备
+
+Sibling Topics 可以是：
+
+* 台式机
+* 便携机
+* 手机
+
+所有 Sibling Topics 必须能够自然回答同一个问题：
+
+“这个 Case 在当前 Dimension 上属于什么？”
+
+
+### Case Assignment
+
+每个 Case 必须且只能属于一个 Sibling Topic。
+
+相同 Topic 表示这些 Cases 在当前层语义相近，因此暂时属于同一个 Case Group。
+
+不同 Topic 表示这些 Cases 在当前 Dimension 上存在需要显式区分的语义差异。
+
+
+## Decision Process
+
+### Step 1: Anchor
+
+根据 query 和 parent_path 确定当前节点的语义范围。
+
+当前划分应：
+
+* 围绕 Query 的核心问题；
+* 延续 parent_path 已经形成的语义范围；
+* 只处理当前 Cases 尚未区分的主要差异；
+* 不重复上层已经完成的划分。
+
+Case 中与当前 Query / Path 无关的细节，不应主导当前层结构。
+
+
+### Step 2: Compare Cases
+
+比较当前 Cases，识别它们之间真正存在的 Case-level Differences。
+
+重点判断：
+
+“这些 Cases 所解决的问题，在当前 Query 下主要有什么不同？”
+
+候选 Difference 应当是多个 Cases 之间可以共同比较的语义属性。
+
+
+### Step 3: Select Dimension
+
+从候选 Case-level Differences 中选择当前层最合适的一个 Dimension。
+
+按照以下优先级判断：
+
+1. Query / Path Alignment
+   与当前 Query 和 parent_path 直接相关。
+
+2. Appropriate Semantic Level
+   是当前节点自然的下一层差异，保持从较粗差异到较细差异的层级关系。
+
+3. Meaningful Grouping
+   能够将语义相近的 Cases 聚合成有意义的 Case Groups。
+
+4. Faithfulness
+   分组依据能够由 Cases 的实际内容支持。
+
+5. Diversity
+   当前面条件都满足时，优先选择能够有效区分 Cases 的 Dimension。
+
+
+### Step 4: Check Grouping
+
+选定 Dimension 后，检查形成的 Sibling Topics。
+
+所有 Sibling Topics 必须：
+
+* 属于同一个 Dimension；
+* 处于相近的语义层级；
+* 表示自然、清楚的 Case Groups。
+
+可以进行以下检查：
+
+Dimension = X
+
+每个 Sibling Topic 是否都能自然回答：
+
+“这个 Case 的 X 是什么？”
+
+如果不能，说明当前 Dimension 或 Partition 不成立，应重新选择。
+
+
+同时检查当前划分是否形成了真正的 Case Grouping。
+
+如果一个划分主要表现为：
+
+每个 Case → 一个独立 Topic
+
+并且这些 Topics 实际上只是对各个 Case 内容的重新描述，而没有形成有意义的共同语义组织，则应寻找更高层、更自然的 Dimension。
+
+如果不存在这样的 Dimension，可以停止继续划分。
+
+
+### Step 5: Assign Cases
+
+根据选定 Dimension，为每个 Case 指定唯一的 Sibling Topic。
+
+每个 Case：
+
+* 必须出现一次；
+* 只能出现一次；
+* 不能遗漏；
+* 不能重复；
+* 不能新增输入中不存在的 case_id。
+
+如果某个 Dimension 会使一个 Case 自然属于多个 Sibling Topics，说明该 Dimension 不适合作为当前层的 Case Partition，应重新选择。
+
+完成当前层后停止。
+
+
+## Constraints
+
+### 1. Query / Path Alignment
+
+当前结构必须服务于 Query 和当前 parent_path 下的 Case 区分。
+
+
+### 2. Single Semantic Axis
+
+每层只使用一个 Dimension。
+
+所有 Sibling Topics 必须是该 Dimension 下的并列语义取值。
+
+
+### 3. Case-level Difference
+
+Topic Structure 描述 Cases 之间的差异。
+
+单个 Case 内部包含的多个步骤、设置项、操作位置、结果或功能，不应直接被展开为当前层的多个 Sibling Topics。
+
+
+### 4. Meaningful Grouping
+
+Topic Structure 应尽可能保留 Cases 之间有意义的语义聚合。
+
+不要为了区分每个 Case，而将 Case title 或 Case 内容分别改写成不同 Topic。
+
+5 Cases → 5 Topics 并非禁止。
+
+但只有当这些 Topics 确实是同一个明确 Dimension 下自然且必要的不同取值时，这种划分才合理。
+
+
+### 5. Faithfulness
+
+Dimension、Sibling Topics 和 Assignment 必须有 Cases 的实际内容支持。
+
+不要添加 Cases 中不存在的条件，也不要为了形成分类而人为制造差异。
+
+
+### 6. Stop When Necessary
+
+Topic Structure 不要求持续细分到每个 Case 都成为独立叶节点。
+
+如果当前 Cases 已经不存在一个自然、可靠且有意义的共同划分维度：
+
+输出 split = false。
+
+
+### 7. Functional Boundary
+
+Topic Structure 负责组织 Cases 之间的语义差异。
+
+它不负责决定：
+
+* 用户属于哪个 Topic；
+* 应该询问用户什么；
+* 哪个 Case 应该推荐；
+* Evidence 是否充分；
+* 下一步采取什么服务动作；
+* 如何回复用户。
+
+这些判断由 Policy 等后续模块完成。
+
+
+### 8. One-level Boundary
+
+每次只生成当前节点的直接下一层结构。
+
+如果某个 Sibling Topic 下仍有多个 Cases，也不要继续生成其子结构。
+
+后续递归由外部程序完成。
+
+
+## Output Contract
+
+只输出合法 JSON，不输出任何额外内容。
+
+
+### 存在合理划分时
+
+{
+  "split": true,
+  "dimension": "当前层用于区分 Cases 的语义维度",
+  "assignments": [
+    {
+      "case_id": "KTxxxx",
+      "topic": "该 Case 所属的 Sibling Topic"
+    },
+    {
+      "case_id": "KTxxxx",
+      "topic": "该 Case 所属的 Sibling Topic"
+    }
+  ]
 }
 
 
-# ============================================================
-# Utils
-# ============================================================
-
-def now_iso():
-    return datetime.now().astimezone().isoformat(
-        timespec="seconds"
-    )
-
-
-def turn_choices(state):
-    """
-    返回开发者界面可选择的 Turn。
-    """
-    if not state:
-        return []
-
-    turns = int(state.get("turns", 0) or 0)
-
-    return [
-        f"Turn {i}"
-        for i in range(1, turns + 1)
-    ]
-
-
-def parse_turn(value, state):
-    """
-    将 'Turn 3' 转成 3。
-    如果没有选择，则默认当前最新 Turn。
-    """
-    if value:
-        try:
-            return int(
-                str(value)
-                .replace("Turn", "")
-                .strip()
-            )
-        except Exception:
-            pass
-
-    if not state:
-        return 0
-
-    return int(
-        state.get("turns", 0) or 0
-    )
-
-
-# ============================================================
-# Session
-# ============================================================
-
-def new_session():
-
-    return {
-        "session_id":
-            "web_" + uuid.uuid4().hex[:10],
-
-        "created_at":
-            now_iso(),
-
-        "agent":
-            MemoryAgent(
-                mode="single",
-                show_state=False,
-            ),
-
-        "history": [],
-
-        "trace": [],
-
-        "prefix_history": [],
-
-        "turns": 0,
-
-        "mode": "user",
-
-        "feedback": {},
-    }
-
-
-# ============================================================
-# Agent Snapshot
-# ============================================================
-
-def get_last_run(agent):
-
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
-
-    if turn_state:
-
-        return {
-            "query_state":
-                turn_state.get("query", {}) or {},
-
-            "trigger_state":
-                turn_state.get("trigger", {}) or {},
-
-            "evidence_state":
-                turn_state.get("evidence", {}) or {},
-
-            "policy_state":
-                turn_state.get("policy", {}) or {},
-
-            "response":
-                turn_state.get("response", ""),
-
-            "latency":
-                turn_state.get("latency", {}) or {},
-        }
-
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    ) or {}
-
-    return {
-        "query_state": {},
-
-        "trigger_state": {},
-
-        "evidence_state":
-            memory.get(
-                "evidence_state",
-                {},
-            ) or {},
-
-        "policy_state":
-            (
-                memory
-                .get(
-                    "interaction_state",
-                    {},
-                )
-                .get(
-                    "last_policy",
-                    {},
-                )
-                or {}
-            ),
-
-        "response": "",
-
-        "latency": {},
-    }
-
-
-# ============================================================
-# History Parser
-# ============================================================
-
-def parse_prefix(text):
-
-    history = []
-
-    if not text:
-        return history
-
-    for raw_line in text.splitlines():
-
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("用户:"):
-
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("用户："):
-
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("客服:"):
-
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-        elif line.startswith("客服："):
-
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-    return history
-
-
-# ============================================================
-# Render Helpers
-# ============================================================
-
-def session_html(state):
-
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
-
-
-def developer_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
-
-
-def user_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
-
-
-def current_decision_html(state):
-
-    if not state["trace"]:
-        return render_decision(None)
-
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
-def trace_html(state):
-
-    return render_trace(
-        state["trace"],
-        state.get("feedback", {}),
-    )
-
-
-def feedback_hint_html(state):
-
-    if not state:
-        return render_feedback_hint(None)
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-        return render_feedback_hint(None)
-
-    return render_feedback_hint(turn)
-
-
-# ============================================================
-# Chat
-# ============================================================
-
-def chat(
-    user_input,
-    state,
-):
-
-    if state is None:
-        state = new_session()
-
-    user_input = str(
-        user_input or ""
-    ).strip()
-
-    if not user_input:
-
-        choices = turn_choices(state)
-
-        latest = (
-            choices[-1]
-            if choices
-            else None
-        )
-
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            feedback_hint_html(state),
-            "",
-            gr.update(visible=False),
-
-            # developer feedback
-            gr.update(
-                choices=choices,
-                value=latest,
-            ),
-            "",
-            gr.update(visible=False),
-        )
-
-    history = list(
-        state["history"]
-    )
-
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
-
-    try:
-
-        response = state[
-            "agent"
-        ].reply(
-            history
-        )
-
-    except Exception as exc:
-
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    response = str(
-        response or ""
-    ).strip()
-
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
-
-    state["history"] = history
-
-    state["turns"] += 1
-
-    snapshot = dict(
-        get_last_run(
-            state["agent"]
-        )
-    )
-
-    snapshot["turn"] = state["turns"]
-
-    snapshot["user"] = user_input
-
-    snapshot["response"] = response
-
-    snapshot["created_at"] = now_iso()
-
-    state["trace"].append(
-        snapshot
-    )
-
-    save_session(state)
-
-    choices = turn_choices(state)
-
-    latest = (
-        choices[-1]
-        if choices
-        else None
-    )
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        feedback_hint_html(state),
-        "",
-        gr.update(visible=False),
-
-        # developer feedback
-        gr.update(
-            choices=choices,
-            value=latest,
-        ),
-        "",
-        gr.update(visible=False),
-    )
-
-
-# ============================================================
-# User Feedback
-# ============================================================
-
-def submit_positive(state):
-
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
-
-        return (
-            state,
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-            gr.update(visible=False),
-            trace_html(state)
-            if state
-            else render_trace([], {}),
-        )
-
-    turn = state["turns"]
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "positive",
-        "reason": None,
-        "reason_text": None,
-        "comment": "",
-        "created_at": now_iso(),
-    }
-
-    save_session(state)
-
-    return (
-        state,
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-        gr.update(visible=False),
-        trace_html(state),
-    )
-
-
-def show_negative_feedback(state):
-
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
-
-        return (
-            gr.update(visible=False),
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-        )
-
-    return (
-        gr.update(visible=True),
-        "",
-    )
-
-
-def submit_negative(
-    reason_text,
-    comment,
-    state,
-):
-
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
-
-        return (
-            state,
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-            gr.update(visible=True),
-            reason_text,
-            comment,
-            trace_html(state)
-            if state
-            else render_trace([], {}),
-        )
-
-    reason_text = str(
-        reason_text or ""
-    ).strip()
-
-    if not reason_text:
-
-        return (
-            state,
-            render_feedback_result(
-                False,
-                "请选择一个不满意原因。",
-            ),
-            gr.update(visible=True),
-            reason_text,
-            comment,
-            trace_html(state),
-        )
-
-    turn = state["turns"]
-
-    reason_code = FEEDBACK_REASONS.get(
-        reason_text,
-        "other",
-    )
-
-    comment = str(
-        comment or ""
-    ).strip()
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "negative",
-        "reason": reason_code,
-        "reason_text": reason_text,
-        "comment": comment,
-        "created_at": now_iso(),
-    }
-
-    save_session(state)
-
-    return (
-        state,
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-        gr.update(visible=False),
-        None,
-        "",
-        trace_html(state),
-    )
-
-
-# ============================================================
-# Developer Feedback
-# ============================================================
-
-def developer_positive(
-    selected_turn,
-    state,
-):
-
-    turn = parse_turn(
-        selected_turn,
-        state,
-    )
-
-    if (
-        state is None
-        or turn <= 0
-    ):
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=False
-            ),
-
-            trace_html(state)
-            if state
-            else render_trace([], {}),
-        )
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "positive",
-        "reason": None,
-        "reason_text": None,
-        "comment": "",
-        "created_at": now_iso(),
-    }
-
-    save_session(state)
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            f"Turn {turn} 已标记为满意。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        trace_html(state),
-    )
-
-
-def developer_show_negative(
-    selected_turn,
-    state,
-):
-
-    turn = parse_turn(
-        selected_turn,
-        state,
-    )
-
-    if (
-        state is None
-        or turn <= 0
-    ):
-
-        return (
-            gr.update(
-                visible=False
-            ),
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-        )
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        "",
-    )
-
-
-def developer_negative(
-    selected_turn,
-    reason_text,
-    comment,
-    state,
-):
-
-    turn = parse_turn(
-        selected_turn,
-        state,
-    )
-
-    if (
-        state is None
-        or turn <= 0
-    ):
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state)
-            if state
-            else render_trace([], {}),
-        )
-
-    reason_text = str(
-        reason_text or ""
-    ).strip()
-
-    if not reason_text:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "请选择一个不满意原因。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state),
-        )
-
-    reason_code = FEEDBACK_REASONS.get(
-        reason_text,
-        "other",
-    )
-
-    comment = str(
-        comment or ""
-    ).strip()
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "negative",
-        "reason": reason_code,
-        "reason_text": reason_text,
-        "comment": comment,
-        "created_at": now_iso(),
-    }
-
-    save_session(state)
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            f"Turn {turn} 已记录不满意反馈。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        None,
-
-        "",
-
-        trace_html(state),
-    )
-
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        "",
-        feedback_hint_html(state),
-        gr.update(visible=False),
-        None,
-        "",
-
-        # developer feedback
-        gr.update(
-            choices=[],
-            value=None,
-        ),
-        "",
-        gr.update(visible=False),
-        None,
-        "",
-    )
-
-
-# ============================================================
-# Load Prefix
-# ============================================================
-
-def load_prefix(
-    prefix_text,
-    state,
-):
-
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
-    )
-
-    if not history:
-
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
-
-            gr.update(
-                choices=turn_choices(state),
-                value=None,
-            ),
-        )
-
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
-
-    state["history"] = history
-
-    state["trace"] = []
-
-    state["prefix_history"] = list(
-        history
-    )
-
-    state["turns"] = 0
-
-    state["feedback"] = {}
-
-    save_session(state)
-
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-
-        gr.update(
-            choices=[],
-            value=None,
-        ),
-    )
-
-
-# ============================================================
-# View Switching
-# ============================================================
-
-def show_user_view():
-
-    return (
-        gr.update(visible=True),
-        gr.update(visible=False),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-    )
-
-
-def show_developer_view():
-
-    return (
-        gr.update(visible=False),
-        gr.update(visible=True),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-    )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-initial_state = new_session()
-
-
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
-
-    session_state = gr.State(
-        initial_state
-    )
-
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        render_header(),
-        container=False,
-    )
-
-    # ========================================================
-    # Mode Switch
-    # ========================================================
-
-    with gr.Row(
-        elem_classes=[
-            "mode-switch"
-        ]
-    ):
-
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-active"
-            ],
-        )
-
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-inactive"
-            ],
-        )
-
-    # ========================================================
-    # USER VIEW
-    # ========================================================
-
-    with gr.Column(
-        visible=True,
-        elem_classes=[
-            "user-workspace"
-        ],
-    ) as user_view:
-
-        gr.HTML(
-            """
-            <div class="workspace-heading">
-                <div class="column-title">
-                    IT 智能客服
-                </div>
-
-                <div class="column-subtitle">
-                    Huawei IT Support
-                </div>
-            </div>
-            """,
-            container=False,
-        )
-
-        user_chat = gr.HTML(
-            user_chat_html(
-                initial_state
-            ),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-html",
-            ],
-        )
-
-        # ====================================================
-        # User Feedback
-        # ====================================================
-
-        with gr.Column(
-            elem_classes=[
-                "feedback-area"
-            ],
-        ):
-
-            feedback_hint = gr.HTML(
-                feedback_hint_html(
-                    initial_state
-                ),
-                container=False,
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "feedback-buttons"
-                ]
-            ):
-
-                positive_button = gr.Button(
-                    "👍 满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
-
-                negative_button = gr.Button(
-                    "👎 不满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
-
-            feedback_result = gr.HTML(
-                "",
-                container=False,
-            )
-
-            with gr.Column(
-                visible=False,
-                elem_classes=[
-                    "feedback-detail"
-                ],
-            ) as negative_feedback_panel:
-
-                feedback_reason = gr.Radio(
-                    choices=list(
-                        FEEDBACK_REASONS.keys()
-                    ),
-                    label="请选择不满意的原因",
-                )
-
-                feedback_comment = gr.Textbox(
-                    label="补充说明（可选）",
-                    placeholder="如果方便，可以简单说明具体问题...",
-                    lines=2,
-                    max_lines=3,
-                )
-
-                feedback_submit = gr.Button(
-                    "提交反馈",
-                    variant="primary",
-                    size="sm",
-                )
-
-        # ====================================================
-        # User Input
-        # ====================================================
-
-        with gr.Row(
-            elem_classes=[
-                "chat-input-row"
-            ]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder="请输入您的 IT 问题...",
-                show_label=False,
-                lines=2,
-                max_lines=4,
-                elem_classes=[
-                    "chat-input"
-                ],
-                scale=12,
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=[
-                    "send-button"
-                ],
-                scale=1,
-                min_width=110,
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=[
-            "developer-workspace"
-        ],
-        equal_height=True,
-    ) as developer_view:
-
-        # ====================================================
-        # LEFT
-        # ====================================================
-
-        with gr.Column(
-            scale=52,
-            min_width=0,
-            elem_classes=[
-                "chat-column"
-            ],
-        ):
-
-            with gr.Row(
-                elem_classes=[
-                    "panel-heading-row"
-                ]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-                        <div class="column-title">
-                            Conversation
-                        </div>
-
-                        <div class="column-subtitle">
-                            Current dialogue
-                        </div>
-                    </div>
-                    """,
-                    container=False,
-                )
-
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                    elem_classes=[
-                        "session-html"
-                    ],
-                )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-toolbar"
-                ]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                    elem_classes=[
-                        "new-chat-button"
-                    ],
-                )
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html",
-                    "developer-chat-html",
-                ],
-            )
-
-            # =================================================
-            # Developer Feedback
-            # =================================================
-
-            with gr.Column(
-                elem_classes=[
-                    "feedback-area"
-                ]
-            ):
-
-                developer_feedback_turn = gr.Dropdown(
-                    choices=[],
-                    value=None,
-                    label="评价回复",
-                    info="选择需要评价的对话轮次",
-                )
-
-                with gr.Row(
-                    elem_classes=[
-                        "feedback-buttons"
-                    ]
-                ):
-
-                    developer_positive_button = gr.Button(
-                        "👍 满意",
-                        size="sm",
-                        variant="secondary",
-                        elem_classes=[
-                            "feedback-button"
-                        ],
-                    )
-
-                    developer_negative_button = gr.Button(
-                        "👎 不满意",
-                        size="sm",
-                        variant="secondary",
-                        elem_classes=[
-                            "feedback-button"
-                        ],
-                    )
-
-                developer_feedback_result = gr.HTML(
-                    "",
-                    container=False,
-                )
-
-                with gr.Column(
-                    visible=False,
-                    elem_classes=[
-                        "feedback-detail"
-                    ],
-                ) as developer_negative_panel:
-
-                    developer_feedback_reason = gr.Radio(
-                        choices=list(
-                            FEEDBACK_REASONS.keys()
-                        ),
-                        label="请选择不满意的原因",
-                    )
-
-                    developer_feedback_comment = gr.Textbox(
-                        label="补充说明（可选）",
-                        placeholder="如果方便，可以简单说明具体问题...",
-                        lines=2,
-                        max_lines=3,
-                    )
-
-                    developer_feedback_submit = gr.Button(
-                        "提交反馈",
-                        variant="primary",
-                        size="sm",
-                    )
-
-            # =================================================
-            # Developer Input
-            # =================================================
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-input-row"
-                ]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder="请输入 IT 问题...",
-                    show_label=False,
-                    lines=2,
-                    max_lines=4,
-                    elem_classes=[
-                        "chat-input"
-                    ],
-                    scale=12,
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=[
-                        "send-button"
-                    ],
-                    scale=1,
-                    min_width=105,
-                )
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=[
-                    "history-loader"
-                ],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
-                    "",
-                    container=False,
-                    elem_classes=[
-                        "prefix-area"
-                    ],
-                )
-
-        # ====================================================
-        # RIGHT
-        # ====================================================
-
-        with gr.Column(
-            scale=48,
-            min_width=0,
-            elem_classes=[
-                "decision-column"
-            ],
-        ):
-
-            gr.HTML(
-                """
-                <div class="workspace-heading">
-                    <div class="column-title">
-                        Agent Decision
-                    </div>
-
-                    <div class="column-subtitle">
-                        Internal execution state
-                    </div>
-                </div>
-                """,
-                container=False,
-            )
-
-            with gr.Tabs(
-                elem_classes=[
-                    "decision-tabs"
-                ]
-            ):
-
-                with gr.Tab(
-                    "当前决策"
-                ):
-
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "decision-html"
-                        ],
-                    )
-
-                with gr.Tab(
-                    "运行轨迹"
-                ):
-
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "trace-html"
-                        ],
-                    )
-
-    # ========================================================
-    # Chat Events
-    # ========================================================
-
-    chat_outputs_user = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-
-        developer_feedback_turn,
-        developer_feedback_result,
-        developer_negative_panel,
-    ]
-
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs_user,
-        api_name="chat",
-    )
-
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs_user,
-    )
-
-    chat_outputs_developer = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-
-        developer_feedback_turn,
-        developer_feedback_result,
-        developer_negative_panel,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=chat_outputs_developer,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=chat_outputs_developer,
-    )
-
-    # ========================================================
-    # User Feedback Events
-    # ========================================================
-
-    positive_button.click(
-        fn=submit_positive,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            trace_panel,
-        ],
-    )
-
-    negative_button.click(
-        fn=show_negative_feedback,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            negative_feedback_panel,
-            feedback_result,
-        ],
-    )
-
-    feedback_submit.click(
-        fn=submit_negative,
-        inputs=[
-            feedback_reason,
-            feedback_comment,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-            trace_panel,
-        ],
-    )
-
-    # ========================================================
-    # Developer Feedback Events
-    # ========================================================
-
-    developer_positive_button.click(
-        fn=developer_positive,
-        inputs=[
-            developer_feedback_turn,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            developer_feedback_result,
-            developer_negative_panel,
-            trace_panel,
-        ],
-    )
-
-    developer_negative_button.click(
-        fn=developer_show_negative,
-        inputs=[
-            developer_feedback_turn,
-            session_state,
-        ],
-        outputs=[
-            developer_negative_panel,
-            developer_feedback_result,
-        ],
-    )
-
-    developer_feedback_submit.click(
-        fn=developer_negative,
-        inputs=[
-            developer_feedback_turn,
-            developer_feedback_reason,
-            developer_feedback_comment,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            developer_feedback_result,
-            developer_negative_panel,
-            developer_feedback_reason,
-            developer_feedback_comment,
-            trace_panel,
-        ],
-    )
-
-    # ========================================================
-    # Mode
-    # ========================================================
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    # ========================================================
-    # Reset
-    # ========================================================
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-            feedback_hint,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-
-            developer_feedback_turn,
-            developer_feedback_result,
-            developer_negative_panel,
-            developer_feedback_reason,
-            developer_feedback_comment,
-        ],
-    )
-
-    # ========================================================
-    # Prefix
-    # ========================================================
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-            developer_feedback_turn,
-        ],
-    )
-
-
-# ============================================================
-# Launch
-# ============================================================
-
-if __name__ == "__main__":
-
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
-    )
+必须满足：
+
+* split = true；
+* dimension 只表示一个明确语义维度；
+* 相同 topic 表示 Cases 属于同一个 Case Group；
+* 不同 topic 表示同一 Dimension 下不同的 Sibling Topics；
+* 至少形成两个不同的 Sibling Topics；
+* 每个输入 case_id 必须出现且只能出现一次；
+* 不得遗漏或新增 case_id；
+* 不输出 children；
+* 不输出嵌套结构；
+* 不生成当前层以下的 Topic Structure。
+
+
+### 当前不存在合理划分时
+
+{
+  "split": false,
+  "dimension": "",
+  "assignments": []
+}
+
+不要为了继续生成 Topic Structure 而强行制造差异。
