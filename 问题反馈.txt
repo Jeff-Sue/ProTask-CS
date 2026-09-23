@@ -1,187 +1,971 @@
-from __future__ import annotations
-
+import html
 import json
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict
-
-
-# ============================================================
-# Paths
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-LOG_DIR = PROJECT_DIR / "logs"
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def now_iso():
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+def escape(value):
+    if value is None:
+        return ""
 
-
-def ensure_log_dir():
-    LOG_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+    return html.escape(
+        str(value)
     )
 
 
-def get_log_path(session_id):
-    ensure_log_dir()
+def json_text(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+        )
 
-    safe_session_id = str(
-        session_id
-    ).replace("/", "_").replace("\\", "_")
-
-    return LOG_DIR / f"{safe_session_id}.json"
+    except Exception:
+        return str(value)
 
 
-def json_safe(value):
-    """
-    将对象转换成可以 JSON 序列化的形式。
+def badge(text, kind="gray"):
 
-    正常情况下 trace 内部都是 dict/list/str，
-    这里主要作为保险。
-    """
+    if text is None:
+        text = ""
 
-    if value is None:
-        return None
-
-    if isinstance(
-        value,
-        (str, int, float, bool),
-    ):
-        return value
-
-    if isinstance(value, dict):
-        return {
-            str(key): json_safe(item)
-            for key, item in value.items()
-        }
-
-    if isinstance(value, (list, tuple)):
-        return [
-            json_safe(item)
-            for item in value
-        ]
-
-    return str(value)
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{escape(text)}'
+        f'</span>'
+    )
 
 
 # ============================================================
-# Session Log
+# Header
 # ============================================================
 
-def build_session_log(state):
-    """
-    从 Gradio session state 构造最终保存的数据。
+def render_header():
 
-    注意：
-    - agent 不保存
-    - history 主要用于界面
-    - trace 才是系统真实执行出来的 turn
-    - feedback 根据 turn 合并到对应 turn
+    return """
+    <div class="app-header">
+
+        <div class="header-left">
+
+            <div class="header-eyebrow">
+                Huawei IT Support · Agent Console
+            </div>
+
+            <div class="header-title">
+                IT 智能客服 Agent
+            </div>
+
+            <div class="header-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+
+        </div>
+
+        <div class="online-status">
+            <span class="online-dot"></span>
+            Agent Online
+        </div>
+
+    </div>
     """
 
-    feedback_map = (
-        state.get("feedback", {})
+
+# ============================================================
+# Session
+# ============================================================
+
+def render_session(session_id, turns):
+
+    return f"""
+    <div class="session-inline">
+
+        <span class="session-status">
+            <span class="running-dot"></span>
+            Running
+        </span>
+
+        <span class="session-divider"></span>
+
+        <span>
+            Session
+            <b>{escape(session_id)}</b>
+        </span>
+
+        <span class="session-divider"></span>
+
+        <span>
+            Turn
+            <b>{turns}</b>
+        </span>
+
+    </div>
+    """
+
+
+# ============================================================
+# Chat
+# ============================================================
+
+def render_empty_chat(user_mode=False):
+
+    if user_mode:
+
+        title = "您好，有什么可以帮您？"
+
+        desc = (
+            "请描述您遇到的 IT 问题，"
+            "我会尽力协助您解决。"
+        )
+
+    else:
+
+        title = "开始新的 IT 支持会话"
+
+        desc = (
+            "输入用户问题后，Agent 将执行 Query、Retrieval、"
+            "Topic Analysis、Policy 和 Response。"
+        )
+
+    return f"""
+    <div class="chat-surface">
+
+        <div class="empty-chat">
+
+            <div class="empty-symbol">
+                ✦
+            </div>
+
+            <div class="empty-title">
+                {title}
+            </div>
+
+            <div class="empty-desc">
+                {desc}
+            </div>
+
+        </div>
+
+    </div>
+    """
+
+
+def render_chat(history, user_mode=False):
+
+    if not history:
+        return render_empty_chat(
+            user_mode=user_mode
+        )
+
+    rows = []
+
+    for message in history:
+
+        role = message.get(
+            "role"
+        )
+
+        content = escape(
+            message.get(
+                "content",
+                "",
+            )
+        )
+
+        if role == "user":
+
+            rows.append(
+                f"""
+                <div class="message-row user-row">
+
+                    <div class="message-wrap user-wrap">
+
+                        <div class="message-role user-role">
+                            用户
+                        </div>
+
+                        <div class="message-bubble user-message">
+                            {content}
+                        </div>
+
+                    </div>
+
+                    <div class="avatar user-avatar">
+                        U
+                    </div>
+
+                </div>
+                """
+            )
+
+        elif role == "assistant":
+
+            rows.append(
+                f"""
+                <div class="message-row agent-row">
+
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
+
+                    <div class="message-wrap agent-wrap">
+
+                        <div class="message-role">
+                            智能客服
+                        </div>
+
+                        <div class="message-bubble agent-message">
+                            {content}
+                        </div>
+
+                    </div>
+
+                </div>
+                """
+            )
+
+    return f"""
+    <div class="chat-surface">
+
+        <div class="chat-scroll">
+            {''.join(rows)}
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Feedback
+# ============================================================
+
+def render_feedback_hint(turn=None):
+
+    if not turn:
+        return """
+        <div class="feedback-hint feedback-hint-empty">
+            完成一次对话后，可对客服回复进行反馈。
+        </div>
+        """
+
+    return f"""
+    <div class="feedback-hint">
+        <span>对本次回复是否满意？</span>
+        <span class="feedback-turn">
+            Turn {escape(turn)}
+        </span>
+    </div>
+    """
+
+
+def render_feedback_result(
+    success,
+    message,
+):
+
+    cls = (
+        "feedback-success"
+        if success
+        else "feedback-error"
+    )
+
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
+
+
+# ============================================================
+# Topic Tree
+# ============================================================
+
+def render_topic_tree(tree):
+
+    if not tree:
+
+        return """
+        <div class="empty-small">
+            暂无 Topic Structure
+        </div>
+        """
+
+    def walk(node, depth=0):
+
+        topic = escape(
+            node.get(
+                "topic",
+                "",
+            )
+        )
+
+        dimension = escape(
+            node.get(
+                "dimension",
+                "",
+            )
+        )
+
+        case_ids = (
+            node.get("case_ids")
+            or []
+        )
+
+        if isinstance(
+            case_ids,
+            str,
+        ):
+            case_ids = [case_ids]
+
+        case_text = ", ".join(
+            escape(x)
+            for x in case_ids
+        )
+
+        leaf = bool(
+            node.get("leaf")
+        )
+
+        node_class = (
+            "tree-node tree-leaf"
+            if leaf
+            else "tree-node"
+        )
+
+        margin = depth * 20
+
+        dimension_html = ""
+
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
+            )
+
+        case_html = ""
+
+        if case_text:
+            case_html = (
+                f'<span class="tree-case">'
+                f'{case_text}'
+                f'</span>'
+            )
+
+        current = f"""
+        <div
+            class="{node_class}"
+            style="margin-left:{margin}px"
+        >
+
+            <span class="tree-dot"></span>
+
+            <span class="tree-topic">
+                {topic}
+            </span>
+
+            {dimension_html}
+
+            {case_html}
+
+        </div>
+        """
+
+        children = (
+            node.get("children")
+            or []
+        )
+
+        return current + "".join(
+            walk(
+                child,
+                depth + 1,
+            )
+            for child in children
+        )
+
+    return f"""
+    <div class="topic-tree">
+        {walk(tree)}
+    </div>
+    """
+
+
+# ============================================================
+# Evidence
+# ============================================================
+
+def render_cases(cases):
+
+    if not cases:
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
+
+    items = []
+
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
+            continue
+
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or f"Case {index + 1}"
+        )
+
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or case.get("content")
+            or case.get("problem")
+            or ""
+        )
+
+        title = str(title).strip()
+
+        preview = title
+
+        if len(preview) > 100:
+            preview = preview[:100] + "..."
+
+        detail_rows = []
+
+        for key, value in case.items():
+
+            if value is None:
+                continue
+
+            if isinstance(
+                value,
+                (dict, list),
+            ):
+                value_text = json_text(
+                    value
+                )
+            else:
+                value_text = str(value)
+
+            if not value_text.strip():
+                continue
+
+            detail_rows.append(
+                f"""
+                <div class="case-detail-row">
+
+                    <div class="case-detail-key">
+                        {escape(key)}
+                    </div>
+
+                    <div class="case-detail-value">
+                        {escape(value_text)}
+                    </div>
+
+                </div>
+                """
+            )
+
+        details_html = "".join(
+            detail_rows
+        )
+
+        items.append(
+            f"""
+            <details class="case-card">
+
+                <summary class="case-card-summary">
+
+                    <div class="case-card-main">
+
+                        <div class="case-card-id">
+                            {escape(case_id)}
+                        </div>
+
+                        <div class="case-card-preview">
+                            {
+                                escape(preview)
+                                if preview
+                                else "点击查看案例详情"
+                            }
+                        </div>
+
+                    </div>
+
+                    <div class="case-card-action">
+
+                        <span class="case-expand-text">
+                            查看详情
+                        </span>
+
+                        <span class="case-chevron">
+                            ›
+                        </span>
+
+                    </div>
+
+                </summary>
+
+                <div class="case-detail">
+
+                    <div class="case-detail-header">
+                        Case Detail
+                    </div>
+
+                    {details_html}
+
+                </div>
+
+            </details>
+            """
+        )
+
+    if not items:
+        return """
+        <div class="empty-small">
+            当前没有可显示的 Active Cases
+        </div>
+        """
+
+    return "".join(items)
+
+
+# ============================================================
+# Latency
+# ============================================================
+
+def render_latency(latency):
+
+    latency = latency or {}
+
+    def ms_value(name):
+
+        value = latency.get(
+            name,
+            0,
+        )
+
+        try:
+            return float(value)
+
+        except Exception:
+            return 0.0
+
+    query_ms = ms_value("query_ms")
+    trigger_ms = ms_value("trigger_ms")
+    rag_ms = ms_value("rag_ms")
+    topic_ms = ms_value("topic_ms")
+    policy_ms = ms_value("policy_ms")
+    response_ms = ms_value("response_ms")
+    total_ms = ms_value("total_ms")
+
+    def seconds(ms):
+        return ms / 1000.0
+
+    return f"""
+    <div class="latency-total">
+        {seconds(total_ms):.2f}
+        <span>s</span>
+    </div>
+
+    <div class="latency-grid">
+
+        <div>
+            <span>Query</span>
+            <b>{seconds(query_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Trigger</span>
+            <b>{seconds(trigger_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>RAG</span>
+            <b>{seconds(rag_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Topic</span>
+            <b>{seconds(topic_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Policy</span>
+            <b>{seconds(policy_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Response</span>
+            <b>{seconds(response_ms):.2f}s</b>
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Decision
+# ============================================================
+
+def render_decision(snapshot):
+
+    if not snapshot:
+
+        return """
+        <div class="decision-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-symbol">
+                    ◇
+                </div>
+
+                <div class="decision-empty-title">
+                    Waiting for interaction
+                </div>
+
+                <div class="decision-empty-desc">
+                    当前轮执行后，Query、Trigger、Evidence、
+                    Topic、Policy 和 Latency 将显示在这里。
+                </div>
+
+            </div>
+
+        </div>
+        """
+
+    query_state = (
+        snapshot.get("query_state")
         or {}
     )
 
-    turns = []
+    trigger_state = (
+        snapshot.get("trigger_state")
+        or {}
+    )
 
-    for trace_item in (
-        state.get("trace", [])
+    policy_state = (
+        snapshot.get("policy_state")
+        or {}
+    )
+
+    evidence_state = (
+        snapshot.get("evidence_state")
+        or {}
+    )
+
+    active_cases = (
+        evidence_state.get(
+            "active_cases",
+            [],
+        )
         or []
+    )
+
+    topic_structure = (
+        evidence_state.get(
+            "topic_structure",
+            {},
+        )
+        or {}
+    )
+
+    latency = (
+        snapshot.get("latency")
+        or {}
+    )
+
+    query_mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query_state.get(
+        "query_text",
+        "",
+    )
+
+    trigger = trigger_state.get(
+        "trigger",
+        "",
+    )
+
+    evidence_mode = trigger_state.get(
+        "evidence_mode",
+        "",
+    )
+
+    policy = policy_state.get(
+        "label",
+        "",
+    )
+
+    information = policy_state.get(
+        "information"
+    )
+
+    return f"""
+    <div class="decision-surface">
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Query
+            </div>
+
+            <div class="decision-line">
+                {badge(query_mode, "blue")}
+            </div>
+
+            <div class="decision-text">
+                {escape(query_text) or "None"}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Trigger
+            </div>
+
+            <div class="decision-row">
+                <span>Trigger</span>
+                {badge(trigger, "green")}
+            </div>
+
+            <div class="decision-row">
+                <span>Evidence Mode</span>
+                {badge(evidence_mode, "gray")}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Evidence
+            </div>
+
+            <div class="case-list">
+                {render_cases(active_cases)}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Topic Structure
+            </div>
+
+            {render_topic_tree(topic_structure)}
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Policy
+            </div>
+
+            <div class="decision-line">
+                {badge(policy, "blue")}
+            </div>
+
+            <div class="sub-label">
+                Information
+            </div>
+
+            <pre class="json-view">{escape(json_text(information))}</pre>
+
+        </div>
+
+        <div class="decision-section latency-section">
+
+            <div class="section-heading">
+                Latency
+            </div>
+
+            {render_latency(latency)}
+
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(trace):
+
+    if not trace:
+
+        return """
+        <div class="trace-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-title">
+                    暂无运行轨迹
+                </div>
+
+                <div class="decision-empty-desc">
+                    每完成一轮交互，执行轨迹会显示在这里。
+                </div>
+
+            </div>
+
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
     ):
-        item = dict(trace_item)
 
-        turn_id = item.get("turn")
-
-        feedback = (
-            feedback_map.get(turn_id)
-            or feedback_map.get(str(turn_id))
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
         )
 
-        item["feedback"] = feedback
-
-        turns.append(
-            json_safe(item)
-        )
-
-    data = {
-        "session_id": state.get(
-            "session_id",
-            "",
-        ),
-
-        "created_at": state.get(
-            "created_at",
-            "",
-        ),
-
-        "updated_at": now_iso(),
-
-        "prefix_history": json_safe(
-            state.get(
-                "prefix_history",
-                [],
+        user = escape(
+            item.get(
+                "user",
+                "",
             )
-        ),
+        )
 
-        "turns": turns,
-    }
+        query = (
+            item.get("query_state")
+            or {}
+        )
 
-    return data
+        trigger = (
+            item.get("trigger_state")
+            or {}
+        )
 
+        policy = (
+            item.get("policy_state")
+            or {}
+        )
 
-def save_session(state):
+        latency = (
+            item.get("latency")
+            or {}
+        )
+
+        try:
+            total = (
+                float(
+                    latency.get(
+                        "total_ms",
+                        0,
+                    )
+                )
+                / 1000.0
+            )
+
+        except Exception:
+            total = 0.0
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+
+                    <b>
+                        Turn {turn}
+                    </b>
+
+                    <span>
+                        {total:.2f}s
+                    </span>
+
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+
+                    {badge(
+                        query.get(
+                            "query_mode",
+                            "none",
+                        ),
+                        "blue"
+                    )}
+
+                    <span class="flow-arrow">
+                        →
+                    </span>
+
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            "",
+                        ),
+                        "gray"
+                    )}
+
+                    <span class="flow-arrow">
+                        →
+                    </span>
+
+                    {badge(
+                        policy.get(
+                            "label",
+                            "",
+                        ),
+                        "green"
+                    )}
+
+                </div>
+
+            </div>
+            """
+        )
+
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
     """
-    保存整个 session。
 
-    每次：
-    - Agent 完成一轮
-    - 用户提交反馈
 
-    都调用一次。
+# ============================================================
+# Prefix
+# ============================================================
 
-    使用临时文件 + replace，避免写一半时留下损坏 JSON。
+def render_prefix_result(
+    success,
+    message,
+):
+
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
+    )
+
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
     """
-
-    if not state:
-        return None
-
-    session_id = state.get(
-        "session_id"
-    )
-
-    if not session_id:
-        return None
-
-    path = get_log_path(
-        session_id
-    )
-
-    data = build_session_log(
-        state
-    )
-
-    temp_path = path.with_suffix(
-        ".json.tmp"
-    )
-
-    temp_path.write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    temp_path.replace(path)
-
-    return path
