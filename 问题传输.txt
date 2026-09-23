@@ -1,4942 +1,1073 @@
-from __future__ import annotations
-
-import sys
-import uuid
-from datetime import datetime
-from pathlib import Path
-
-import gradio as gr
-
-
-# ============================================================
-# Project Path
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-
-from Agent.agentv2_3 import MemoryAgent
-
-from project.logger import save_session
-
-from project.styles import CSS
-
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-    render_feedback_hint,
-    render_feedback_result,
-)
-
-
-# ============================================================
-# Feedback
-# ============================================================
-
-FEEDBACK_REASONS = {
-    "没理解我的问题":
-        "misunderstanding",
-
-    "重复或多余询问":
-        "repeated_or_unnecessary_question",
-
-    "推荐结果不对":
-        "wrong_result",
-
-    "回复内容有问题":
-        "response_problem",
-
-    "其他":
-        "other",
-}
+import html
+import json
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def now_iso():
-    return datetime.now().astimezone().isoformat(
-        timespec="seconds"
+def escape(value):
+    if value is None:
+        return ""
+
+    return html.escape(
+        str(value)
     )
+
+
+def json_text(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    except Exception:
+        return str(value)
+
+
+def badge(text, kind="gray"):
+
+    if text is None:
+        text = ""
+
+    return (
+        f'<span class="badge badge-{kind}">'
+        f'{escape(text)}'
+        f'</span>'
+    )
+
+
+# ============================================================
+# Header
+# ============================================================
+
+def render_header():
+
+    return """
+    <div class="app-header">
+
+        <div class="header-left">
+
+            <div class="header-eyebrow">
+                Huawei IT Support · Agent Console
+            </div>
+
+            <div class="header-title">
+                IT 智能客服 Agent
+            </div>
+
+            <div class="header-desc">
+                Query · Evidence Retrieval · Topic Structure ·
+                Policy Decision · Response
+            </div>
+
+        </div>
+
+        <div class="online-status">
+            <span class="online-dot"></span>
+            Agent Online
+        </div>
+
+    </div>
+    """
 
 
 # ============================================================
 # Session
 # ============================================================
 
-def new_session():
+def render_session(session_id, turns):
 
-    return {
-        "session_id":
-            "web_" + uuid.uuid4().hex[:10],
+    return f"""
+    <div class="session-inline">
 
-        "created_at":
-            now_iso(),
+        <span class="session-status">
+            <span class="running-dot"></span>
+            Running
+        </span>
 
-        "agent": MemoryAgent(
-            mode="single",
-            show_state=False,
-        ),
+        <span class="session-divider"></span>
 
-        "history": [],
+        <span>
+            Session
+            <b>{escape(session_id)}</b>
+        </span>
 
-        # 系统真实运行产生的 turn
-        "trace": [],
+        <span class="session-divider"></span>
 
-        # 用户加载的已有历史
-        "prefix_history": [],
+        <span>
+            Turn
+            <b>{turns}</b>
+        </span>
 
-        "turns": 0,
-
-        "mode": "user",
-
-        # {
-        #     turn_id: {
-        #         rating,
-        #         reason,
-        #         comment,
-        #         created_at
-        #     }
-        # }
-        "feedback": {},
-    }
-
-
-# ============================================================
-# Agent Snapshot
-# ============================================================
-
-def get_last_run(agent):
-
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
-
-    if turn_state:
-
-        return {
-            "query_state":
-                turn_state.get(
-                    "query",
-                    {},
-                ) or {},
-
-            "trigger_state":
-                turn_state.get(
-                    "trigger",
-                    {},
-                ) or {},
-
-            "evidence_state":
-                turn_state.get(
-                    "evidence",
-                    {},
-                ) or {},
-
-            "policy_state":
-                turn_state.get(
-                    "policy",
-                    {},
-                ) or {},
-
-            "response":
-                turn_state.get(
-                    "response",
-                    "",
-                ),
-
-            "latency":
-                turn_state.get(
-                    "latency",
-                    {},
-                ) or {},
-        }
-
-    # fallback
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    ) or {}
-
-    return {
-        "query_state": {},
-
-        "trigger_state": {},
-
-        "evidence_state":
-            memory.get(
-                "evidence_state",
-                {},
-            ) or {},
-
-        "policy_state":
-            (
-                memory
-                .get(
-                    "interaction_state",
-                    {},
-                )
-                .get(
-                    "last_policy",
-                    {},
-                )
-                or {}
-            ),
-
-        "response": "",
-
-        "latency": {},
-    }
-
-
-# ============================================================
-# History Parser
-# ============================================================
-
-def parse_prefix(text):
-
-    history = []
-
-    if not text:
-        return history
-
-    for raw_line in text.splitlines():
-
-        line = raw_line.strip()
-
-        if not line:
-            continue
-
-        if line.startswith("用户:"):
-
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("用户："):
-
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("客服:"):
-
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-        elif line.startswith("客服："):
-
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-    return history
-
-
-# ============================================================
-# Render Helpers
-# ============================================================
-
-def session_html(state):
-
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
-
-
-def developer_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
-
-
-def user_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
-
-
-def current_decision_html(state):
-
-    if not state["trace"]:
-        return render_decision(
-            None
-        )
-
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
-def trace_html(state):
-
-    return render_trace(
-        state["trace"],
-        state.get("feedback", {}),
-    )
-
-
-
-def feedback_hint_html(state):
-
-    if not state:
-        return render_feedback_hint(
-            None
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-        return render_feedback_hint(
-            None
-        )
-
-    return render_feedback_hint(
-        turn
-    )
+    </div>
+    """
 
 
 # ============================================================
 # Chat
 # ============================================================
 
-def chat(
-    user_input,
-    state,
-):
+def render_empty_chat(user_mode=False):
 
-    if state is None:
-        state = new_session()
+    if user_mode:
 
-    user_input = str(
-        user_input or ""
-    ).strip()
+        title = "您好，有什么可以帮您？"
 
-    if not user_input:
-
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            feedback_hint_html(state),
-            "",
-            gr.update(visible=False),
+        desc = (
+            "请描述您遇到的 IT 问题，"
+            "我会尽力协助您解决。"
         )
 
-    history = list(
-        state["history"]
-    )
+    else:
 
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
+        title = "开始新的 IT 支持会话"
 
-    try:
-
-        response = state[
-            "agent"
-        ].reply(
-            history
+        desc = (
+            "输入用户问题后，Agent 将执行 Query、Retrieval、"
+            "Topic Analysis、Policy 和 Response。"
         )
 
-    except Exception as exc:
+    return f"""
+    <div class="chat-surface">
 
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
+        <div class="empty-chat">
 
-    response = str(
-        response or ""
-    ).strip()
+            <div class="empty-symbol">
+                ✦
+            </div>
 
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
+            <div class="empty-title">
+                {title}
+            </div>
 
-    state["history"] = history
+            <div class="empty-desc">
+                {desc}
+            </div>
 
-    state["turns"] += 1
+        </div>
 
-    snapshot = get_last_run(
-        state["agent"]
-    )
+    </div>
+    """
 
-    snapshot = dict(
-        snapshot
-    )
 
-    snapshot["turn"] = (
-        state["turns"]
-    )
-
-    snapshot["user"] = (
-        user_input
-    )
-
-    snapshot["response"] = (
-        response
-    )
-
-    snapshot["created_at"] = (
-        now_iso()
-    )
-
-    state["trace"].append(
-        snapshot
-    )
-
-    # --------------------------------------------------------
-    # 每轮立即保存
-    # --------------------------------------------------------
-
-    save_session(
-        state
-    )
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        feedback_hint_html(state),
-        "",
-        gr.update(visible=False),
-    )
-
-
-# ============================================================
-# Feedback
-# ============================================================
-
-def submit_positive(
-    state,
-):
-
-    if state is None:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=False
-            ),
-
-            render_trace(
-                [],
-                {},
-            ),
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=False
-            ),
-
-            trace_html(state),
-        )
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "positive",
-        "reason": None,
-        "reason_text": None,
-        "comment": "",
-        "created_at": now_iso(),
-    }
-
-    # 保存到后台日志
-    save_session(
-        state
-    )
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        # 立即刷新开发者运行轨迹
-        trace_html(state),
-    )
-
-
-
-def show_negative_feedback(
-    state,
-):
-
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
-
-        return (
-            gr.update(
-                visible=False
-            ),
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-        )
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        "",
-    )
-
-
-def submit_negative(
-    reason_text,
-    comment,
-    state,
-):
-
-    if state is None:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            render_trace(
-                [],
-                {},
-            ),
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state),
-        )
-
-    reason_text = str(
-        reason_text or ""
-    ).strip()
-
-    if not reason_text:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "请选择一个不满意原因。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state),
-        )
-
-    reason_code = FEEDBACK_REASONS.get(
-        reason_text,
-        "other",
-    )
-
-    comment = str(
-        comment or ""
-    ).strip()
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "negative",
-        "reason": reason_code,
-        "reason_text": reason_text,
-        "comment": comment,
-        "created_at": now_iso(),
-    }
-
-    # 保存到后台日志
-    save_session(
-        state
-    )
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        None,
-
-        "",
-
-        # 立即刷新开发者运行轨迹
-        trace_html(state),
-    )
-
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        "",
-        feedback_hint_html(state),
-        gr.update(
-            visible=False
-        ),
-        None,
-        "",
-    )
-
-
-# ============================================================
-# Load Prefix
-# ============================================================
-
-def load_prefix(
-    prefix_text,
-    state,
-):
-
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
-    )
+def render_chat(history, user_mode=False):
 
     if not history:
-
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
+        return render_empty_chat(
+            user_mode=user_mode
         )
 
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
+    rows = []
 
-    state["history"] = history
+    for message in history:
 
-    # 这里不把加载历史伪装成真实 Agent trace
-    state["trace"] = []
-
-    state["prefix_history"] = list(
-        history
-    )
-
-    # 真实运行 turn 从 0 开始重新记录
-    state["turns"] = 0
-
-    state["feedback"] = {}
-
-    save_session(
-        state
-    )
-
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-    )
-
-
-# ============================================================
-# View Switching
-# ============================================================
-
-def show_user_view():
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-    )
-
-
-def show_developer_view():
-
-    return (
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-    )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-initial_state = new_session()
-
-
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
-
-    session_state = gr.State(
-        initial_state
-    )
-
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        render_header(),
-        container=False,
-    )
-
-    # ========================================================
-    # Mode Switch
-    # ========================================================
-
-    with gr.Row(
-        elem_classes=[
-            "mode-switch"
-        ]
-    ):
-
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-active"
-            ],
+        role = message.get(
+            "role"
         )
 
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-inactive"
-            ],
-        )
-
-    # ========================================================
-    # USER VIEW
-    # ========================================================
-
-    with gr.Column(
-        visible=True,
-        elem_classes=[
-            "user-workspace"
-        ],
-    ) as user_view:
-
-        gr.HTML(
-            """
-            <div class="workspace-heading">
-
-                <div class="column-title">
-                    IT 智能客服
-                </div>
-
-                <div class="column-subtitle">
-                    Huawei IT Support
-                </div>
-
-            </div>
-            """,
-            container=False,
-        )
-
-        user_chat = gr.HTML(
-            user_chat_html(
-                initial_state
-            ),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-html",
-            ],
-        )
-
-        # ====================================================
-        # Feedback
-        # ====================================================
-
-        with gr.Column(
-            elem_classes=[
-                "feedback-area"
-            ],
-        ):
-
-            feedback_hint = gr.HTML(
-                feedback_hint_html(
-                    initial_state
-                ),
-                container=False,
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "feedback-buttons"
-                ]
-            ):
-
-                positive_button = gr.Button(
-                    "👍 满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
-
-                negative_button = gr.Button(
-                    "👎 不满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
-
-            feedback_result = gr.HTML(
+        content = escape(
+            message.get(
+                "content",
                 "",
-                container=False,
             )
+        )
 
-            with gr.Column(
-                visible=False,
-                elem_classes=[
-                    "feedback-detail"
-                ],
-            ) as negative_feedback_panel:
+        if role == "user":
 
-                feedback_reason = gr.Radio(
-                    choices=list(
-                        FEEDBACK_REASONS.keys()
-                    ),
-                    label="请选择不满意的原因",
-                    elem_classes=[
-                        "feedback-reason"
-                    ],
-                )
+            rows.append(
+                f"""
+                <div class="message-row user-row">
 
-                feedback_comment = gr.Textbox(
-                    label="补充说明（可选）",
-                    placeholder=(
-                        "如果方便，可以简单说明具体问题..."
-                    ),
-                    lines=2,
-                    max_lines=3,
-                    elem_classes=[
-                        "feedback-comment"
-                    ],
-                )
+                    <div class="message-wrap user-wrap">
 
-                feedback_submit = gr.Button(
-                    "提交反馈",
-                    variant="primary",
-                    size="sm",
-                    elem_classes=[
-                        "feedback-submit"
-                    ],
-                )
-
-        # ====================================================
-        # Input
-        # ====================================================
-
-        with gr.Row(
-            elem_classes=[
-                "chat-input-row"
-            ]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder=(
-                    "请输入您的 IT 问题..."
-                ),
-                show_label=False,
-                lines=2,
-                max_lines=4,
-                elem_classes=[
-                    "chat-input"
-                ],
-                scale=12,
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=[
-                    "send-button"
-                ],
-                scale=1,
-                min_width=110,
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=[
-            "developer-workspace"
-        ],
-        equal_height=True,
-    ) as developer_view:
-
-        # ====================================================
-        # LEFT
-        # ====================================================
-
-        with gr.Column(
-            scale=52,
-            min_width=0,
-            elem_classes=[
-                "chat-column"
-            ],
-        ):
-
-            with gr.Row(
-                elem_classes=[
-                    "panel-heading-row"
-                ]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-
-                        <div class="column-title">
-                            Conversation
+                        <div class="message-role user-role">
+                            用户
                         </div>
 
-                        <div class="column-subtitle">
-                            Current dialogue
+                        <div class="message-bubble user-message">
+                            {content}
                         </div>
 
                     </div>
-                    """,
-                    container=False,
-                )
 
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                    elem_classes=[
-                        "session-html"
-                    ],
-                )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-toolbar"
-                ]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                    elem_classes=[
-                        "new-chat-button"
-                    ],
-                )
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html",
-                    "developer-chat-html",
-                ],
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-input-row"
-                ]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder=(
-                        "请输入 IT 问题..."
-                    ),
-                    show_label=False,
-                    lines=2,
-                    max_lines=4,
-                    elem_classes=[
-                        "chat-input"
-                    ],
-                    scale=12,
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=[
-                        "send-button"
-                    ],
-                    scale=1,
-                    min_width=105,
-                )
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=[
-                    "history-loader"
-                ],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
-                    "",
-                    container=False,
-                    elem_classes=[
-                        "prefix-area"
-                    ],
-                )
-
-        # ====================================================
-        # RIGHT
-        # ====================================================
-
-        with gr.Column(
-            scale=48,
-            min_width=0,
-            elem_classes=[
-                "decision-column"
-            ],
-        ):
-
-            gr.HTML(
-                """
-                <div class="workspace-heading">
-
-                    <div class="column-title">
-                        Agent Decision
-                    </div>
-
-                    <div class="column-subtitle">
-                        Internal execution state
+                    <div class="avatar user-avatar">
+                        U
                     </div>
 
                 </div>
-                """,
-                container=False,
+                """
             )
 
-            with gr.Tabs(
-                elem_classes=[
-                    "decision-tabs"
-                ]
-            ):
+        elif role == "assistant":
 
-                with gr.Tab(
-                    "当前决策"
-                ):
+            rows.append(
+                f"""
+                <div class="message-row agent-row">
 
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "decision-html"
-                        ],
-                    )
+                    <div class="avatar agent-avatar">
+                        AI
+                    </div>
 
-                with gr.Tab(
-                    "运行轨迹"
-                ):
+                    <div class="message-wrap agent-wrap">
 
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "trace-html"
-                        ],
-                    )
+                        <div class="message-role">
+                            智能客服
+                        </div>
 
-    # ========================================================
-    # Events
-    # ========================================================
+                        <div class="message-bubble agent-message">
+                            {content}
+                        </div>
 
-    chat_outputs = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
+                    </div>
 
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-        api_name="chat",
-    )
+                </div>
+                """
+            )
 
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
+    return f"""
+    <div class="chat-surface">
 
-    # --------------------------------------------------------
-    # Developer Chat
-    # --------------------------------------------------------
+        <div class="chat-scroll">
+            {''.join(rows)}
+        </div>
 
-    developer_chat_outputs = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    # --------------------------------------------------------
-    # Feedback
-    # --------------------------------------------------------
-
-    positive_button.click(
-        fn=submit_positive,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            trace_panel,
-        ],
-    )
-
-
-    negative_button.click(
-        fn=show_negative_feedback,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            negative_feedback_panel,
-            feedback_result,
-        ],
-    )
-
-
-    feedback_submit.click(
-        fn=submit_negative,
-        inputs=[
-            feedback_reason,
-            feedback_comment,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-            trace_panel,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Mode
-    # --------------------------------------------------------
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Reset
-    # --------------------------------------------------------
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-            feedback_hint,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Prefix
-    # --------------------------------------------------------
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
-
-
-# ============================================================
-# Launch
-# ============================================================
-
-if __name__ == "__main__":
-
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
-    )
-
-
-
-
-
-from __future__ import annotations
-
-import sys
-import uuid
-from datetime import datetime
-from pathlib import Path
-
-import gradio as gr
-
-
-# ============================================================
-# Project Path
-# ============================================================
-
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-
-from Agent.agentv2_3 import MemoryAgent
-
-from project.logger import save_session
-
-from project.styles import CSS
-
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-    render_feedback_hint,
-    render_feedback_result,
-)
+    </div>
+    """
 
 
 # ============================================================
 # Feedback
 # ============================================================
 
-FEEDBACK_REASONS = {
-    "没理解我的问题":
-        "misunderstanding",
+def render_feedback_hint(turn=None):
 
-    "重复或多余询问":
-        "repeated_or_unnecessary_question",
+    if not turn:
+        return """
+        <div class="feedback-hint feedback-hint-empty">
+            完成一次对话后，可对客服回复进行反馈。
+        </div>
+        """
 
-    "推荐结果不对":
-        "wrong_result",
+    return f"""
+    <div class="feedback-hint">
+        <span>对本次回复是否满意？</span>
+        <span class="feedback-turn">
+            Turn {escape(turn)}
+        </span>
+    </div>
+    """
 
-    "回复内容有问题":
-        "response_problem",
 
-    "其他":
-        "other",
-}
+def render_feedback_result(
+    success,
+    message,
+):
 
-
-# ============================================================
-# Utils
-# ============================================================
-
-def now_iso():
-    return datetime.now().astimezone().isoformat(
-        timespec="seconds"
+    cls = (
+        "feedback-success"
+        if success
+        else "feedback-error"
     )
 
-
-# ============================================================
-# Session
-# ============================================================
-
-def new_session():
-
-    return {
-        "session_id":
-            "web_" + uuid.uuid4().hex[:10],
-
-        "created_at":
-            now_iso(),
-
-        "agent": MemoryAgent(
-            mode="single",
-            show_state=False,
-        ),
-
-        "history": [],
-
-        # 系统真实运行产生的 turn
-        "trace": [],
-
-        # 用户加载的已有历史
-        "prefix_history": [],
-
-        "turns": 0,
-
-        "mode": "user",
-
-        # {
-        #     turn_id: {
-        #         rating,
-        #         reason,
-        #         comment,
-        #         created_at
-        #     }
-        # }
-        "feedback": {},
-    }
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
 
 
 # ============================================================
-# Agent Snapshot
+# Topic Tree
 # ============================================================
 
-def get_last_run(agent):
+def render_topic_tree(tree):
 
-    turn_state = getattr(
-        agent,
-        "last_turn_state",
-        None,
-    )
+    if not tree:
 
-    if turn_state:
+        return """
+        <div class="empty-small">
+            暂无 Topic Structure
+        </div>
+        """
 
-        return {
-            "query_state":
-                turn_state.get(
-                    "query",
-                    {},
-                ) or {},
+    def walk(node, depth=0):
 
-            "trigger_state":
-                turn_state.get(
-                    "trigger",
-                    {},
-                ) or {},
+        topic = escape(
+            node.get(
+                "topic",
+                "",
+            )
+        )
 
-            "evidence_state":
-                turn_state.get(
-                    "evidence",
-                    {},
-                ) or {},
+        dimension = escape(
+            node.get(
+                "dimension",
+                "",
+            )
+        )
 
-            "policy_state":
-                turn_state.get(
-                    "policy",
-                    {},
-                ) or {},
+        case_ids = (
+            node.get("case_ids")
+            or []
+        )
 
-            "response":
-                turn_state.get(
-                    "response",
-                    "",
-                ),
+        if isinstance(
+            case_ids,
+            str,
+        ):
+            case_ids = [case_ids]
 
-            "latency":
-                turn_state.get(
-                    "latency",
-                    {},
-                ) or {},
-        }
+        case_text = ", ".join(
+            escape(x)
+            for x in case_ids
+        )
 
-    # fallback
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    ) or {}
+        leaf = bool(
+            node.get("leaf")
+        )
 
-    return {
-        "query_state": {},
+        node_class = (
+            "tree-node tree-leaf"
+            if leaf
+            else "tree-node"
+        )
 
-        "trigger_state": {},
+        margin = depth * 20
 
-        "evidence_state":
-            memory.get(
-                "evidence_state",
-                {},
-            ) or {},
+        dimension_html = ""
 
-        "policy_state":
-            (
-                memory
-                .get(
-                    "interaction_state",
-                    {},
-                )
-                .get(
-                    "last_policy",
-                    {},
-                )
-                or {}
-            ),
+        if dimension:
+            dimension_html = (
+                f'<span class="tree-dimension">'
+                f'{dimension}'
+                f'</span>'
+            )
 
-        "response": "",
+        case_html = ""
 
-        "latency": {},
-    }
+        if case_text:
+            case_html = (
+                f'<span class="tree-case">'
+                f'{case_text}'
+                f'</span>'
+            )
+
+        current = f"""
+        <div
+            class="{node_class}"
+            style="margin-left:{margin}px"
+        >
+
+            <span class="tree-dot"></span>
+
+            <span class="tree-topic">
+                {topic}
+            </span>
+
+            {dimension_html}
+
+            {case_html}
+
+        </div>
+        """
+
+        children = (
+            node.get("children")
+            or []
+        )
+
+        return current + "".join(
+            walk(
+                child,
+                depth + 1,
+            )
+            for child in children
+        )
+
+    return f"""
+    <div class="topic-tree">
+        {walk(tree)}
+    </div>
+    """
 
 
 # ============================================================
-# History Parser
+# Evidence
 # ============================================================
 
-def parse_prefix(text):
+def render_cases(cases):
 
-    history = []
+    if not cases:
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
 
-    if not text:
-        return history
+    items = []
 
-    for raw_line in text.splitlines():
-
-        line = raw_line.strip()
-
-        if not line:
+    for index, case in enumerate(cases):
+        if not isinstance(case, dict):
             continue
 
-        if line.startswith("用户:"):
-
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("用户："):
-
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "user",
-                "content": content,
-            })
-
-        elif line.startswith("客服:"):
-
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-        elif line.startswith("客服："):
-
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
-
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
-
-    return history
-
-
-# ============================================================
-# Render Helpers
-# ============================================================
-
-def session_html(state):
-
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
-
-
-def developer_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
-
-
-def user_chat_html(state):
-
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
-
-
-def current_decision_html(state):
-
-    if not state["trace"]:
-        return render_decision(
-            None
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or f"Case {index + 1}"
         )
 
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
-def trace_html(state):
-
-    return render_trace(
-        state["trace"],
-        state.get("feedback", {}),
-    )
-
-
-
-def feedback_hint_html(state):
-
-    if not state:
-        return render_feedback_hint(
-            None
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or case.get("content")
+            or case.get("problem")
+            or ""
         )
 
-    turn = state.get(
-        "turns",
-        0,
-    )
+        title = str(title).strip()
 
-    if turn <= 0:
-        return render_feedback_hint(
-            None
+        preview = title
+
+        if len(preview) > 100:
+            preview = preview[:100] + "..."
+
+        detail_rows = []
+
+        for key, value in case.items():
+
+            if value is None:
+                continue
+
+            if isinstance(
+                value,
+                (dict, list),
+            ):
+                value_text = json_text(
+                    value
+                )
+            else:
+                value_text = str(value)
+
+            if not value_text.strip():
+                continue
+
+            detail_rows.append(
+                f"""
+                <div class="case-detail-row">
+
+                    <div class="case-detail-key">
+                        {escape(key)}
+                    </div>
+
+                    <div class="case-detail-value">
+                        {escape(value_text)}
+                    </div>
+
+                </div>
+                """
+            )
+
+        details_html = "".join(
+            detail_rows
         )
 
-    return render_feedback_hint(
-        turn
-    )
+        items.append(
+            f"""
+            <details class="case-card">
 
+                <summary class="case-card-summary">
 
-# ============================================================
-# Chat
-# ============================================================
+                    <div class="case-card-main">
 
-def chat(
-    user_input,
-    state,
-):
+                        <div class="case-card-id">
+                            {escape(case_id)}
+                        </div>
 
-    if state is None:
-        state = new_session()
+                        <div class="case-card-preview">
+                            {
+                                escape(preview)
+                                if preview
+                                else "点击查看案例详情"
+                            }
+                        </div>
 
-    user_input = str(
-        user_input or ""
-    ).strip()
+                    </div>
 
-    if not user_input:
+                    <div class="case-card-action">
 
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            feedback_hint_html(state),
-            "",
-            gr.update(visible=False),
-        )
+                        <span class="case-expand-text">
+                            查看详情
+                        </span>
 
-    history = list(
-        state["history"]
-    )
+                        <span class="case-chevron">
+                            ›
+                        </span>
 
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
+                    </div>
 
-    try:
+                </summary>
 
-        response = state[
-            "agent"
-        ].reply(
-            history
-        )
+                <div class="case-detail">
 
-    except Exception as exc:
+                    <div class="case-detail-header">
+                        Case Detail
+                    </div>
 
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
+                    {details_html}
 
-    response = str(
-        response or ""
-    ).strip()
-
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
-
-    state["history"] = history
-
-    state["turns"] += 1
-
-    snapshot = get_last_run(
-        state["agent"]
-    )
-
-    snapshot = dict(
-        snapshot
-    )
-
-    snapshot["turn"] = (
-        state["turns"]
-    )
-
-    snapshot["user"] = (
-        user_input
-    )
-
-    snapshot["response"] = (
-        response
-    )
-
-    snapshot["created_at"] = (
-        now_iso()
-    )
-
-    state["trace"].append(
-        snapshot
-    )
-
-    # --------------------------------------------------------
-    # 每轮立即保存
-    # --------------------------------------------------------
-
-    save_session(
-        state
-    )
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        feedback_hint_html(state),
-        "",
-        gr.update(visible=False),
-    )
-
-
-# ============================================================
-# Feedback
-# ============================================================
-
-def submit_positive(
-    state,
-):
-
-    if state is None:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=False
-            ),
-
-            render_trace(
-                [],
-                {},
-            ),
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=False
-            ),
-
-            trace_html(state),
-        )
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "positive",
-        "reason": None,
-        "reason_text": None,
-        "comment": "",
-        "created_at": now_iso(),
-    }
-
-    # 保存到后台日志
-    save_session(
-        state
-    )
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        # 立即刷新开发者运行轨迹
-        trace_html(state),
-    )
-
-
-
-def show_negative_feedback(
-    state,
-):
-
-    if (
-        state is None
-        or state.get("turns", 0) <= 0
-    ):
-
-        return (
-            gr.update(
-                visible=False
-            ),
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-        )
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        "",
-    )
-
-
-def submit_negative(
-    reason_text,
-    comment,
-    state,
-):
-
-    if state is None:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            render_trace(
-                [],
-                {},
-            ),
-        )
-
-    turn = state.get(
-        "turns",
-        0,
-    )
-
-    if turn <= 0:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "当前没有可反馈的回复。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state),
-        )
-
-    reason_text = str(
-        reason_text or ""
-    ).strip()
-
-    if not reason_text:
-
-        return (
-            state,
-
-            render_feedback_result(
-                False,
-                "请选择一个不满意原因。",
-            ),
-
-            gr.update(
-                visible=True
-            ),
-
-            reason_text,
-
-            comment,
-
-            trace_html(state),
-        )
-
-    reason_code = FEEDBACK_REASONS.get(
-        reason_text,
-        "other",
-    )
-
-    comment = str(
-        comment or ""
-    ).strip()
-
-    state.setdefault(
-        "feedback",
-        {},
-    )
-
-    state["feedback"][turn] = {
-        "rating": "negative",
-        "reason": reason_code,
-        "reason_text": reason_text,
-        "comment": comment,
-        "created_at": now_iso(),
-    }
-
-    # 保存到后台日志
-    save_session(
-        state
-    )
-
-    return (
-        state,
-
-        render_feedback_result(
-            True,
-            "感谢您的反馈。",
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        None,
-
-        "",
-
-        # 立即刷新开发者运行轨迹
-        trace_html(state),
-    )
-
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        "",
-        feedback_hint_html(state),
-        gr.update(
-            visible=False
-        ),
-        None,
-        "",
-    )
-
-
-# ============================================================
-# Load Prefix
-# ============================================================
-
-def load_prefix(
-    prefix_text,
-    state,
-):
-
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
-    )
-
-    if not history:
-
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
-        )
-
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
-
-    state["history"] = history
-
-    # 这里不把加载历史伪装成真实 Agent trace
-    state["trace"] = []
-
-    state["prefix_history"] = list(
-        history
-    )
-
-    # 真实运行 turn 从 0 开始重新记录
-    state["turns"] = 0
-
-    state["feedback"] = {}
-
-    save_session(
-        state
-    )
-
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-    )
-
-
-# ============================================================
-# View Switching
-# ============================================================
-
-def show_user_view():
-
-    return (
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-    )
-
-
-def show_developer_view():
-
-    return (
-        gr.update(
-            visible=False
-        ),
-
-        gr.update(
-            visible=True
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-    )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-initial_state = new_session()
-
-
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
-
-    session_state = gr.State(
-        initial_state
-    )
-
-    # ========================================================
-    # Header
-    # ========================================================
-
-    gr.HTML(
-        render_header(),
-        container=False,
-    )
-
-    # ========================================================
-    # Mode Switch
-    # ========================================================
-
-    with gr.Row(
-        elem_classes=[
-            "mode-switch"
-        ]
-    ):
-
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-active"
-            ],
-        )
-
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-inactive"
-            ],
-        )
-
-    # ========================================================
-    # USER VIEW
-    # ========================================================
-
-    with gr.Column(
-        visible=True,
-        elem_classes=[
-            "user-workspace"
-        ],
-    ) as user_view:
-
-        gr.HTML(
-            """
-            <div class="workspace-heading">
-
-                <div class="column-title">
-                    IT 智能客服
                 </div>
 
-                <div class="column-subtitle">
-                    Huawei IT Support
+            </details>
+            """
+        )
+
+    if not items:
+        return """
+        <div class="empty-small">
+            当前没有可显示的 Active Cases
+        </div>
+        """
+
+    return "".join(items)
+
+
+# ============================================================
+# Latency
+# ============================================================
+
+def render_latency(latency):
+
+    latency = latency or {}
+
+    def ms_value(name):
+
+        value = latency.get(
+            name,
+            0,
+        )
+
+        try:
+            return float(value)
+
+        except Exception:
+            return 0.0
+
+    query_ms = ms_value("query_ms")
+    trigger_ms = ms_value("trigger_ms")
+    rag_ms = ms_value("rag_ms")
+    topic_ms = ms_value("topic_ms")
+    policy_ms = ms_value("policy_ms")
+    response_ms = ms_value("response_ms")
+    total_ms = ms_value("total_ms")
+
+    def seconds(ms):
+        return ms / 1000.0
+
+    return f"""
+    <div class="latency-total">
+        {seconds(total_ms):.2f}
+        <span>s</span>
+    </div>
+
+    <div class="latency-grid">
+
+        <div>
+            <span>Query</span>
+            <b>{seconds(query_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Trigger</span>
+            <b>{seconds(trigger_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>RAG</span>
+            <b>{seconds(rag_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Topic</span>
+            <b>{seconds(topic_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Policy</span>
+            <b>{seconds(policy_ms):.2f}s</b>
+        </div>
+
+        <div>
+            <span>Response</span>
+            <b>{seconds(response_ms):.2f}s</b>
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Decision
+# ============================================================
+
+def render_decision(snapshot):
+
+    if not snapshot:
+
+        return """
+        <div class="decision-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-symbol">
+                    ◇
+                </div>
+
+                <div class="decision-empty-title">
+                    Waiting for interaction
+                </div>
+
+                <div class="decision-empty-desc">
+                    当前轮执行后，Query、Trigger、Evidence、
+                    Topic、Policy 和 Latency 将显示在这里。
                 </div>
 
             </div>
-            """,
-            container=False,
+
+        </div>
+        """
+
+    query_state = (
+        snapshot.get("query_state")
+        or {}
+    )
+
+    trigger_state = (
+        snapshot.get("trigger_state")
+        or {}
+    )
+
+    policy_state = (
+        snapshot.get("policy_state")
+        or {}
+    )
+
+    evidence_state = (
+        snapshot.get("evidence_state")
+        or {}
+    )
+
+    active_cases = (
+        evidence_state.get(
+            "active_cases",
+            [],
+        )
+        or []
+    )
+
+    topic_structure = (
+        evidence_state.get(
+            "topic_structure",
+            {},
+        )
+        or {}
+    )
+
+    latency = (
+        snapshot.get("latency")
+        or {}
+    )
+
+    query_mode = query_state.get(
+        "query_mode",
+        "none",
+    )
+
+    query_text = query_state.get(
+        "query_text",
+        "",
+    )
+
+    trigger = trigger_state.get(
+        "trigger",
+        "",
+    )
+
+    evidence_mode = trigger_state.get(
+        "evidence_mode",
+        "",
+    )
+
+    policy = policy_state.get(
+        "label",
+        "",
+    )
+
+    information = policy_state.get(
+        "information"
+    )
+
+    return f"""
+    <div class="decision-surface">
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Query
+            </div>
+
+            <div class="decision-line">
+                {badge(query_mode, "blue")}
+            </div>
+
+            <div class="decision-text">
+                {escape(query_text) or "None"}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Trigger
+            </div>
+
+            <div class="decision-row">
+                <span>Trigger</span>
+                {badge(trigger, "green")}
+            </div>
+
+            <div class="decision-row">
+                <span>Evidence Mode</span>
+                {badge(evidence_mode, "gray")}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Evidence
+            </div>
+
+            <div class="case-list">
+                {render_cases(active_cases)}
+            </div>
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Topic Structure
+            </div>
+
+            {render_topic_tree(topic_structure)}
+
+        </div>
+
+        <div class="decision-section">
+
+            <div class="section-heading">
+                Policy
+            </div>
+
+            <div class="decision-line">
+                {badge(policy, "blue")}
+            </div>
+
+            <div class="sub-label">
+                Information
+            </div>
+
+            <pre class="json-view">{escape(json_text(information))}</pre>
+
+        </div>
+
+        <div class="decision-section latency-section">
+
+            <div class="section-heading">
+                Latency
+            </div>
+
+            {render_latency(latency)}
+
+        </div>
+
+    </div>
+    """
+
+
+# ============================================================
+# Trace
+# ============================================================
+
+def render_trace(
+    trace,
+    feedback_map=None,
+):
+
+    feedback_map = (
+        feedback_map
+        or {}
+    )
+
+    if not trace:
+
+        return """
+        <div class="trace-surface">
+
+            <div class="decision-empty">
+
+                <div class="decision-empty-title">
+                    暂无运行轨迹
+                </div>
+
+                <div class="decision-empty-desc">
+                    每完成一轮交互，执行轨迹会显示在这里。
+                </div>
+
+            </div>
+
+        </div>
+        """
+
+    items = []
+
+    for index, item in enumerate(
+        reversed(trace),
+        start=1,
+    ):
+
+        turn = item.get(
+            "turn",
+            len(trace) - index + 1,
         )
 
-        user_chat = gr.HTML(
-            user_chat_html(
-                initial_state
-            ),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-html",
-            ],
+        user = escape(
+            item.get(
+                "user",
+                "",
+            )
         )
+
+        query = (
+            item.get("query_state")
+            or {}
+        )
+
+        trigger = (
+            item.get("trigger_state")
+            or {}
+        )
+
+        policy = (
+            item.get("policy_state")
+            or {}
+        )
+
+        latency = (
+            item.get("latency")
+            or {}
+        )
+
+        try:
+            total = (
+                float(
+                    latency.get(
+                        "total_ms",
+                        0,
+                    )
+                )
+                / 1000.0
+            )
+
+        except Exception:
+            total = 0.0
 
         # ====================================================
         # Feedback
         # ====================================================
 
-        with gr.Column(
-            elem_classes=[
-                "feedback-area"
-            ],
-        ):
+        feedback = (
+            feedback_map.get(turn)
+            or feedback_map.get(str(turn))
+        )
 
-            feedback_hint = gr.HTML(
-                feedback_hint_html(
-                    initial_state
-                ),
-                container=False,
-            )
+        if not feedback:
 
-            with gr.Row(
-                elem_classes=[
-                    "feedback-buttons"
-                ]
-            ):
+            feedback_html = """
+            <div class="trace-feedback trace-feedback-empty">
+                <span class="trace-feedback-label">
+                    Feedback
+                </span>
 
-                positive_button = gr.Button(
-                    "👍 满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
+                <span>
+                    —
+                </span>
+            </div>
+            """
 
-                negative_button = gr.Button(
-                    "👎 不满意",
-                    size="sm",
-                    variant="secondary",
-                    elem_classes=[
-                        "feedback-button"
-                    ],
-                )
+        elif feedback.get(
+            "rating"
+        ) == "positive":
 
-            feedback_result = gr.HTML(
-                "",
-                container=False,
-            )
+            feedback_html = """
+            <div class="trace-feedback trace-feedback-positive">
 
-            with gr.Column(
-                visible=False,
-                elem_classes=[
-                    "feedback-detail"
-                ],
-            ) as negative_feedback_panel:
+                <span class="trace-feedback-label">
+                    Feedback
+                </span>
 
-                feedback_reason = gr.Radio(
-                    choices=list(
-                        FEEDBACK_REASONS.keys()
-                    ),
-                    label="请选择不满意的原因",
-                    elem_classes=[
-                        "feedback-reason"
-                    ],
-                )
+                <span>
+                    👍 满意
+                </span>
 
-                feedback_comment = gr.Textbox(
-                    label="补充说明（可选）",
-                    placeholder=(
-                        "如果方便，可以简单说明具体问题..."
-                    ),
-                    lines=2,
-                    max_lines=3,
-                    elem_classes=[
-                        "feedback-comment"
-                    ],
-                )
+            </div>
+            """
 
-                feedback_submit = gr.Button(
-                    "提交反馈",
-                    variant="primary",
-                    size="sm",
-                    elem_classes=[
-                        "feedback-submit"
-                    ],
-                )
+        else:
 
-        # ====================================================
-        # Input
-        # ====================================================
-
-        with gr.Row(
-            elem_classes=[
-                "chat-input-row"
-            ]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder=(
-                    "请输入您的 IT 问题..."
-                ),
-                show_label=False,
-                lines=2,
-                max_lines=4,
-                elem_classes=[
-                    "chat-input"
-                ],
-                scale=12,
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=[
-                    "send-button"
-                ],
-                scale=1,
-                min_width=110,
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=[
-            "developer-workspace"
-        ],
-        equal_height=True,
-    ) as developer_view:
-
-        # ====================================================
-        # LEFT
-        # ====================================================
-
-        with gr.Column(
-            scale=52,
-            min_width=0,
-            elem_classes=[
-                "chat-column"
-            ],
-        ):
-
-            with gr.Row(
-                elem_classes=[
-                    "panel-heading-row"
-                ]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-
-                        <div class="column-title">
-                            Conversation
-                        </div>
-
-                        <div class="column-subtitle">
-                            Current dialogue
-                        </div>
-
-                    </div>
-                    """,
-                    container=False,
-                )
-
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                    elem_classes=[
-                        "session-html"
-                    ],
-                )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-toolbar"
-                ]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                    elem_classes=[
-                        "new-chat-button"
-                    ],
-                )
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html",
-                    "developer-chat-html",
-                ],
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-input-row"
-                ]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder=(
-                        "请输入 IT 问题..."
-                    ),
-                    show_label=False,
-                    lines=2,
-                    max_lines=4,
-                    elem_classes=[
-                        "chat-input"
-                    ],
-                    scale=12,
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=[
-                        "send-button"
-                    ],
-                    scale=1,
-                    min_width=105,
-                )
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=[
-                    "history-loader"
-                ],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
+            reason = escape(
+                feedback.get(
+                    "reason_text",
                     "",
-                    container=False,
-                    elem_classes=[
-                        "prefix-area"
-                    ],
                 )
+                or "不满意"
+            )
 
-        # ====================================================
-        # RIGHT
-        # ====================================================
+            comment = escape(
+                feedback.get(
+                    "comment",
+                    "",
+                )
+            )
 
-        with gr.Column(
-            scale=48,
-            min_width=0,
-            elem_classes=[
-                "decision-column"
-            ],
-        ):
+            comment_html = ""
 
-            gr.HTML(
+            if comment:
+
+                comment_html = f"""
+                <div class="trace-feedback-comment">
+                    {comment}
+                </div>
                 """
-                <div class="workspace-heading">
 
-                    <div class="column-title">
-                        Agent Decision
-                    </div>
+            feedback_html = f"""
+            <div class="trace-feedback trace-feedback-negative">
 
-                    <div class="column-subtitle">
-                        Internal execution state
-                    </div>
+                <div class="trace-feedback-main">
+
+                    <span class="trace-feedback-label">
+                        Feedback
+                    </span>
+
+                    <span>
+                        👎 不满意 · {reason}
+                    </span>
 
                 </div>
-                """,
-                container=False,
-            )
 
-            with gr.Tabs(
-                elem_classes=[
-                    "decision-tabs"
-                ]
-            ):
+                {comment_html}
 
-                with gr.Tab(
-                    "当前决策"
-                ):
+            </div>
+            """
 
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
+        # ====================================================
+        # Turn
+        # ====================================================
+
+        items.append(
+            f"""
+            <div class="trace-item">
+
+                <div class="trace-head">
+
+                    <b>
+                        Turn {turn}
+                    </b>
+
+                    <span>
+                        {total:.2f}s
+                    </span>
+
+                </div>
+
+                <div class="trace-user">
+                    {user}
+                </div>
+
+                <div class="trace-flow">
+
+                    {badge(
+                        query.get(
+                            "query_mode",
+                            "none",
                         ),
-                        container=False,
-                        elem_classes=[
-                            "decision-html"
-                        ],
-                    )
+                        "blue"
+                    )}
 
-                with gr.Tab(
-                    "运行轨迹"
-                ):
+                    <span class="flow-arrow">
+                        →
+                    </span>
 
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
+                    {badge(
+                        trigger.get(
+                            "evidence_mode",
+                            "",
                         ),
-                        container=False,
-                        elem_classes=[
-                            "trace-html"
-                        ],
-                    )
+                        "gray"
+                    )}
 
-    # ========================================================
-    # Events
-    # ========================================================
+                    <span class="flow-arrow">
+                        →
+                    </span>
 
-    chat_outputs = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
+                    {badge(
+                        policy.get(
+                            "label",
+                            "",
+                        ),
+                        "green"
+                    )}
 
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-        api_name="chat",
-    )
+                </div>
 
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
+                {feedback_html}
 
-    # --------------------------------------------------------
-    # Developer Chat
-    # --------------------------------------------------------
+            </div>
+            """
+        )
 
-    developer_chat_outputs = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-        feedback_hint,
-        feedback_result,
-        negative_feedback_panel,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    # --------------------------------------------------------
-    # Feedback
-    # --------------------------------------------------------
-
-    positive_button.click(
-        fn=submit_positive,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            trace_panel,
-        ],
-    )
-
-
-    negative_button.click(
-        fn=show_negative_feedback,
-        inputs=[
-            session_state
-        ],
-        outputs=[
-            negative_feedback_panel,
-            feedback_result,
-        ],
-    )
-
-
-    feedback_submit.click(
-        fn=submit_negative,
-        inputs=[
-            feedback_reason,
-            feedback_comment,
-            session_state,
-        ],
-        outputs=[
-            session_state,
-            feedback_result,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-            trace_panel,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Mode
-    # --------------------------------------------------------
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Reset
-    # --------------------------------------------------------
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-            feedback_hint,
-            negative_feedback_panel,
-            feedback_reason,
-            feedback_comment,
-        ],
-    )
-
-    # --------------------------------------------------------
-    # Prefix
-    # --------------------------------------------------------
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
+    return f"""
+    <div class="trace-surface">
+        {''.join(items)}
+    </div>
+    """
 
 
 # ============================================================
-# Launch
+# Prefix
 # ============================================================
 
-if __name__ == "__main__":
+def render_prefix_result(
+    success,
+    message,
+):
 
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
+    cls = (
+        "prefix-success"
+        if success
+        else "prefix-error"
     )
 
-
-
-
-CSS = r"""
-
-/* =========================================================
-   VARIABLES
-========================================================= */
-
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-
-    --line: #e2e8f0;
-    --soft-line: #edf1f5;
-
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
-
-    --blue: #2563eb;
-    --blue-dark: #1d4ed8;
-    --blue-soft: #eff6ff;
-
-    --green: #16a34a;
-    --green-soft: #effdf3;
-
-    --gray-soft: #f4f6f8;
-
-    --shadow:
-        0 4px 16px
-        rgba(15, 23, 42, 0.05);
-}
-
-/* =========================================================
-   FONT SYSTEM
-========================================================= */
-
-html,
-body,
-.gradio-container,
-.gradio-container *,
-button,
-input,
-textarea,
-select {
-    font-family:
-        "Segoe UI",
-        "Microsoft YaHei UI",
-        "Microsoft YaHei",
-        "PingFang SC",
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        Arial,
-        sans-serif !important;
-
-    font-synthesis: none;
-}
-
-
-/* =========================================================
-   GLOBAL
-========================================================= */
-
-html,
-body {
-    margin: 0 !important;
-    padding: 0 !important;
-
-    width: 100% !important;
-    min-height: 100% !important;
-
-    background: var(--bg) !important;
-
-    font-size: 18px !important;
-}
-
-
-body {
-    overflow-x: hidden;
-}
-
-
-.gradio-container {
-    width: 100% !important;
-    max-width: none !important;
-
-    margin: 0 !important;
-
-    padding:
-        14px
-        clamp(18px, 2vw, 34px)
-        20px
-        clamp(18px, 2vw, 34px)
-        !important;
-}
-
-
-.gradio-container > .main {
-    width: 100% !important;
-    max-width: none !important;
-}
-
-
-.gradio-container .block {
-    box-shadow: none;
-}
-
-
-footer {
-    display: none !important;
-}
-
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-.app-header {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    padding: 16px 22px;
-
-    margin-bottom: 12px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #ffffff,
-            #f8faff
-        );
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
-}
-
-
-.header-eyebrow {
-    color: var(--blue);
-
-    font-size: 15px;
-
-    line-height: 1.3;
-
-    font-weight: 750;
-
-    margin-bottom: 4px;
-}
-
-
-.header-title {
-    color: var(--text);
-
-    font-size: 30px;
-
-    line-height: 1.15;
-
-    font-weight: 800;
-}
-
-
-.header-desc {
-    margin-top: 5px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.4;
-}
-
-
-.online-status {
-    display: flex;
-
-    align-items: center;
-
-    gap: 8px;
-
-    color: var(--text2);
-
-    font-size: 15px;
-
-    font-weight: 600;
-
-    white-space: nowrap;
-}
-
-
-.online-dot,
-.running-dot {
-    display: inline-block;
-
-    width: 9px;
-    height: 9px;
-
-    flex: 0 0 auto;
-
-    border-radius: 999px;
-
-    background: #22c55e;
-}
-
-
-/* =========================================================
-   MODE SWITCH
-========================================================= */
-
-.mode-switch {
-    width: 100% !important;
-
-    gap: 8px !important;
-
-    margin-bottom: 12px !important;
-}
-
-
-.mode-switch button {
-    min-height: 44px !important;
-
-    font-size: 16px !important;
-
-    font-weight: 750 !important;
-
-    border-radius: 10px !important;
-}
-
-
-.mode-active {
-    background: var(--blue) !important;
-
-    color: white !important;
-
-    border-color: var(--blue) !important;
-}
-
-
-.mode-inactive {
-    background: white !important;
-
-    color: var(--text2) !important;
-
-    border-color: var(--line) !important;
-}
-
-
-/* =========================================================
-   WORKSPACE
-========================================================= */
-
-.developer-workspace {
-    width: 100% !important;
-
-    gap: 18px !important;
-
-    align-items: stretch !important;
-}
-
-
-.chat-column,
-.decision-column {
-    min-width: 0 !important;
-
-    box-sizing: border-box;
-
-    background: var(--panel);
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
-
-    padding: 16px 18px;
-}
-
-
-.chat-column {
-    flex: 56 1 0% !important;
-}
-
-
-.decision-column {
-    flex: 44 1 0% !important;
-}
-
-
-.user-workspace {
-    width: min(1180px, 100%) !important;
-
-    margin: 0 auto !important;
-
-    box-sizing: border-box;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    padding: 18px;
-
-    box-shadow: var(--shadow);
-}
-
-
-/* =========================================================
-   PANEL HEADERS
-========================================================= */
-
-.workspace-heading {
-    padding: 0 2px 8px 2px;
-}
-
-
-.panel-heading-row {
-    width: 100% !important;
-
-    align-items: center !important;
-
-    justify-content: space-between !important;
-
-    gap: 14px !important;
-
-    margin-bottom: 3px !important;
-}
-
-
-.column-title {
-    color: var(--text);
-
-    font-size: 36px;
-
-    line-height: 1.25;
-
-    font-weight: 800;
-
-    margin-bottom: 2px;
-}
-
-
-.column-subtitle {
-    color: var(--muted);
-
-    font-size: 24px;
-
-    line-height: 1.4;
-}
-
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-.session-html {
-    flex: 0 0 auto !important;
-}
-
-
-.session-inline {
-    display: flex;
-
-    align-items: center;
-
-    justify-content: flex-end;
-
-    gap: 10px;
-
-    flex-wrap: wrap;
-
-    padding: 7px 11px;
-
-    color: var(--muted);
-
-    background: #f8fafc;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 9px;
-
-    font-size: 13px;
-
-    line-height: 1.3;
-}
-
-
-.session-status {
-    display: inline-flex;
-
-    align-items: center;
-
-    gap: 6px;
-}
-
-
-.session-inline b {
-    color: var(--text2);
-
-    margin-left: 3px;
-
-    font-weight: 700;
-}
-
-
-.session-divider {
-    display: block;
-
-    width: 1px;
-    height: 13px;
-
-    background: var(--line);
-}
-
-
-/* =========================================================
-   CHAT TOOLBAR
-========================================================= */
-
-.chat-toolbar {
-    min-height: 34px !important;
-
-    align-items: center !important;
-
-    justify-content: flex-end !important;
-
-    margin: 0 0 8px 0 !important;
-}
-
-
-.new-chat-button {
-    flex: 0 0 auto !important;
-}
-
-
-.new-chat-button button {
-    min-height: 34px !important;
-
-    padding: 5px 13px !important;
-
-    font-size: 14px !important;
-}
-
-
-/* =========================================================
-   CHAT SURFACE
-========================================================= */
-
-.chat-html {
-    width: 100% !important;
-
-    min-width: 0 !important;
-}
-
-
-.chat-surface {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    height: clamp(
-        410px,
-        calc(100vh - 350px),
-        650px
-    );
-
-    overflow-y: auto;
-
-    overflow-x: hidden;
-
-    background: #fbfcfe;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 13px;
-
-    padding: 18px 20px;
-
-    scroll-behavior: smooth;
-}
-
-
-.user-chat-html .chat-surface {
-    height: clamp(
-        450px,
-        calc(100vh - 310px),
-        700px
-    );
-}
-
-
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
-
-.empty-chat {
-    width: 100%;
-    height: 100%;
-
-    min-height: 300px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.empty-symbol {
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    width: 52px;
-    height: 52px;
-
-    margin-bottom: 13px;
-
-    border-radius: 15px;
-
-    background: var(--blue-soft);
-
-    color: var(--blue);
-
-    font-size: 25px;
-
-    font-weight: 800;
-}
-
-
-.empty-title {
-    margin-bottom: 7px;
-
-    color: var(--text);
-
-    font-size: 21px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.empty-desc {
-    max-width: 540px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.6;
-}
-
-
-/* =========================================================
-   CHAT MESSAGES
-========================================================= */
-
-.chat-scroll {
-    width: 100%;
-
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 27px;
-}
-
-
-.message-row {
-    width: 100%;
-
-    display: flex;
-
-    align-items: flex-start;
-
-    gap: 10px;
-
-    box-sizing: border-box;
-}
-
-
-.user-row {
-    justify-content: flex-end;
-}
-
-
-.agent-row {
-    justify-content: flex-start;
-}
-
-
-.avatar {
-    width: 46px;
-    height: 46px;
-
-    flex: 0 0 46px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    border-radius: 50%;
-
-    font-size: 15px;
-
-    line-height: 1;
-
-    font-weight: 800;
-}
-
-
-.user-avatar {
-    color: #1d4ed8;
-
-    background: #dbeafe;
-}
-
-
-.agent-avatar {
-    color: #344054;
-
-    background: #e9edf3;
-}
-
-
-/*
-   这里是之前布局的关键问题之一。
-
-   message-wrap 不再占满整行。
-   短消息外层跟随内容；
-   长消息最多占可用宽度的约 80%。
-*/
-
-.message-wrap {
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: flex-start;
-
-    width: fit-content;
-
-    min-width: 0;
-
-    max-width: min(
-        80%,
-        760px
-    );
-}
-
-
-.user-wrap {
-    align-items: flex-end;
-}
-
-
-.message-role {
-    margin:
-        0
-        3px
-        4px
-        6px;
-
-    color: var(--muted);
-
-    font-size: 18px;
-
-    line-height: 1.2;
-
-    font-weight: 600;
-}
-
-
-.message-bubble {
-    display: inline-block;
-
-    width: fit-content;
-
-    max-width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 13px 18px;
-
-    border-radius: 16px;
-
-    font-size: 25px;
-
-    line-height: 1.6;
-
-    text-align: left;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: break-word;
-
-    word-break: normal;
-}
-
-
-/*
-   用户消息右对齐，但文字本身左对齐。
-*/
-
-.user-message {
-    color: white;
-
-    background: var(--blue);
-
-    border-bottom-right-radius: 5px;
-}
-
-
-.agent-message {
-    color: var(--text);
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-bottom-left-radius: 5px;
-}
-
-
-/* =========================================================
-   INPUT
-========================================================= */
-
-.chat-input-row {
-    width: 100% !important;
-
-    align-items: stretch !important;
-
-    gap: 9px !important;
-
-    margin-top: 9px !important;
-}
-
-
-.chat-input {
-    min-width: 0 !important;
-
-    margin: 0 !important;
-}
-
-
-.chat-input textarea {
-    min-height: 64px !important;
-
-    max-height: 100px !important;
-
-    padding: 14px 16px !important;
-
-    font-size: 22px !important;
-
-    line-height: 1.5 !important;
-
-    border-radius: 10px !important;
-}
-
-
-.send-button {
-    flex: 0 0 105px !important;
-}
-
-
-.send-button button {
-    width: 100% !important;
-
-    min-height: 64px !important;
-
-    padding: 8px 14px !important;
-
-    border-radius: 10px !important;
-
-    font-size: 19px !important;
-
-    font-weight: 750 !important;
-}
-
-
-/* =========================================================
-   HISTORY LOADER
-========================================================= */
-
-.history-loader {
-    margin-top: 9px !important;
-
-    border-radius: 10px !important;
-}
-
-
-.history-loader textarea {
-    font-size: 15px !important;
-
-    line-height: 1.55 !important;
-}
-
-
-/* =========================================================
-   DECISION TABS
-========================================================= */
-
-.decision-tabs {
-    width: 100% !important;
-}
-
-
-.decision-tabs button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
-}
-
-
-.decision-html,
-.trace-html {
-    width: 100% !important;
-
-    min-width: 0 !important;
-}
-
-
-/* =========================================================
-   DECISION SURFACE
-========================================================= */
-
-.decision-surface,
-.trace-surface {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    max-height: clamp(
-        500px,
-        calc(100vh - 260px),
-        760px
-    );
-
-    overflow-y: auto;
-
-    overflow-x: hidden;
-
-    padding: 4px 4px 8px 1px;
-}
-
-
-.decision-section {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-bottom: 10px;
-
-    padding: 13px 14px;
-
-    background: white;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 11px;
-}
-
-
-.section-heading {
-    margin-bottom: 14px;
-
-    color: var(--text);
-
-    font-size: 24px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.decision-line {
-    margin-bottom: 7px;
-}
-
-
-.decision-row {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 14px;
-
-    margin: 10px 0;
-
-    color: var(--muted);
-
-    font-size: 20px;
-
-    line-height: 1.5;
-}
-
-
-.decision-text {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-top: 7px;
-
-    padding: 12px 14px;
-
-    color: var(--text2);
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-
-    font-size: 20px;
-
-    line-height: 1.6;
-
-    overflow-wrap: anywhere;
-}
-
-
-.sub-label {
-    margin-top: 10px;
-
-    margin-bottom: 8px;
-
-    color: var(--muted);
-
-    font-size: 18px;
-
-    line-height: 1.6;
-
-    font-weight: 700;
-}
-
-
-/* =========================================================
-   BADGES
-========================================================= */
-
-.badge {
-    display: inline-flex;
-
-    align-items: center;
-
-    max-width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 6px 11px;
-
-    border-radius: 999px;
-
-    font-size: 18px;
-
-    line-height: 1.35;
-
-    font-weight: 700;
-
-    overflow-wrap: anywhere;
-}
-
-
-.badge-blue {
-    color: #1d4ed8;
-
-    background: var(--blue-soft);
-}
-
-
-.badge-green {
-    color: #15803d;
-
-    background: var(--green-soft);
-}
-
-
-.badge-gray {
-    color: #475467;
-
-    background: var(--gray-soft);
-}
-
-
-/* =========================================================
-   EVIDENCE
-========================================================= */
-
-.case-list {
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 7px;
-}
-
-
-.case-item {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 9px 10px;
-
-    background: #fafbfc;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 8px;
-}
-
-
-.case-id {
-    color: var(--blue);
-
-    font-size: 13px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.case-title {
-    margin-top: 3px;
-
-    color: var(--text2);
-
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    overflow-wrap: anywhere;
-}
-
-
-.empty-small {
-    padding: 10px 11px;
-
-    color: var(--muted);
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 1px 0;
-}
-
-
-.tree-node {
-    position: relative;
-
-    box-sizing: border-box;
-
-    padding: 7px 6px;
-
-    color: var(--text2);
-
-    font-size: 19px;
-
-    line-height: 1.6;
-
-    overflow-wrap: anywhere;
-}
-
-
-.tree-dot {
-    display: inline-block;
-
-    width: 9px;
-    height: 9px;
-
-    margin-right: 8px;
-
-    border-radius: 50%;
-
-    background: #94a3b8;
-}
-
-
-.tree-leaf .tree-dot {
-    background: #22c55e;
-}
-
-
-.tree-topic {
-    font-weight: 600;
-}
-
-
-.tree-dimension {
-    display: inline-block;
-
-    margin-left: 6px;
-
-    padding: 3px 7px;
-
-    color: var(--blue);
-
-    background: var(--blue-soft);
-
-    border-radius: 5px;
-
-    font-size: 16px;
-
-    line-height: 1.35;
-}
-
-
-.tree-case {
-    display: inline;
-
-    margin-left: 6px;
-
-    color: var(--muted);
-
-    font-size: 16px;
-}
-
-
-/* =========================================================
-   JSON
-========================================================= */
-
-.json-view {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin: 0;
-
-    padding: 12px 14px;
-
-    color: var(--text2);
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-
-    font-size: 18px;
-
-    line-height: 1.6;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-/* =========================================================
-   EVIDENCE CASE CARDS
-========================================================= */
-
-.case-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.case-card {
-    width: 100%;
-    box-sizing: border-box;
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    overflow: hidden;
-    transition:
-        border-color 0.15s ease,
-        box-shadow 0.15s ease,
-        transform 0.15s ease;
-}
-
-.case-card:hover {
-    border-color: #bfdbfe;
-    box-shadow:
-        0 3px 10px
-        rgba(37, 99, 235, 0.08);
-}
-
-.case-card[open] {
-    border-color: #93c5fd;
-    box-shadow:
-        0 4px 14px
-        rgba(37, 99, 235, 0.08);
-}
-
-/* 去掉浏览器默认三角 */
-.case-card summary {
-    list-style: none;
-}
-
-.case-card summary::-webkit-details-marker {
-    display: none;
-}
-
-.case-card-summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    padding: 14px 15px;
-    cursor: pointer;
-    user-select: none;
-}
-
-.case-card-main {
-    min-width: 0;
-    flex: 1;
-}
-
-.case-card-id {
-    color: var(--blue);
-    font-size: 19px;
-    line-height: 1.35;
-    font-weight: 700;
-    margin-bottom: 5px;
-}
-
-.case-card-preview {
-    color: var(--text2);
-    font-size: 18px;
-    line-height: 1.55;
-    overflow-wrap: anywhere;
-}
-
-.case-card-action {
-    flex: 0 0 auto;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    color: var(--blue);
-    font-size: 16px;
-    white-space: nowrap;
-}
-
-.case-chevron {
-    display: inline-block;
-    font-size: 24px;
-    line-height: 1;
-    transition: transform 0.18s ease;
-}
-
-.case-card[open] .case-chevron {
-    transform: rotate(90deg);
-}
-
-
-/* =========================================================
-   CASE DETAIL
-========================================================= */
-
-.case-detail {
-    padding: 14px 15px 16px 15px;
-    background: #f8fafc;
-    border-top: 1px solid var(--soft-line);
-}
-
-.case-detail-header {
-    color: var(--text);
-    font-size: 20px;
-    font-weight: 700;
-    margin-bottom: 12px;
-}
-
-.case-detail-row {
-    display: grid;
-    grid-template-columns: 130px minmax(0, 1fr);
-    gap: 12px;
-    padding: 9px 0;
-    border-bottom: 1px solid #edf1f5;
-}
-
-.case-detail-row:last-child {
-    border-bottom: none;
-}
-
-.case-detail-key {
-    color: var(--muted);
-    font-size: 16px;
-    line-height: 1.5;
-    font-weight: 600;
-    overflow-wrap: anywhere;
-}
-
-.case-detail-value {
-    color: var(--text2);
-    font-size: 18px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-
-
-
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-section {
-    margin-bottom: 0;
-}
-
-
-.latency-total {
-    margin-bottom: 13px;
-
-    color: var(--blue);
-
-    font-size: 38px;
-
-    line-height: 1.1;
-
-    font-weight: 800;
-}
-
-
-.latency-total span {
-    margin-left: 2px;
-
-    color: var(--muted);
-
-    font-size: 20px;
-
-    font-weight: 650;
-}
-
-
-.latency-grid {
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, minmax(0, 1fr));
-
-    gap: 6px;
-}
-
-
-.latency-grid > div {
-    min-width: 0;
-
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 4px;
-
-    box-sizing: border-box;
-
-    padding: 11px 12px;
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-}
-
-
-.latency-grid span {
-    color: var(--muted);
-
-    font-size: 16px;
-}
-
-
-.latency-grid b {
-    color: var(--text2);
-
-    font-size: 18px;
-
-    font-weight: 750;
-}
-
-
-/* =========================================================
-   TRACE
-========================================================= */
-
-.trace-item {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-bottom: 9px;
-
-    padding: 12px 13px;
-
-    background: white;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 10px;
-}
-
-
-.trace-head {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 10px;
-
-    color: var(--muted);
-
-    font-size: 13px;
-}
-
-
-.trace-head b {
-    color: var(--text);
-
-    font-size: 15px;
-}
-
-
-.trace-user {
-    margin: 8px 0;
-
-    color: var(--text2);
-
-    font-size: 15px;
-
-    line-height: 1.5;
-}
-
-
-.trace-flow {
-    display: flex;
-
-    align-items: center;
-
-    gap: 6px;
-
-    flex-wrap: wrap;
-}
-
-
-.flow-arrow {
-    color: #98a2b3;
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   EMPTY DECISION
-========================================================= */
-
-.decision-empty {
-    min-height: 360px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    padding: 24px;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.decision-empty-symbol {
-    margin-bottom: 10px;
-
-    color: var(--blue);
-
-    font-size: 30px;
-}
-
-
-.decision-empty-title {
-    margin-bottom: 7px;
-
-    color: var(--text);
-
-    font-size: 19px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.decision-empty-desc {
-    max-width: 420px;
-
-    color: var(--muted);
-
-    font-size: 14px;
-
-    line-height: 1.6;
-}
-
-
-/* =========================================================
-   PREFIX
-========================================================= */
-
-.prefix-success,
-.prefix-error {
-    box-sizing: border-box;
-
-    padding: 10px;
-
-    border-radius: 8px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-}
-
-
-.prefix-success {
-    color: #027a48;
-
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
-}
-
-
-.prefix-error {
-    color: #be123c;
-
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-}
-
-
-/* =========================================================
-   GENERIC BUTTONS
-========================================================= */
-
-button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
-}
-
-
-/* =========================================================
-   SCROLLBAR
-========================================================= */
-
-.chat-surface::-webkit-scrollbar,
-.decision-surface::-webkit-scrollbar,
-.trace-surface::-webkit-scrollbar {
-    width: 7px;
-}
-
-
-.chat-surface::-webkit-scrollbar-thumb,
-.decision-surface::-webkit-scrollbar-thumb,
-.trace-surface::-webkit-scrollbar-thumb {
-    background: #d0d5dd;
-
-    border-radius: 999px;
-}
-
-
-/* =========================================================
-   RESPONSIVE
-========================================================= */
-
-@media (max-width: 1200px) {
-
-    .gradio-container {
-        padding:
-            12px
-            16px
-            18px
-            16px
-            !important;
-    }
-
-    .developer-workspace {
-        gap: 12px !important;
-    }
-
-    .chat-column,
-    .decision-column {
-        padding: 14px;
-    }
-
-    .message-wrap {
-        max-width: 86%;
-    }
-
-    .latency-grid {
-        grid-template-columns:
-            repeat(2, minmax(0, 1fr));
-    }
-}
-
-
-@media (max-width: 900px) {
-
-    .developer-workspace {
-        flex-direction: column !important;
-    }
-
-    .chat-column,
-    .decision-column {
-        width: 100% !important;
-
-        flex: 1 1 auto !important;
-    }
-
-    .panel-heading-row {
-        align-items: flex-start !important;
-
-        flex-direction: column !important;
-    }
-
-    .session-inline {
-        justify-content: flex-start;
-    }
-
-    .message-wrap {
-        max-width: 88%;
-    }
-}
-
-
-@media (max-width: 700px) {
-
-    .gradio-container {
-        padding: 8px !important;
-    }
-
-    .app-header {
-        padding: 14px 15px;
-
-        align-items: flex-start;
-
-        flex-direction: column;
-
-        gap: 9px;
-    }
-
-    .header-title {
-        font-size: 25px;
-    }
-
-    .header-desc {
-        font-size: 14px;
-    }
-
-    .chat-column,
-    .decision-column,
-    .user-workspace {
-        padding: 11px;
-
-        border-radius: 12px;
-    }
-
-    .chat-surface {
-        padding: 13px 11px;
-
-        height: calc(100vh - 330px);
-    }
-
-    .message-wrap {
-        max-width: 91%;
-    }
-
-    .message-bubble {
-        font-size: 16px;
-
-        padding: 9px 12px;
-    }
-
-    .avatar {
-        width: 46px;
-        height: 46px;
-
-        flex-basis: 46px;
-    }
-
-    .latency-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-
-}
-
-
-/* =========================================================
-   USER FEEDBACK
-========================================================= */
-
-.feedback-area {
-    width: 100% !important;
-
-    box-sizing: border-box;
-
-    margin-top: 8px !important;
-
-    padding: 10px 12px !important;
-
-    background: #f8fafc;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 10px;
-}
-
-
-.feedback-hint {
-    width: 100%;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 12px;
-
-    box-sizing: border-box;
-
-    color: var(--text2);
-
-    font-size: 15px;
-
-    line-height: 1.5;
-
-    font-weight: 600;
-}
-
-
-.feedback-hint-empty {
-    color: var(--muted);
-
-    font-weight: 500;
-}
-
-
-.feedback-turn {
-    flex: 0 0 auto;
-
-    color: var(--muted);
-
-    font-size: 13px;
-
-    font-weight: 600;
-}
-
-
-.feedback-buttons {
-    width: 100% !important;
-
-    gap: 8px !important;
-
-    margin-top: 7px !important;
-}
-
-
-.feedback-button {
-    flex: 0 0 auto !important;
-}
-
-
-.feedback-button button {
-    min-height: 36px !important;
-
-    padding: 6px 14px !important;
-
-    border-radius: 9px !important;
-
-    font-size: 14px !important;
-
-    font-weight: 650 !important;
-
-    background: white !important;
-
-    border: 1px solid var(--line) !important;
-
-    color: var(--text2) !important;
-}
-
-
-.feedback-button button:hover {
-    border-color: #93c5fd !important;
-
-    background: var(--blue-soft) !important;
-}
-
-
-.feedback-detail {
-    width: 100% !important;
-
-    box-sizing: border-box;
-
-    margin-top: 9px !important;
-
-    padding-top: 9px !important;
-
-    border-top: 1px solid var(--soft-line);
-}
-
-
-.feedback-reason label {
-    font-size: 14px !important;
-
-    line-height: 1.5 !important;
-}
-
-
-.feedback-comment textarea {
-    min-height: 62px !important;
-
-    max-height: 100px !important;
-
-    padding: 10px 12px !important;
-
-    font-size: 14px !important;
-
-    line-height: 1.5 !important;
-
-    border-radius: 9px !important;
-}
-
-
-.feedback-submit button {
-    min-height: 38px !important;
-
-    padding: 6px 15px !important;
-
-    border-radius: 9px !important;
-
-    font-size: 14px !important;
-
-    font-weight: 700 !important;
-}
-
-
-.feedback-success,
-.feedback-error {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-top: 7px;
-
-    padding: 8px 10px;
-
-    border-radius: 8px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-}
-
-
-.feedback-success {
-    color: #027a48;
-
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
-}
-
-
-.feedback-error {
-    color: #be123c;
-
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-}
-
-/* =========================================================
-   DEVELOPER TRACE FEEDBACK
-========================================================= */
-
-.trace-feedback {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-top: 11px;
-
-    padding-top: 9px;
-
-    border-top: 1px solid var(--soft-line);
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 9px;
-
-    color: var(--muted);
-
-    font-size: 14px;
-
-    line-height: 1.5;
-}
-
-
-.trace-feedback-main {
-    width: 100%;
-
-    display: flex;
-
-    align-items: center;
-
-    gap: 9px;
-}
-
-
-.trace-feedback-label {
-    flex: 0 0 auto;
-
-    color: var(--muted);
-
-    font-size: 13px;
-
-    font-weight: 650;
-}
-
-
-.trace-feedback-positive {
-    color: #15803d;
-
-    font-weight: 650;
-}
-
-
-.trace-feedback-negative {
-    display: block;
-
-    color: #b42318;
-
-    font-weight: 650;
-}
-
-
-.trace-feedback-empty {
-    color: var(--muted);
-
-    font-weight: 400;
-}
-
-
-.trace-feedback-comment {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-top: 7px;
-
-    padding: 8px 10px;
-
-    color: var(--text2);
-
-    background: #f8fafc;
-
-    border-radius: 7px;
-
-    font-size: 13px;
-
-    line-height: 1.55;
-
-    font-weight: 400;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-"""
+    return f"""
+    <div class="{cls}">
+        {escape(message)}
+    </div>
+    """
