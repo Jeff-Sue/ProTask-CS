@@ -1,1050 +1,600 @@
-CSS = r"""
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --line: #e4e9f0;
-    --soft-line: #edf1f5;
+# ============================================================
+# Web / Interactive Agent
+# ============================================================
 
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
+class MemoryAgent:
+    """
+    Stateful wrapper for Web / Gradio interaction.
 
-    --blue: #2563eb;
-    --blue-soft: #eff6ff;
+    Important:
+    - 不修改原来的 batch pipeline
+    - 不修改原来的 memory / query / trigger / RAG / topic / policy / response 逻辑
+    - 每次 reply() 只执行一个用户 turn
+    """
+
+    def __init__(self):
+        # --------------------------------------------------------
+        # Prompts
+        # --------------------------------------------------------
+        self.query_prompt = prompt_read(
+            Path("prompts/query.prompt")
+        )
+
+        self.trigger_prompt = prompt_read(
+            Path("prompts/trigger.prompt")
+        )
+
+        self.topic_prompt = prompt_read(
+            Path("prompts/topic.prompt")
+        )
+
+        # 与 run_memory_agent 保持一致
+        self.policy_prompt = prompt_read(
+            Path("prompts/policy_v2.prompt")
+        )
 
-    --green: #16a34a;
-    --green-soft: #effdf3;
+        self.response_prompt = prompt_read(
+            Path("prompts/response.prompt")
+        )
 
-    --gray-soft: #f2f4f7;
+        # --------------------------------------------------------
+        # Runtime State
+        # --------------------------------------------------------
+        self.reset()
 
-    --shadow: 0 6px 22px rgba(15, 23, 42, 0.055);
-}
 
+    # ========================================================
+    # Reset
+    # ========================================================
+
+    def reset(self):
+        self.memory = init_memory()
+
+        # 与 batch 中 dialogue_history 的语义保持一致
+        self.dialogue_history = ""
+
+        # 网页显示用
+        self.turns = []
+
+        # 当前 turn
+        self.turn_id = 0
+
+        # 当前轮中间结果
+        self.last_query = {}
+        self.last_trigger = {}
+        self.last_evidence = []
+        self.last_topic_structure = {}
+        self.last_policy = {}
+        self.last_response = {}
 
-/* =========================================================
-   GLOBAL
-========================================================= */
-
-html,
-body {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: 100% !important;
-    min-height: 100% !important;
-
-    background: var(--bg) !important;
-
-    font-size: 18px !important;
-}
-
-
-.gradio-container {
-    width: 100% !important;
-    max-width: none !important;
-
-    margin: 0 !important;
-
-    padding:
-        18px
-        clamp(22px, 2.3vw, 44px)
-        24px
-        clamp(22px, 2.3vw, 44px)
-        !important;
-}
-
-
-/* 尽量去掉 Gradio 默认的额外边框 */
-
-.gradio-container .block {
-    box-shadow: none;
-}
-
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-.hero,
-.app-header {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background:
-        linear-gradient(
-            135deg,
-            #ffffff,
-            #f8faff
-        );
-
-    border: 1px solid var(--line);
-
-    border-radius: 18px;
-
-    padding: 18px 24px;
-
-    margin-bottom: 16px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    box-shadow: var(--shadow);
-}
-
-
-.header-eyebrow,
-.hero-tag {
-    color: var(--blue);
-
-    font-size: 14px;
-
-    font-weight: 750;
-
-    margin-bottom: 5px;
-}
-
-
-.header-title,
-.hero-title {
-    font-size: 32px;
-
-    line-height: 1.2;
-
-    font-weight: 800;
-
-    color: var(--text);
-}
-
-
-.header-desc,
-.hero-desc {
-    margin-top: 6px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.5;
-}
-
-
-.online-status,
-.hero-status {
-    display: flex;
-
-    align-items: center;
-
-    gap: 7px;
-
-    font-size: 15px;
-
-    color: var(--text2);
-
-    white-space: nowrap;
-}
-
-
-.status-dot {
-    width: 9px;
-    height: 9px;
-
-    display: inline-block;
-
-    border-radius: 50%;
-
-    background: #22c55e;
-
-    margin-right: 5px;
-}
-
-
-/* =========================================================
-   COLUMN HEADINGS
-========================================================= */
-
-.column-title,
-.panel-title {
-    font-size: 21px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 3px;
-}
-
-
-.column-subtitle {
-    font-size: 14px;
-
-    color: var(--muted);
-
-    margin-bottom: 9px;
-}
-
-
-/* =========================================================
-   MAIN PANELS
-========================================================= */
-
-.chat-panel,
-.state-panel,
-.history-panel {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
-}
-
-
-/*
-   关键：
-   不再写死 650 / 700 px。
-   根据屏幕高度自动计算。
-*/
-
-.chat-panel {
-    height: clamp(
-        440px,
-        calc(100vh - 330px),
-        650px
-    );
-
-    overflow-y: auto;
-
-    padding: 18px 20px;
-}
-
-
-.state-panel,
-.history-panel {
-    height: clamp(
-        440px,
-        calc(100vh - 270px),
-        700px
-    );
-
-    overflow-y: auto;
-
-    padding: 16px;
-}
-
-
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
-
-.empty-chat {
-    min-height: 400px;
-    height: 100%;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.empty-icon {
-    width: 58px;
-    height: 58px;
-
-    border-radius: 17px;
-
-    background: var(--blue-soft);
-
-    color: var(--blue);
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    font-size: 27px;
-
-    margin-bottom: 15px;
-}
-
-
-.empty-title {
-    font-size: 22px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 8px;
-}
-
-
-.empty-desc {
-    max-width: 520px;
-
-    line-height: 1.65;
-
-    font-size: 15px;
-}
-
-
-/* =========================================================
-   CHAT
-========================================================= */
-
-.chat-scroll {
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 15px;
-}
-
-
-.message-row {
-    display: flex;
-
-    gap: 10px;
-
-    align-items: flex-start;
-}
-
-
-.user-row {
-    justify-content: flex-end;
-}
-
-
-.avatar {
-    width: 38px;
-    height: 38px;
-
-    flex-shrink: 0;
-
-    border-radius: 50%;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    font-size: 13px;
-
-    font-weight: 800;
-}
-
-
-.user-avatar {
-    background: #dbeafe;
-
-    color: #1d4ed8;
-}
-
-
-.agent-avatar {
-    background: #e9edf3;
-
-    color: #344054;
-}
-
-
-/*
-   原来 76% 太宽。
-   现在限制气泡宽度，让“框”和文字比例更正常。
-*/
-
-.message-bubble {
-    width: fit-content;
-
-    max-width: min(68%, 720px);
-
-    padding: 11px 15px;
-
-    border-radius: 16px;
-
-    font-size: 18px;
-
-    line-height: 1.65;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-
-.user-message {
-    background: var(--blue);
-
-    color: white;
-
-    border-bottom-right-radius: 5px;
-}
-
-
-.agent-message {
-    background: #f8fafc;
-
-    color: var(--text);
-
-    border: 1px solid var(--soft-line);
-
-    border-bottom-left-radius: 5px;
-}
-
-
-.message-role {
-    font-size: 13px;
-
-    font-weight: 750;
-
-    opacity: .72;
-
-    margin-bottom: 3px;
-}
-
-
-/* =========================================================
-   INPUT
-========================================================= */
-
-/*
-   输入框不要再占太多纵向空间。
-*/
-
-.chat-input textarea,
-textarea {
-    font-size: 18px !important;
-
-    line-height: 1.55 !important;
-}
-
-
-.chat-input textarea {
-    min-height: 54px !important;
-
-    max-height: 110px !important;
-
-    padding: 12px 14px !important;
-}
-
-
-.chat-input {
-    margin-top: 8px !important;
-}
-
-
-/* Button */
-
-button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
-}
-
-
-button.primary {
-    min-height: 48px !important;
-}
-
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-.session-bar,
-.session-inline {
-    display: flex;
-
-    align-items: center;
-
-    gap: 18px;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 12px;
-
-    padding: 10px 14px;
-
-    margin-bottom: 10px;
-
-    font-size: 14px;
-
-    color: var(--muted);
-}
-
-
-.session-bar b,
-.session-inline b {
-    color: var(--text2);
-
-    margin-left: 4px;
-}
-
-
-/* =========================================================
-   DECISION SECTIONS
-========================================================= */
-
-.state-section {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 14px;
-
-    padding: 14px 15px;
-
-    margin-bottom: 11px;
-
-    background: #fff;
-}
-
-
-.section-heading,
-.section-title {
-    font-size: 17px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 11px;
-}
-
-
-.decision-row,
-.kv-row {
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-
-    gap: 16px;
-
-    margin: 7px 0;
-
-    font-size: 15px;
-
-    color: var(--muted);
-}
-
-
-.decision-text,
-.state-text {
-    background: #f8fafc;
-
-    padding: 10px 12px;
-
-    border-radius: 9px;
-
-    margin-top: 8px;
-
-    font-size: 15px;
-
-    line-height: 1.55;
-
-    color: var(--text2);
-}
-
-
-.sub-label,
-.state-label {
-    font-size: 13px;
-
-    color: var(--muted);
-
-    margin-top: 10px;
-
-    margin-bottom: 5px;
-
-    font-weight: 650;
-}
-
-
-/* =========================================================
-   BADGES
-========================================================= */
-
-.badge {
-    display: inline-flex;
-
-    align-items: center;
-
-    padding: 4px 9px;
-
-    border-radius: 999px;
-
-    font-size: 13px;
-
-    line-height: 1.3;
-
-    font-weight: 750;
-}
-
-
-.badge-blue {
-    background: var(--blue-soft);
-
-    color: #1d4ed8;
-}
-
-
-.badge-green {
-    background: var(--green-soft);
-
-    color: #15803d;
-}
-
-
-.badge-gray,
-.badge-default {
-    background: var(--gray-soft);
-
-    color: #475467;
-}
-
-
-/* =========================================================
-   CASE
-========================================================= */
-
-.case-item {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 10px;
-
-    padding: 9px 11px;
-
-    margin-bottom: 7px;
-
-    background: #fafbfc;
-}
-
-
-.case-id {
-    color: var(--blue);
-
-    font-size: 13px;
-
-    font-weight: 750;
-}
-
-
-.case-title {
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-
-    margin-top: 3px;
-}
-
-
-.empty-small {
-    padding: 10px 11px;
-
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    color: var(--muted);
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-    padding: 4px 0;
-}
-
-
-.tree-node {
-    position: relative;
-
-    padding: 6px 7px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-}
-
-
-.tree-dot {
-    display: inline-block;
-
-    width: 7px;
-    height: 7px;
-
-    background: #94a3b8;
-
-    border-radius: 50%;
-
-    margin-right: 7px;
-}
-
-
-.tree-topic {
-    font-weight: 650;
-}
-
-
-.tree-dimension {
-    margin-left: 7px;
-
-    color: var(--blue);
-
-    font-size: 12px;
-
-    background: var(--blue-soft);
-
-    padding: 2px 6px;
-
-    border-radius: 5px;
-}
-
-
-.tree-case {
-    margin-left: 7px;
-
-    color: var(--muted);
-
-    font-size: 12px;
-}
-
-
-.tree-leaf .tree-dot {
-    background: #22c55e;
-}
-
-
-/* =========================================================
-   JSON / DETAIL
-========================================================= */
-
-.json-small,
-.json-view {
-    background: #f8fafc;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 13px;
-
-    line-height: 1.55;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-total {
-    font-size: 31px;
-
-    line-height: 1.2;
-
-    font-weight: 800;
-
-    color: var(--blue);
-
-    margin-bottom: 11px;
-}
-
-
-.latency-grid {
-    display: grid;
-
-    grid-template-columns:
-        repeat(2, minmax(0, 1fr));
-
-    gap: 7px;
-}
-
-
-.latency-grid > div {
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    padding: 9px 10px;
-
-    display: flex;
-
-    justify-content: space-between;
-
-    gap: 10px;
-
-    font-size: 13px;
-}
-
-
-.latency-grid span {
-    color: var(--muted);
-}
-
-
-.latency-grid b {
-    color: var(--text2);
-}
-
-
-/* =========================================================
-   TRACE
-========================================================= */
-
-.history-item,
-.trace-item {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 12px;
-
-    padding: 12px 13px;
-
-    margin-bottom: 9px;
-
-    background: white;
-}
-
-
-.history-head,
-.trace-head {
-    display: flex;
-
-    justify-content: space-between;
-
-    gap: 10px;
-
-    font-size: 13px;
-
-    color: var(--muted);
-}
-
-
-.history-head b,
-.trace-head b {
-    color: var(--text);
-}
-
-
-.history-user,
-.trace-user {
-    font-size: 15px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-
-    margin: 8px 0;
-}
-
-
-.history-flow,
-.trace-flow {
-    display: flex;
-
-    align-items: center;
-
-    gap: 5px;
-
-    flex-wrap: wrap;
-}
-
-
-/* =========================================================
-   EMPTY STATE
-========================================================= */
-
-.state-empty {
-    min-height: 350px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    flex-direction: column;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.state-empty-title {
-    color: var(--text);
-
-    font-size: 18px;
-
-    font-weight: 800;
-
-    margin-bottom: 7px;
-}
-
-
-.state-empty-desc {
-    font-size: 14px;
-
-    line-height: 1.6;
-}
-
-
-/* =========================================================
-   ERROR
-========================================================= */
-
-.error-card {
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 13px;
-
-    border-radius: 11px;
-
-    font-size: 14px;
-}
-
-
-.error-title {
-    font-weight: 800;
-
-    margin-bottom: 5px;
-}
-
-
-.prefix-success {
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
-
-    color: #027a48;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 14px;
-}
-
-
-.prefix-error {
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   GRADIO CLEANUP
-========================================================= */
-
-footer {
-    display: none !important;
-}
-
-
-/*
-   避免一些 Gradio container 自己制造巨大 padding
-*/
-
-.gradio-container > .main {
-    width: 100% !important;
-
-    max-width: none !important;
-}
-
-
-/* Tabs */
-
-.tabs {
-    font-size: 15px !important;
-}
-
-
-/* =========================================================
-   RESPONSIVE
-========================================================= */
-
-@media (max-width: 1100px) {
-
-    .gradio-container {
-        padding: 14px 18px 20px 18px !important;
-    }
-
-    .hero,
-    .app-header {
-        flex-direction: column;
-
-        align-items: flex-start;
-
-        gap: 10px;
-    }
-
-    .header-title,
-    .hero-title {
-        font-size: 28px;
-    }
-
-    .message-bubble {
-        max-width: 82%;
-    }
-
-}
-
-
-@media (max-width: 700px) {
-
-    .gradio-container {
-        padding: 10px !important;
-    }
-
-    .message-bubble {
-        max-width: 88%;
-
-        font-size: 17px;
-    }
-
-    .latency-grid {
-        grid-template-columns: 1fr;
-    }
-
-}
-"""
+        # 当前轮 latency
+        self.last_latency = {}
+
+        return self.memory
+
+
+    # ========================================================
+    # Load Existing Dialogue
+    # ========================================================
+
+    def load_history(self, history):
+        """
+        给网页端“加载已有对话”使用。
+
+        history 支持：
+
+        [
+            {"user": "...", "assistant": "..."},
+            ...
+        ]
+
+        注意：
+        这里主要恢复 dialogue history。
+        不重新推断历史 Query / Evidence / Policy 状态。
+        """
+
+        self.reset()
+
+        if not history:
+            return self.memory
+
+        for item in history:
+            user = str(item.get("user", "")).strip()
+            assistant = str(item.get("assistant", "")).strip()
+
+            if user:
+                self.dialogue_history += (
+                    f"用户: {user}\n"
+                )
+
+            if assistant:
+                self.dialogue_history += (
+                    f"客服: {assistant}\n"
+                )
+
+            if user or assistant:
+                self.memory = update_dialogue_memory(
+                    self.memory,
+                    user,
+                    assistant
+                )
+
+                self.turns.append({
+                    "turn_id": self.turn_id,
+                    "user": user,
+                    "response": assistant
+                })
+
+                self.turn_id += 1
+
+        return self.memory
+
+
+    # ========================================================
+    # One Interactive Turn
+    # ========================================================
+
+    def reply(self, user: str):
+        """
+        执行一个完整用户 turn：
+
+        Query
+          ↓
+        Trigger
+          ↓
+        RAG
+          ↓
+        Topic Structure
+          ↓
+        Policy
+          ↓
+        Response
+          ↓
+        Memory Update
+
+        与原始 run_memory_agent / batch pipeline 保持相同逻辑。
+        """
+
+        user = "" if user is None else str(user).strip()
+
+        if not user:
+            raise ValueError("User input is empty.")
+
+        # ----------------------------------------------------
+        # Total Timer
+        # ----------------------------------------------------
+
+        total_start = time.perf_counter()
+
+        latency = {
+            "query": 0.0,
+            "trigger": 0.0,
+            "rag": 0.0,
+            "topic": 0.0,
+            "policy": 0.0,
+            "response": 0.0,
+            "total": 0.0
+        }
+
+        # ----------------------------------------------------
+        # Add Current User to Dialogue History
+        # ----------------------------------------------------
+
+        self.dialogue_history += (
+            f"用户: {user}\n"
+        )
+
+        # ====================================================
+        # 1. Query
+        # ====================================================
+
+        stage_start = time.perf_counter()
+
+        query_input = build_query_input(
+            self.memory,
+            user
+        )
+
+        query_messages = build_messages(
+            self.query_prompt,
+            query_input
+        )
+
+        query_output = parallel_inference(
+            [query_messages]
+        )[0]
+
+        query_state = parse_llm_output(
+            query_output
+        )
+
+        self.memory = update_issue_memory(
+            self.memory,
+            query_state
+        )
+
+        latency["query"] = (
+            time.perf_counter() - stage_start
+        )
+
+        # ====================================================
+        # 2. Trigger
+        # ====================================================
+
+        stage_start = time.perf_counter()
+
+        trigger_input = build_trigger_input(
+            self.memory
+        )
+
+        trigger_messages = build_messages(
+            self.trigger_prompt,
+            trigger_input
+        )
+
+        trigger_output = parallel_inference(
+            [trigger_messages]
+        )[0]
+
+        trigger_state = parse_llm_output(
+            trigger_output
+        )
+
+        latency["trigger"] = (
+            time.perf_counter() - stage_start
+        )
+
+        # ====================================================
+        # 3. RAG
+        # ====================================================
+
+        evidence = (
+            self.memory["evidence_state"]
+            ["active_cases"]
+        )
+
+        topic_structure = copy.deepcopy(
+            self.memory["evidence_state"]
+            ["topic_structure"]
+        )
+
+        if (
+            trigger_state.get("evidence_mode")
+            == "retrieve_new_evidence"
+        ):
+            query = (
+                self.memory["issue_state"]
+                ["current_issue"]
+            )
+
+            debug_x = {
+                "dialog_id": "web",
+                "user": user,
+                "query_raw": query_output,
+                "query": query_state,
+                "trigger": trigger_state,
+                "dialogue_history":
+                    self.dialogue_history
+            }
+
+            query = validate_rag_query(
+                query,
+                debug_x,
+                self.memory,
+                self.turn_id
+            )
+
+            # ----------------------------------------------
+            # RAG timer
+            # ----------------------------------------------
+
+            stage_start = time.perf_counter()
+
+            evidence = batch_zefeng_rag(
+                [self.dialogue_history],
+                [query]
+            )[0]
+
+            latency["rag"] = (
+                time.perf_counter() - stage_start
+            )
+
+            # =================================================
+            # 3.5 Topic Structure
+            # =================================================
+
+            stage_start = time.perf_counter()
+
+            structures = (
+                generate_topic_structures_batch(
+                    [
+                        {
+                            "query": query,
+                            "cases": evidence
+                        }
+                    ],
+                    self.topic_prompt
+                )
+            )
+
+            topic_structure = structures[0]
+
+            latency["topic"] = (
+                time.perf_counter() - stage_start
+            )
+
+        # ====================================================
+        # Update Evidence Memory
+        # ====================================================
+
+        self.memory = update_evidence_memory(
+            self.memory,
+            trigger_state,
+            evidence,
+            topic_structure
+        )
+
+        # ====================================================
+        # 4. Policy
+        # ====================================================
+
+        stage_start = time.perf_counter()
+
+        policy_input = build_policy_input(
+            self.memory,
+            user
+        )
+
+        policy_messages = build_messages(
+            self.policy_prompt,
+            policy_input
+        )
+
+        policy_output = parallel_inference(
+            [policy_messages]
+        )[0]
+
+        policy_state = parse_llm_output(
+            policy_output
+        )
+
+        self.memory = update_interaction_memory(
+            self.memory,
+            policy_state
+        )
+
+        latency["policy"] = (
+            time.perf_counter() - stage_start
+        )
+
+        # ====================================================
+        # 5. Response
+        # ====================================================
+
+        stage_start = time.perf_counter()
+
+        response_input = build_response_input(
+            self.memory,
+            user
+        )
+
+        response_messages = build_messages(
+            self.response_prompt,
+            response_input
+        )
+
+        response_output = parallel_inference(
+            [response_messages]
+        )[0]
+
+        response = parse_llm_output(
+            response_output
+        )
+
+        latency["response"] = (
+            time.perf_counter() - stage_start
+        )
+
+        # ====================================================
+        # Response Text
+        # ====================================================
+
+        # 保留原始 response dict
+        # 同时提取网页需要显示的文字
+
+        if isinstance(response, dict):
+            response_text = str(
+                response.get("response", "")
+            ).strip()
+
+            # 防止 response.prompt 返回的不是
+            # {"response": "..."} 格式
+            if not response_text:
+                response_text = str(
+                    response.get("content", "")
+                ).strip()
+
+            if not response_text:
+                response_text = json.dumps(
+                    response,
+                    ensure_ascii=False
+                )
+        else:
+            response_text = str(response).strip()
+
+        # ====================================================
+        # Dialogue Memory
+        # ====================================================
+
+        # 网页端没有 golden response，
+        # 因此这里写入模型实际生成的 response。
+        #
+        # 这是交互模式和离线 evaluation 唯一必然的区别：
+        # 离线使用 golden_response；
+        # 在线只能使用真实 Agent response。
+
+        self.memory = update_dialogue_memory(
+            self.memory,
+            user,
+            response_text
+        )
+
+        self.dialogue_history += (
+            f"客服: {response_text}\n"
+        )
+
+        # ====================================================
+        # Total Latency
+        # ====================================================
+
+        latency["total"] = (
+            time.perf_counter() - total_start
+        )
+
+        # ====================================================
+        # Save Current Turn State
+        # ====================================================
+
+        self.last_query = copy.deepcopy(
+            query_state
+        )
+
+        self.last_trigger = copy.deepcopy(
+            trigger_state
+        )
+
+        self.last_evidence = copy.deepcopy(
+            evidence
+        )
+
+        self.last_topic_structure = copy.deepcopy(
+            self.memory["evidence_state"]
+            ["topic_structure"]
+        )
+
+        self.last_policy = copy.deepcopy(
+            policy_state
+        )
+
+        self.last_response = copy.deepcopy(
+            response
+        )
+
+        # 这里就是之前 UI latency={} 的关键
+        self.last_latency = copy.deepcopy(
+            latency
+        )
+
+        # ====================================================
+        # Save Turn
+        # ====================================================
+
+        turn_result = {
+            "turn_id": self.turn_id,
+            "user": user,
+
+            "query": copy.deepcopy(
+                query_state
+            ),
+
+            "trigger": copy.deepcopy(
+                trigger_state
+            ),
+
+            "evidence": copy.deepcopy(
+                evidence
+            ),
+
+            "topic_structure": copy.deepcopy(
+                self.last_topic_structure
+            ),
+
+            "policy": copy.deepcopy(
+                policy_state
+            ),
+
+            "response": copy.deepcopy(
+                response
+            ),
+
+            "latency": copy.deepcopy(
+                latency
+            )
+        }
+
+        self.turns.append(
+            turn_result
+        )
+
+        self.turn_id += 1
+
+        # ====================================================
+        # Debug
+        # ====================================================
+
+        print(
+            "[MemoryAgent] latency =",
+            json.dumps(
+                self.last_latency,
+                ensure_ascii=False,
+                indent=2
+            )
+        )
+
+        # ====================================================
+        # Return
+        # ====================================================
+
+        return response_text
+
+
+    # ========================================================
+    # State for Web UI
+    # ========================================================
+
+    def get_current_state(self):
+        """
+        web_gradio.py 统一从这里拿数据，
+        避免 UI 到处 getattr。
+        """
+
+        return {
+            "query": copy.deepcopy(
+                self.last_query
+            ),
+
+            "trigger": copy.deepcopy(
+                self.last_trigger
+            ),
+
+            "evidence": copy.deepcopy(
+                self.last_evidence
+            ),
+
+            "topic_structure": copy.deepcopy(
+                self.last_topic_structure
+            ),
+
+            "policy": copy.deepcopy(
+                self.last_policy
+            ),
+
+            "response": copy.deepcopy(
+                self.last_response
+            ),
+
+            "latency": copy.deepcopy(
+                self.last_latency
+            ),
+
+            "memory": copy.deepcopy(
+                self.memory
+            ),
+
+            "turns": copy.deepcopy(
+                self.turns
+            ),
+
+            "dialogue_history":
+                self.dialogue_history
+        }
