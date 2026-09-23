@@ -1,981 +1,340 @@
-CSS = r"""
+def render_cases(cases):
+
+    if not cases:
+        return """
+        <div class="empty-small">
+            当前没有 Active Cases
+        </div>
+        """
+
+    items = []
+
+    for index, case in enumerate(cases):
+
+        if not isinstance(case, dict):
+            continue
+
+        case_id = (
+            case.get("case_id")
+            or case.get("id")
+            or case.get("caseId")
+            or f"Case {index + 1}"
+        )
+
+        # ----------------------------------------------------
+        # 尝试寻找适合作为卡片摘要的字段
+        # ----------------------------------------------------
+
+        title = (
+            case.get("title")
+            or case.get("name")
+            or case.get("question")
+            or case.get("text")
+            or case.get("content")
+            or case.get("problem")
+            or ""
+        )
+
+        title = str(title).strip()
+
+        # 卡片外面只显示摘要
+        preview = title
+
+        if len(preview) > 100:
+            preview = preview[:100] + "..."
+
+        # ----------------------------------------------------
+        # 完整内容
+        # ----------------------------------------------------
+
+        detail_rows = []
+
+        for key, value in case.items():
+
+            if value is None:
+                continue
+
+            if isinstance(value, (dict, list)):
+                value_text = json_text(value)
+            else:
+                value_text = str(value)
+
+            if not value_text.strip():
+                continue
+
+            detail_rows.append(
+                f"""
+                <div class="case-detail-row">
+
+                    <div class="case-detail-key">
+                        {escape(key)}
+                    </div>
+
+                    <div class="case-detail-value">
+                        {escape(value_text)}
+                    </div>
+
+                </div>
+                """
+            )
+
+        details_html = "".join(detail_rows)
+
+        items.append(
+            f"""
+            <details class="case-card">
+
+                <summary class="case-card-summary">
+
+                    <div class="case-card-main">
+
+                        <div class="case-card-id">
+                            {escape(case_id)}
+                        </div>
+
+                        <div class="case-card-preview">
+                            {escape(preview) if preview else "点击查看案例详情"}
+                        </div>
+
+                    </div>
+
+                    <div class="case-card-action">
+                        <span class="case-expand-text">
+                            查看详情
+                        </span>
+
+                        <span class="case-chevron">
+                            ›
+                        </span>
+                    </div>
+
+                </summary>
+
+
+                <div class="case-detail">
+
+                    <div class="case-detail-header">
+                        Case Detail
+                    </div>
+
+                    {details_html}
+
+                </div>
+
+            </details>
+            """
+        )
+
+    if not items:
+        return """
+        <div class="empty-small">
+            当前没有可显示的 Active Cases
+        </div>
+        """
+
+    return "".join(items)
+
+
+
+
+
 
 /* =========================================================
-   VARIABLES
-========================================================= */
-
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-
-    --line: #e2e8f0;
-    --soft-line: #edf1f5;
-
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
-
-    --blue: #2563eb;
-    --blue-dark: #1d4ed8;
-    --blue-soft: #eff6ff;
-
-    --green: #16a34a;
-    --green-soft: #effdf3;
-
-    --gray-soft: #f4f6f8;
-
-    --shadow:
-        0 4px 16px
-        rgba(15, 23, 42, 0.05);
-}
-
-
-/* =========================================================
-   GLOBAL
+   FONT SYSTEM
 ========================================================= */
 
 html,
-body {
-    margin: 0 !important;
-    padding: 0 !important;
+body,
+.gradio-container,
+.gradio-container *,
+button,
+input,
+textarea,
+select {
+    font-family:
+        "Segoe UI",
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        Arial,
+        sans-serif !important;
 
-    width: 100% !important;
-    min-height: 100% !important;
-
-    background: var(--bg) !important;
-
-    font-size: 18px !important;
+    font-synthesis: none;
 }
 
 
-body {
-    overflow-x: hidden;
-}
 
-
-.gradio-container {
-    width: 100% !important;
-    max-width: none !important;
-
-    margin: 0 !important;
-
-    padding:
-        14px
-        clamp(18px, 2vw, 34px)
-        20px
-        clamp(18px, 2vw, 34px)
-        !important;
-}
-
-
-.gradio-container > .main {
-    width: 100% !important;
-    max-width: none !important;
-}
-
-
-.gradio-container .block {
-    box-shadow: none;
-}
-
-
-footer {
-    display: none !important;
-}
 
 
 /* =========================================================
-   HEADER
+   LARGE CONVERSATION TYPOGRAPHY
 ========================================================= */
 
-.app-header {
-    width: 100%;
+.chat-column .column-title {
+    font-size: 28px;
+}
 
-    box-sizing: border-box;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    padding: 16px 22px;
-
-    margin-bottom: 12px;
-
-    background:
-        linear-gradient(
-            135deg,
-            #ffffff,
-            #f8faff
-        );
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
+.chat-column .column-subtitle {
+    font-size: 19px;
 }
 
 
-.header-eyebrow {
-    color: var(--blue);
+/* 用户 / 智能客服 */
 
-    font-size: 15px;
-
-    line-height: 1.3;
-
-    font-weight: 750;
-
-    margin-bottom: 4px;
-}
-
-
-.header-title {
-    color: var(--text);
-
-    font-size: 30px;
-
-    line-height: 1.15;
-
-    font-weight: 800;
-}
-
-
-.header-desc {
-    margin-top: 5px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.4;
-}
-
-
-.online-status {
-    display: flex;
-
-    align-items: center;
-
-    gap: 8px;
-
-    color: var(--text2);
-
-    font-size: 15px;
+.chat-column .message-role {
+    font-size: 18px;
 
     font-weight: 600;
 
-    white-space: nowrap;
+    margin-bottom: 6px;
 }
 
 
-.online-dot,
-.running-dot {
-    display: inline-block;
+/* 对话正文 */
 
-    width: 9px;
-    height: 9px;
-
-    flex: 0 0 auto;
-
-    border-radius: 999px;
-
-    background: #22c55e;
-}
-
-
-/* =========================================================
-   MODE SWITCH
-========================================================= */
-
-.mode-switch {
-    width: 100% !important;
-
-    gap: 8px !important;
-
-    margin-bottom: 12px !important;
-}
-
-
-.mode-switch button {
-    min-height: 44px !important;
-
-    font-size: 16px !important;
-
-    font-weight: 750 !important;
-
-    border-radius: 10px !important;
-}
-
-
-.mode-active {
-    background: var(--blue) !important;
-
-    color: white !important;
-
-    border-color: var(--blue) !important;
-}
-
-
-.mode-inactive {
-    background: white !important;
-
-    color: var(--text2) !important;
-
-    border-color: var(--line) !important;
-}
-
-
-/* =========================================================
-   WORKSPACE
-========================================================= */
-
-.developer-workspace {
-    width: 100% !important;
-
-    gap: 18px !important;
-
-    align-items: stretch !important;
-}
-
-
-.chat-column,
-.decision-column {
-    min-width: 0 !important;
-
-    box-sizing: border-box;
-
-    background: var(--panel);
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
-
-    padding: 16px 18px;
-}
-
-
-.chat-column {
-    flex: 56 1 0% !important;
-}
-
-
-.decision-column {
-    flex: 44 1 0% !important;
-}
-
-
-.user-workspace {
-    width: min(1180px, 100%) !important;
-
-    margin: 0 auto !important;
-
-    box-sizing: border-box;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    padding: 18px;
-
-    box-shadow: var(--shadow);
-}
-
-
-/* =========================================================
-   PANEL HEADERS
-========================================================= */
-
-.workspace-heading {
-    padding: 0 2px 8px 2px;
-}
-
-
-.panel-heading-row {
-    width: 100% !important;
-
-    align-items: center !important;
-
-    justify-content: space-between !important;
-
-    gap: 14px !important;
-
-    margin-bottom: 3px !important;
-}
-
-
-.column-title {
-    color: var(--text);
-
-    font-size: 22px;
-
-    line-height: 1.25;
-
-    font-weight: 800;
-
-    margin-bottom: 2px;
-}
-
-
-.column-subtitle {
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.4;
-}
-
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-.session-html {
-    flex: 0 0 auto !important;
-}
-
-
-.session-inline {
-    display: flex;
-
-    align-items: center;
-
-    justify-content: flex-end;
-
-    gap: 10px;
-
-    flex-wrap: wrap;
-
-    padding: 7px 11px;
-
-    color: var(--muted);
-
-    background: #f8fafc;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 9px;
-
-    font-size: 13px;
-
-    line-height: 1.3;
-}
-
-
-.session-status {
-    display: inline-flex;
-
-    align-items: center;
-
-    gap: 6px;
-}
-
-
-.session-inline b {
-    color: var(--text2);
-
-    margin-left: 3px;
-
-    font-weight: 700;
-}
-
-
-.session-divider {
-    display: block;
-
-    width: 1px;
-    height: 13px;
-
-    background: var(--line);
-}
-
-
-/* =========================================================
-   CHAT TOOLBAR
-========================================================= */
-
-.chat-toolbar {
-    min-height: 34px !important;
-
-    align-items: center !important;
-
-    justify-content: flex-end !important;
-
-    margin: 0 0 8px 0 !important;
-}
-
-
-.new-chat-button {
-    flex: 0 0 auto !important;
-}
-
-
-.new-chat-button button {
-    min-height: 34px !important;
-
-    padding: 5px 13px !important;
-
-    font-size: 14px !important;
-}
-
-
-/* =========================================================
-   CHAT SURFACE
-========================================================= */
-
-.chat-html {
-    width: 100% !important;
-
-    min-width: 0 !important;
-}
-
-
-.chat-surface {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    height: clamp(
-        410px,
-        calc(100vh - 350px),
-        650px
-    );
-
-    overflow-y: auto;
-
-    overflow-x: hidden;
-
-    background: #fbfcfe;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 13px;
-
-    padding: 18px 20px;
-
-    scroll-behavior: smooth;
-}
-
-
-.user-chat-html .chat-surface {
-    height: clamp(
-        450px,
-        calc(100vh - 310px),
-        700px
-    );
-}
-
-
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
-
-.empty-chat {
-    width: 100%;
-    height: 100%;
-
-    min-height: 300px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.empty-symbol {
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    width: 52px;
-    height: 52px;
-
-    margin-bottom: 13px;
-
-    border-radius: 15px;
-
-    background: var(--blue-soft);
-
-    color: var(--blue);
-
+.chat-column .message-bubble {
     font-size: 25px;
 
-    font-weight: 800;
+    line-height: 1.6;
+
+    padding: 13px 18px;
+
+    border-radius: 16px;
 }
 
 
-.empty-title {
-    margin-bottom: 7px;
+/* 头像同步稍微变大 */
 
-    color: var(--text);
+.chat-column .avatar {
+    width: 46px;
+    height: 46px;
 
-    font-size: 21px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.empty-desc {
-    max-width: 540px;
-
-    color: var(--muted);
+    flex-basis: 46px;
 
     font-size: 15px;
-
-    line-height: 1.6;
 }
 
 
-/* =========================================================
-   CHAT MESSAGES
-========================================================= */
+/* 消息之间距离 */
 
-.chat-scroll {
-    width: 100%;
-
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 20px;
+.chat-column .chat-scroll {
+    gap: 27px;
 }
 
 
-.message-row {
-    width: 100%;
+/* 输入框 */
 
-    display: flex;
-
-    align-items: flex-start;
-
-    gap: 10px;
-
-    box-sizing: border-box;
-}
-
-
-.user-row {
-    justify-content: flex-end;
-}
-
-
-.agent-row {
-    justify-content: flex-start;
-}
-
-
-.avatar {
-    width: 36px;
-    height: 36px;
-
-    flex: 0 0 36px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    border-radius: 50%;
-
-    font-size: 12px;
-
-    line-height: 1;
-
-    font-weight: 800;
-}
-
-
-.user-avatar {
-    color: #1d4ed8;
-
-    background: #dbeafe;
-}
-
-
-.agent-avatar {
-    color: #344054;
-
-    background: #e9edf3;
-}
-
-
-/*
-   这里是之前布局的关键问题之一。
-
-   message-wrap 不再占满整行。
-   短消息外层跟随内容；
-   长消息最多占可用宽度的约 80%。
-*/
-
-.message-wrap {
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: flex-start;
-
-    width: fit-content;
-
-    min-width: 0;
-
-    max-width: min(
-        80%,
-        760px
-    );
-}
-
-
-.user-wrap {
-    align-items: flex-end;
-}
-
-
-.message-role {
-    margin:
-        0
-        3px
-        4px
-        3px;
-
-    color: var(--muted);
-
-    font-size: 13px;
-
-    line-height: 1.2;
-
-    font-weight: 700;
-}
-
-
-.message-bubble {
-    display: inline-block;
-
-    width: fit-content;
-
-    max-width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 10px 14px;
-
-    border-radius: 14px;
-
-    font-size: 17px;
-
-    line-height: 1.62;
-
-    text-align: left;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: break-word;
-
-    word-break: normal;
-}
-
-
-/*
-   用户消息右对齐，但文字本身左对齐。
-*/
-
-.user-message {
-    color: white;
-
-    background: var(--blue);
-
-    border-bottom-right-radius: 5px;
-}
-
-
-.agent-message {
-    color: var(--text);
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-bottom-left-radius: 5px;
-}
-
-
-/* =========================================================
-   INPUT
-========================================================= */
-
-.chat-input-row {
-    width: 100% !important;
-
-    align-items: stretch !important;
-
-    gap: 9px !important;
-
-    margin-top: 9px !important;
-}
-
-
-.chat-input {
-    min-width: 0 !important;
-
-    margin: 0 !important;
-}
-
-
-.chat-input textarea {
-    min-height: 52px !important;
-
-    max-height: 100px !important;
-
-    padding: 11px 13px !important;
-
-    font-size: 17px !important;
+.chat-column .chat-input textarea {
+    font-size: 22px !important;
 
     line-height: 1.5 !important;
 
-    border-radius: 10px !important;
+    min-height: 64px !important;
+
+    padding: 14px 16px !important;
 }
 
 
-.send-button {
-    flex: 0 0 105px !important;
+.chat-column .send-button button {
+    min-height: 64px !important;
+
+    font-size: 19px !important;
 }
 
 
-.send-button button {
-    width: 100% !important;
 
-    min-height: 52px !important;
-
-    padding: 8px 14px !important;
-
-    border-radius: 10px !important;
-
-    font-size: 16px !important;
-
-    font-weight: 750 !important;
-}
 
 
 /* =========================================================
-   HISTORY LOADER
+   LARGE DECISION TYPOGRAPHY
 ========================================================= */
 
-.history-loader {
-    margin-top: 9px !important;
+/* Agent Decision */
 
-    border-radius: 10px !important;
+.decision-column .column-title {
+    font-size: 30px;
+}
+
+.decision-column .column-subtitle {
+    font-size: 19px;
 }
 
 
-.history-loader textarea {
-    font-size: 15px !important;
+/* Query / Trigger / Evidence / Topic Structure / Policy */
 
-    line-height: 1.55 !important;
-}
-
-
-/* =========================================================
-   DECISION TABS
-========================================================= */
-
-.decision-tabs {
-    width: 100% !important;
-}
-
-
-.decision-tabs button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
-}
-
-
-.decision-html,
-.trace-html {
-    width: 100% !important;
-
-    min-width: 0 !important;
-}
-
-
-/* =========================================================
-   DECISION SURFACE
-========================================================= */
-
-.decision-surface,
-.trace-surface {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    max-height: clamp(
-        500px,
-        calc(100vh - 260px),
-        760px
-    );
-
-    overflow-y: auto;
-
-    overflow-x: hidden;
-
-    padding: 4px 4px 8px 1px;
-}
-
-
-.decision-section {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-bottom: 10px;
-
-    padding: 13px 14px;
-
-    background: white;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 11px;
-}
-
-
-.section-heading {
-    margin-bottom: 10px;
-
-    color: var(--text);
-
-    font-size: 17px;
-
-    line-height: 1.3;
+.decision-column .section-heading {
+    font-size: 24px;
 
     font-weight: 800;
+
+    margin-bottom: 14px;
 }
 
 
-.decision-line {
-    margin-bottom: 7px;
+/* Trigger / Evidence Mode 左边文字 */
+
+.decision-column .decision-row {
+    font-size: 20px;
+
+    line-height: 1.5;
+
+    margin: 10px 0;
 }
 
 
-.decision-row {
-    display: flex;
+/* Query 正文 */
 
-    align-items: center;
-    justify-content: space-between;
+.decision-column .decision-text {
+    font-size: 20px;
 
-    gap: 14px;
+    line-height: 1.6;
 
-    margin: 7px 0;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.4;
+    padding: 12px 14px;
 }
 
 
-.decision-text {
-    width: 100%;
+/* rewrite / true / retrieve_new_evidence 等 */
 
-    box-sizing: border-box;
+.decision-column .badge {
+    font-size: 18px;
 
-    margin-top: 7px;
+    line-height: 1.35;
 
-    padding: 9px 11px;
-
-    color: var(--text2);
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-
-    font-size: 15px;
-
-    line-height: 1.55;
-
-    overflow-wrap: anywhere;
-}
-
-
-.sub-label {
-    margin-top: 10px;
-
-    margin-bottom: 5px;
-
-    color: var(--muted);
-
-    font-size: 13px;
-
-    line-height: 1.4;
+    padding: 6px 11px;
 
     font-weight: 700;
 }
 
 
-/* =========================================================
-   BADGES
-========================================================= */
+/* Information */
 
-.badge {
-    display: inline-flex;
+.decision-column .sub-label {
+    font-size: 18px;
 
-    align-items: center;
+    margin-top: 14px;
 
-    max-width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 4px 9px;
-
-    border-radius: 999px;
-
-    font-size: 13px;
-
-    line-height: 1.3;
-
-    font-weight: 750;
-
-    overflow-wrap: anywhere;
+    margin-bottom: 8px;
 }
 
 
-.badge-blue {
-    color: #1d4ed8;
+/* JSON */
 
-    background: var(--blue-soft);
+.decision-column .json-view {
+    font-size: 18px;
+
+    line-height: 1.6;
+
+    padding: 12px;
 }
 
 
-.badge-green {
-    color: #15803d;
 
-    background: var(--green-soft);
-}
-
-
-.badge-gray {
-    color: #475467;
-
-    background: var(--gray-soft);
-}
 
 
 /* =========================================================
-   EVIDENCE
+   EVIDENCE CASE CARDS
 ========================================================= */
 
 .case-list {
@@ -983,170 +342,202 @@ footer {
 
     flex-direction: column;
 
-    gap: 7px;
+    gap: 10px;
 }
 
 
-.case-item {
+.case-card {
     width: 100%;
 
     box-sizing: border-box;
 
-    padding: 9px 10px;
+    background: #ffffff;
 
-    background: #fafbfc;
+    border: 1px solid #e2e8f0;
 
-    border: 1px solid var(--soft-line);
+    border-radius: 12px;
 
-    border-radius: 8px;
+    overflow: hidden;
+
+    transition:
+        border-color 0.15s ease,
+        box-shadow 0.15s ease,
+        transform 0.15s ease;
 }
 
 
-.case-id {
+.case-card:hover {
+    border-color: #bfdbfe;
+
+    box-shadow:
+        0 3px 10px
+        rgba(37, 99, 235, 0.08);
+}
+
+
+.case-card[open] {
+    border-color: #93c5fd;
+
+    box-shadow:
+        0 4px 14px
+        rgba(37, 99, 235, 0.08);
+}
+
+
+/* 去掉浏览器默认三角 */
+
+.case-card summary {
+    list-style: none;
+}
+
+
+.case-card summary::-webkit-details-marker {
+    display: none;
+}
+
+
+.case-card-summary {
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    gap: 14px;
+
+    padding: 14px 15px;
+
+    cursor: pointer;
+
+    user-select: none;
+}
+
+
+.case-card-main {
+    min-width: 0;
+
+    flex: 1;
+}
+
+
+.case-card-id {
     color: var(--blue);
 
-    font-size: 13px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.case-title {
-    margin-top: 3px;
-
-    color: var(--text2);
-
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    overflow-wrap: anywhere;
-}
-
-
-.empty-small {
-    padding: 10px 11px;
-
-    color: var(--muted);
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    padding: 1px 0;
-}
-
-
-.tree-node {
-    position: relative;
-
-    box-sizing: border-box;
-
-    padding: 5px 5px;
-
-    color: var(--text2);
-
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    overflow-wrap: anywhere;
-}
-
-
-.tree-dot {
-    display: inline-block;
-
-    width: 7px;
-    height: 7px;
-
-    margin-right: 6px;
-
-    border-radius: 50%;
-
-    background: #94a3b8;
-}
-
-
-.tree-leaf .tree-dot {
-    background: #22c55e;
-}
-
-
-.tree-topic {
-    font-weight: 650;
-}
-
-
-.tree-dimension {
-    display: inline-block;
-
-    margin-left: 6px;
-
-    padding: 2px 6px;
-
-    color: var(--blue);
-
-    background: var(--blue-soft);
-
-    border-radius: 5px;
-
-    font-size: 12px;
+    font-size: 19px;
 
     line-height: 1.35;
+
+    font-weight: 700;
+
+    margin-bottom: 5px;
 }
 
 
-.tree-case {
-    display: inline;
+.case-card-preview {
+    color: var(--text2);
 
-    margin-left: 6px;
+    font-size: 18px;
 
-    color: var(--muted);
+    line-height: 1.55;
 
-    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+
+.case-card-action {
+    flex: 0 0 auto;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 5px;
+
+    color: var(--blue);
+
+    font-size: 16px;
+
+    white-space: nowrap;
+}
+
+
+.case-chevron {
+    display: inline-block;
+
+    font-size: 24px;
+
+    line-height: 1;
+
+    transition: transform 0.18s ease;
+}
+
+
+.case-card[open] .case-chevron {
+    transform: rotate(90deg);
 }
 
 
 /* =========================================================
-   JSON
+   CASE DETAIL
 ========================================================= */
 
-.json-view {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin: 0;
-
-    padding: 9px 10px;
-
-    color: var(--text2);
+.case-detail {
+    padding: 14px 15px 16px 15px;
 
     background: #f8fafc;
 
-    border-radius: 8px;
+    border-top: 1px solid var(--soft-line);
+}
 
-    font-size: 13px;
+
+.case-detail-header {
+    color: var(--text);
+
+    font-size: 20px;
+
+    font-weight: 700;
+
+    margin-bottom: 12px;
+}
+
+
+.case-detail-row {
+    display: grid;
+
+    grid-template-columns: 130px minmax(0, 1fr);
+
+    gap: 12px;
+
+    padding: 9px 0;
+
+    border-bottom: 1px solid #edf1f5;
+}
+
+
+.case-detail-row:last-child {
+    border-bottom: none;
+}
+
+
+.case-detail-key {
+    color: var(--muted);
+
+    font-size: 16px;
 
     line-height: 1.5;
+
+    font-weight: 600;
+
+    overflow-wrap: anywhere;
+}
+
+
+.case-detail-value {
+    color: var(--text2);
+
+    font-size: 18px;
+
+    line-height: 1.6;
 
     white-space: pre-wrap;
 
@@ -1154,400 +545,82 @@ footer {
 }
 
 
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-section {
-    margin-bottom: 0;
-}
 
 
-.latency-total {
-    margin-bottom: 9px;
-
-    color: var(--blue);
-
-    font-size: 29px;
-
-    line-height: 1.1;
-
-    font-weight: 800;
-}
 
 
-.latency-total span {
-    margin-left: 2px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    font-weight: 650;
-}
-
-
-.latency-grid {
-    display: grid;
-
-    grid-template-columns:
-        repeat(3, minmax(0, 1fr));
-
-    gap: 6px;
-}
-
-
-.latency-grid > div {
-    min-width: 0;
-
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 2px;
-
-    box-sizing: border-box;
-
-    padding: 8px 9px;
-
-    background: #f8fafc;
-
-    border-radius: 8px;
-}
-
-
-.latency-grid span {
-    color: var(--muted);
-
-    font-size: 12px;
-}
-
-
-.latency-grid b {
-    color: var(--text2);
-
-    font-size: 14px;
-
-    font-weight: 750;
-}
 
 
 /* =========================================================
-   TRACE
+   LARGE TOPIC TREE
 ========================================================= */
 
-.trace-item {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    margin-bottom: 9px;
-
-    padding: 12px 13px;
-
-    background: white;
-
-    border: 1px solid var(--soft-line);
-
-    border-radius: 10px;
-}
-
-
-.trace-head {
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    gap: 10px;
-
-    color: var(--muted);
-
-    font-size: 13px;
-}
-
-
-.trace-head b {
-    color: var(--text);
-
-    font-size: 15px;
-}
-
-
-.trace-user {
-    margin: 8px 0;
-
-    color: var(--text2);
-
-    font-size: 15px;
-
-    line-height: 1.5;
-}
-
-
-.trace-flow {
-    display: flex;
-
-    align-items: center;
-
-    gap: 6px;
-
-    flex-wrap: wrap;
-}
-
-
-.flow-arrow {
-    color: #98a2b3;
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   EMPTY DECISION
-========================================================= */
-
-.decision-empty {
-    min-height: 360px;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    padding: 24px;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.decision-empty-symbol {
-    margin-bottom: 10px;
-
-    color: var(--blue);
-
-    font-size: 30px;
-}
-
-
-.decision-empty-title {
-    margin-bottom: 7px;
-
-    color: var(--text);
-
+.decision-column .tree-node {
     font-size: 19px;
 
-    line-height: 1.3;
-
-    font-weight: 800;
-}
-
-
-.decision-empty-desc {
-    max-width: 420px;
-
-    color: var(--muted);
-
-    font-size: 14px;
-
     line-height: 1.6;
+
+    padding: 7px 6px;
 }
+
+
+.decision-column .tree-topic {
+    font-weight: 600;
+}
+
+
+.decision-column .tree-dimension {
+    font-size: 16px;
+
+    padding: 3px 7px;
+}
+
+
+.decision-column .tree-case {
+    font-size: 16px;
+}
+
+
+.decision-column .tree-dot {
+    width: 9px;
+    height: 9px;
+
+    margin-right: 8px;
+}
+
+
+
+
 
 
 /* =========================================================
-   PREFIX
+   LARGE LATENCY
 ========================================================= */
 
-.prefix-success,
-.prefix-error {
-    box-sizing: border-box;
+.decision-column .latency-total {
+    font-size: 38px;
 
-    padding: 10px;
-
-    border-radius: 8px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
+    margin-bottom: 13px;
 }
 
 
-.prefix-success {
-    color: #027a48;
-
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
+.decision-column .latency-total span {
+    font-size: 20px;
 }
 
 
-.prefix-error {
-    color: #be123c;
-
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
+.decision-column .latency-grid span {
+    font-size: 16px;
 }
 
 
-/* =========================================================
-   GENERIC BUTTONS
-========================================================= */
-
-button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
+.decision-column .latency-grid b {
+    font-size: 18px;
 }
 
 
-/* =========================================================
-   SCROLLBAR
-========================================================= */
+.decision-column .latency-grid > div {
+    padding: 11px 12px;
 
-.chat-surface::-webkit-scrollbar,
-.decision-surface::-webkit-scrollbar,
-.trace-surface::-webkit-scrollbar {
-    width: 7px;
+    gap: 4px;
 }
-
-
-.chat-surface::-webkit-scrollbar-thumb,
-.decision-surface::-webkit-scrollbar-thumb,
-.trace-surface::-webkit-scrollbar-thumb {
-    background: #d0d5dd;
-
-    border-radius: 999px;
-}
-
-
-/* =========================================================
-   RESPONSIVE
-========================================================= */
-
-@media (max-width: 1200px) {
-
-    .gradio-container {
-        padding:
-            12px
-            16px
-            18px
-            16px
-            !important;
-    }
-
-    .developer-workspace {
-        gap: 12px !important;
-    }
-
-    .chat-column,
-    .decision-column {
-        padding: 14px;
-    }
-
-    .message-wrap {
-        max-width: 86%;
-    }
-
-    .latency-grid {
-        grid-template-columns:
-            repeat(2, minmax(0, 1fr));
-    }
-}
-
-
-@media (max-width: 900px) {
-
-    .developer-workspace {
-        flex-direction: column !important;
-    }
-
-    .chat-column,
-    .decision-column {
-        width: 100% !important;
-
-        flex: 1 1 auto !important;
-    }
-
-    .panel-heading-row {
-        align-items: flex-start !important;
-
-        flex-direction: column !important;
-    }
-
-    .session-inline {
-        justify-content: flex-start;
-    }
-
-    .message-wrap {
-        max-width: 88%;
-    }
-}
-
-
-@media (max-width: 700px) {
-
-    .gradio-container {
-        padding: 8px !important;
-    }
-
-    .app-header {
-        padding: 14px 15px;
-
-        align-items: flex-start;
-
-        flex-direction: column;
-
-        gap: 9px;
-    }
-
-    .header-title {
-        font-size: 25px;
-    }
-
-    .header-desc {
-        font-size: 14px;
-    }
-
-    .chat-column,
-    .decision-column,
-    .user-workspace {
-        padding: 11px;
-
-        border-radius: 12px;
-    }
-
-    .chat-surface {
-        padding: 13px 11px;
-
-        height: calc(100vh - 330px);
-    }
-
-    .message-wrap {
-        max-width: 91%;
-    }
-
-    .message-bubble {
-        font-size: 16px;
-
-        padding: 9px 12px;
-    }
-
-    .avatar {
-        width: 32px;
-        height: 32px;
-
-        flex-basis: 32px;
-    }
-
-    .latency-grid {
-        grid-template-columns: 1fr 1fr;
-    }
-
-}
-
-"""
