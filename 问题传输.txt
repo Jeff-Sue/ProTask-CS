@@ -1,856 +1,245 @@
-from __future__ import annotations
-
-import sys
-import uuid
-from pathlib import Path
-
-import gradio as gr
+import argparse
+import json
+import re
 
 
 # ============================================================
-# Project Path
+# Config
 # ============================================================
 
-PROJECT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = PROJECT_DIR.parent
-
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-
-from Agent.agentv2_3 import MemoryAgent
-from project.styles import CSS
-from project.ui import (
-    render_header,
-    render_session,
-    render_chat,
-    render_decision,
-    render_trace,
-    render_prefix_result,
-)
+KNOWLEDGE_POLICY = {"ExplainedResponse", "CaseRecommendation"}
 
 
 # ============================================================
-# Session
+# Utils
 # ============================================================
 
-def new_session():
-    return {
-        "session_id": (
-            "web_"
-            + uuid.uuid4().hex[:10]
-        ),
-
-        "agent": MemoryAgent(
-            mode="single",
-            show_state=False,
-        ),
-
-        "history": [],
-
-        "trace": [],
-
-        "turns": 0,
-
-        "mode": "user",
-    }
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-# ============================================================
-# Agent Snapshot
-# ============================================================
-
-def get_last_run(agent):
-    """
-    run.py 加入时间统计后，推荐暴露：
-        agent.last_run
-
-    格式大致为：
-    {
-        "query_state": ...,
-        "trigger_state": ...,
-        "policy_state": ...,
-        "evidence_state": ...,
-        "latency": ...
-    }
-
-    如果你的 run.py 字段名字略有不同，
-    这里只需要调整这一处。
-    """
-
-    snapshot = getattr(
-        agent,
-        "last_run",
-        None,
-    )
-
-    if snapshot:
-        return snapshot
-
-    # --------------------------------------------
-    # fallback:
-    # 即使 run.py 暂时没有 last_run，
-    # 页面仍然可以正常聊天。
-    # --------------------------------------------
-
-    memory = getattr(
-        agent,
-        "memory",
-        {},
-    )
-
-    return {
-        "query_state": {},
-        "trigger_state": {},
-        "policy_state": (
-            memory
-            .get("interaction_state", {})
-            .get("last_policy", {})
-            or {}
-        ),
-        "evidence_state": (
-            memory
-            .get("evidence_state", {})
-        ),
-        "latency_ms": {},
-    }
-
-
-# ============================================================
-# History Parser
-# ============================================================
-
-def parse_prefix(text):
-    history = []
-
+def extract_case_ids(text):
     if not text:
-        return history
+        return []
+    return re.findall(r"KT\d+", text)
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
 
-        if not line:
-            continue
+def normalize_case_ids(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
 
-        if line.startswith("用户:"):
-            content = line.split(
-                "用户:",
-                1,
-            )[1].strip()
 
-            history.append({
-                "role": "user",
-                "content": content,
-            })
+def get_policy_label(policy):
+    if not isinstance(policy, dict):
+        return ""
+    return str(policy.get("label", "")).strip()
 
-        elif line.startswith("用户："):
-            content = line.split(
-                "用户：",
-                1,
-            )[1].strip()
 
-            history.append({
-                "role": "user",
-                "content": content,
-            })
+def get_policy_information(policy):
+    if not isinstance(policy, dict):
+        return {}
+    information = policy.get("information")
+    return information if isinstance(information, dict) else {}
 
-        elif line.startswith("客服:"):
-            content = line.split(
-                "客服:",
-                1,
-            )[1].strip()
 
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
+def get_pred_cases(policy):
+    if get_policy_label(policy) not in KNOWLEDGE_POLICY:
+        return []
 
-        elif line.startswith("客服："):
-            content = line.split(
-                "客服：",
-                1,
-            )[1].strip()
+    information = get_policy_information(policy)
+    return normalize_case_ids(
+        information.get("case_id") or information.get("case_ids")
+    )
 
-            history.append({
-                "role": "assistant",
-                "content": content,
-            })
 
-    return history
+def rate(values):
+    return sum(values) / len(values) if values else 0
 
 
 # ============================================================
-# Render Helpers
+# Case Turn Evaluation
 # ============================================================
 
-def session_html(state):
-    return render_session(
-        state["session_id"],
-        state["turns"],
-    )
+def evaluate_case_turn(data):
+    total_case_turn = 0
+    trigger_hit = 0
+    top5_hit = 0
+    top3_hit = 0
+    top1_hit = 0
+    policy_hit = 0
+    selection_hit = 0
 
+    for dialog in data.values():
+        for turn in dialog["turns"]:
+            golden_cases = extract_case_ids(turn.get("golden_response", ""))
 
-def developer_chat_html(state):
-    return render_chat(
-        state["history"],
-        user_mode=False,
-    )
+            # 只统计 Golden Response 中包含案例的轮次
+            if not golden_cases:
+                continue
 
+            total_case_turn += 1
+            golden_case = golden_cases[0]
 
-def user_chat_html(state):
-    return render_chat(
-        state["history"],
-        user_mode=True,
-    )
+            # Trigger
+            trigger = turn.get("trigger", {}).get("trigger", False)
+            if not trigger:
+                continue
 
+            trigger_hit += 1
 
-def current_decision_html(state):
-    if not state["trace"]:
-        return render_decision(None)
-
-    return render_decision(
-        state["trace"][-1]
-    )
-
-
-def trace_html(state):
-    return render_trace(
-        state["trace"]
-    )
-
-
-# ============================================================
-# Chat
-# ============================================================
-
-def chat(
-    user_input,
-    state,
-):
-    if state is None:
-        state = new_session()
-
-    user_input = str(
-        user_input or ""
-    ).strip()
-
-    if not user_input:
-        return (
-            "",
-            user_chat_html(state),
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-        )
-
-    history = list(
-        state["history"]
-    )
-
-    history.append({
-        "role": "user",
-        "content": user_input,
-    })
-
-    try:
-        response = state["agent"].reply(
-            history
-        )
-
-    except Exception as exc:
-        response = (
-            "Agent 执行失败："
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    history.append({
-        "role": "assistant",
-        "content": response,
-    })
-
-    state["history"] = history
-
-    state["turns"] += 1
-
-    snapshot = get_last_run(
-        state["agent"]
-    )
-
-    snapshot = dict(snapshot)
-
-    snapshot["turn"] = state["turns"]
-    snapshot["user"] = user_input
-    snapshot["response"] = response
-
-    state["trace"].append(snapshot)
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-    )
-
-
-# ============================================================
-# Reset
-# ============================================================
-
-def reset_chat():
-    state = new_session()
-
-    return (
-        "",
-        user_chat_html(state),
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        "",
-    )
-
-
-# ============================================================
-# Load Prefix
-# ============================================================
-
-def load_prefix(
-    prefix_text,
-    state,
-):
-    if state is None:
-        state = new_session()
-
-    history = parse_prefix(
-        prefix_text
-    )
-
-    if not history:
-        return (
-            developer_chat_html(state),
-            current_decision_html(state),
-            trace_html(state),
-            session_html(state),
-            state,
-            render_prefix_result(
-                False,
-                "没有识别到有效对话。",
-            ),
-        )
-
-    # --------------------------------------------
-    # New agent
-    # --------------------------------------------
-
-    state["agent"] = MemoryAgent(
-        mode="single",
-        show_state=False,
-    )
-
-    state["history"] = history
-    state["trace"] = []
-
-    state["turns"] = sum(
-        1
-        for item in history
-        if item.get("role") == "user"
-    )
-
-    return (
-        developer_chat_html(state),
-        current_decision_html(state),
-        trace_html(state),
-        session_html(state),
-        state,
-        render_prefix_result(
-            True,
-            f"已加载 {len(history)} 条历史消息。",
-        ),
-    )
-
-
-# ============================================================
-# View Switching
-# ============================================================
-
-def show_user_view():
-    return (
-        gr.update(visible=True),
-        gr.update(visible=False),
-
-        gr.update(
-            elem_classes=[
-                "mode-active"
+            # Retrieval
+            retrieved = [
+                str(case.get("case_id", "")).strip()
+                for case in turn.get("evidence", [])
+                if isinstance(case, dict)
             ]
-        ),
 
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
-    )
+            hit5 = golden_case in retrieved[:5]
+            hit3 = golden_case in retrieved[:3]
+            hit1 = golden_case in retrieved[:1]
 
+            top5_hit += hit5
+            top3_hit += hit3
+            top1_hit += hit1
 
-def show_developer_view():
-    return (
-        gr.update(visible=False),
-        gr.update(visible=True),
+            # 后续 Policy / Selection 只在 Top-5 包含 Golden Case 时评估
+            if not hit5:
+                continue
 
-        gr.update(
-            elem_classes=[
-                "mode-inactive"
-            ]
-        ),
+            # Policy
+            policy = turn.get("policy", {})
+            if get_policy_label(policy) not in KNOWLEDGE_POLICY:
+                continue
 
-        gr.update(
-            elem_classes=[
-                "mode-active"
-            ]
-        ),
-    )
+            policy_hit += 1
+
+            # Case Selection
+            pred_cases = get_pred_cases(policy)
+            if golden_case in pred_cases:
+                selection_hit += 1
+
+    return {
+        "案例轮数量": total_case_turn,
+        "知识链路触发率": trigger_hit / total_case_turn if total_case_turn else 0,
+        "Top-5有效案例召回率": top5_hit / trigger_hit if trigger_hit else 0,
+        "Top-3有效案例召回率": top3_hit / trigger_hit if trigger_hit else 0,
+        "Top-1有效案例召回率": top1_hit / trigger_hit if trigger_hit else 0,
+        "知识型策略命中率": policy_hit / top5_hit if top5_hit else 0,
+        "案例选择准确率": selection_hit / policy_hit if policy_hit else 0,
+        "最终案例推荐准确率": selection_hit / total_case_turn if total_case_turn else 0,
+    }
 
 
 # ============================================================
-# UI
+# All Turn Timing
 # ============================================================
 
-initial_state = new_session()
+def evaluate_timing(data):
+    pred = []
+    gold = []
 
+    for dialog in data.values():
+        for turn in dialog["turns"]:
+            golden_case = bool(extract_case_ids(turn.get("golden_response", "")))
+            policy_label = get_policy_label(turn.get("policy", {}))
+            predicted = policy_label in KNOWLEDGE_POLICY
 
-with gr.Blocks(
-    title="Huawei IT Support Agent",
-    css=CSS,
-    theme=gr.themes.Soft(),
-    fill_width=True,
-) as demo:
+            gold.append(golden_case)
+            pred.append(predicted)
 
-    session_state = gr.State(
-        initial_state
-    )
+    tp = sum(p and g for p, g in zip(pred, gold))
+    fp = sum(p and not g for p, g in zip(pred, gold))
+    fn = sum(not p and g for p, g in zip(pred, gold))
 
-    # --------------------------------------------------------
-    # Header
-    # --------------------------------------------------------
+    precision = tp / (tp + fp) if tp + fp else 0
+    recall = tp / (tp + fn) if tp + fn else 0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
 
-    gr.HTML(
-        render_header(),
-        container=False,
-    )
-
-    # --------------------------------------------------------
-    # Mode Switch
-    # --------------------------------------------------------
-
-    with gr.Row(
-        elem_classes=["mode-switch"]
-    ):
-
-        user_mode_button = gr.Button(
-            "👤 用户界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-active"
-            ],
-        )
-
-        developer_mode_button = gr.Button(
-            "</> 开发者界面",
-            variant="secondary",
-            elem_classes=[
-                "mode-inactive"
-            ],
-        )
-
-    # ========================================================
-    # USER VIEW
-    # ========================================================
-
-    with gr.Column(
-        visible=True,
-        elem_classes=[
-            "user-workspace"
-        ],
-    ) as user_view:
-
-        with gr.Row(
-            elem_classes=[
-                "column-header"
-            ]
-        ):
-            gr.HTML(
-                """
-                <div>
-                    <div class="column-title">
-                        IT 智能客服
-                    </div>
-
-                    <div class="column-subtitle">
-                        Huawei IT Support
-                    </div>
-                </div>
-                """,
-                container=False,
-            )
-
-        user_chat = gr.HTML(
-            user_chat_html(initial_state),
-            container=False,
-            elem_classes=[
-                "chat-html",
-                "user-chat-surface",
-            ],
-        )
-
-        with gr.Row(
-            elem_classes=[
-                "chat-input-row"
-            ]
-        ):
-
-            user_input = gr.Textbox(
-                placeholder=(
-                    "请输入您的 IT 问题..."
-                ),
-                show_label=False,
-                lines=2,
-                max_lines=5,
-                elem_classes=[
-                    "chat-input"
-                ],
-            )
-
-            user_send = gr.Button(
-                "发送",
-                variant="primary",
-                elem_classes=[
-                    "send-button"
-                ],
-            )
-
-    # ========================================================
-    # DEVELOPER VIEW
-    # ========================================================
-
-    with gr.Row(
-        visible=False,
-        elem_classes=[
-            "developer-workspace"
-        ],
-    ) as developer_view:
-
-        # ----------------------------------------------------
-        # Left: Conversation
-        # ----------------------------------------------------
-
-        with gr.Column(
-            elem_classes=[
-                "chat-column"
-            ]
-        ):
-
-            with gr.Row(
-                elem_classes=[
-                    "column-header"
-                ]
-            ):
-
-                gr.HTML(
-                    """
-                    <div>
-                        <div class="column-title">
-                            Conversation
-                        </div>
-
-                        <div class="column-subtitle">
-                            Current dialogue
-                        </div>
-                    </div>
-                    """,
-                    container=False,
-                )
-
-                developer_session = gr.HTML(
-                    session_html(
-                        initial_state
-                    ),
-                    container=False,
-                )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-toolbar"
-                ]
-            ):
-
-                new_chat_button = gr.Button(
-                    "新建会话",
-                    size="sm",
-                )
-
-            developer_chat = gr.HTML(
-                developer_chat_html(
-                    initial_state
-                ),
-                container=False,
-                elem_classes=[
-                    "chat-html"
-                ],
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "chat-input-row"
-                ]
-            ):
-
-                developer_input = gr.Textbox(
-                    placeholder=(
-                        "请输入 IT 问题..."
-                    ),
-                    show_label=False,
-                    lines=2,
-                    max_lines=5,
-                    elem_classes=[
-                        "chat-input"
-                    ],
-                )
-
-                developer_send = gr.Button(
-                    "发送",
-                    variant="primary",
-                    elem_classes=[
-                        "send-button"
-                    ],
-                )
-
-            # -----------------------------------------------
-            # History loader
-            # -----------------------------------------------
-
-            with gr.Accordion(
-                "加载已有对话",
-                open=False,
-                elem_classes=[
-                    "history-loader"
-                ],
-            ):
-
-                prefix_text = gr.Textbox(
-                    lines=6,
-                    show_label=False,
-                    placeholder=(
-                        "用户: 我的 VPN 无法登录\n"
-                        "客服: 请问具体有什么提示？\n"
-                        "用户: 显示账号无权限"
-                    ),
-                )
-
-                load_button = gr.Button(
-                    "加载历史",
-                    size="sm",
-                )
-
-                prefix_result = gr.HTML(
-                    "",
-                    container=False,
-                    elem_classes=[
-                        "prefix-area"
-                    ],
-                )
-
-        # ----------------------------------------------------
-        # Right: Decision
-        # ----------------------------------------------------
-
-        with gr.Column(
-            elem_classes=[
-                "decision-column"
-            ]
-        ):
-
-            gr.HTML(
-                """
-                <div class="column-header">
-                    <div>
-                        <div class="column-title">
-                            Agent Decision
-                        </div>
-
-                        <div class="column-subtitle">
-                            Internal execution state
-                        </div>
-                    </div>
-                </div>
-                """,
-                container=False,
-            )
-
-            with gr.Tabs(
-                elem_classes=[
-                    "decision-tabs"
-                ]
-            ):
-
-                with gr.Tab(
-                    "当前决策"
-                ):
-
-                    decision_panel = gr.HTML(
-                        current_decision_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "decision-html"
-                        ],
-                    )
-
-                with gr.Tab(
-                    "运行轨迹"
-                ):
-
-                    trace_panel = gr.HTML(
-                        trace_html(
-                            initial_state
-                        ),
-                        container=False,
-                        elem_classes=[
-                            "trace-html"
-                        ],
-                    )
-
-
-    # ========================================================
-    # Events
-    # ========================================================
-
-    chat_outputs = [
-        user_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-    ]
-
-    user_send.click(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-        api_name="chat",
-    )
-
-    user_input.submit(
-        fn=chat,
-        inputs=[
-            user_input,
-            session_state,
-        ],
-        outputs=chat_outputs,
-    )
-
-
-    developer_chat_outputs = [
-        developer_input,
-        user_chat,
-        developer_chat,
-        decision_panel,
-        trace_panel,
-        developer_session,
-        session_state,
-    ]
-
-    developer_send.click(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-    developer_input.submit(
-        fn=chat,
-        inputs=[
-            developer_input,
-            session_state,
-        ],
-        outputs=developer_chat_outputs,
-    )
-
-
-    user_mode_button.click(
-        fn=show_user_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-
-    developer_mode_button.click(
-        fn=show_developer_view,
-        outputs=[
-            user_view,
-            developer_view,
-            user_mode_button,
-            developer_mode_button,
-        ],
-    )
-
-
-    new_chat_button.click(
-        fn=reset_chat,
-        outputs=[
-            developer_input,
-            user_chat,
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
-
-
-    load_button.click(
-        fn=load_prefix,
-        inputs=[
-            prefix_text,
-            session_state,
-        ],
-        outputs=[
-            developer_chat,
-            decision_panel,
-            trace_panel,
-            developer_session,
-            session_state,
-            prefix_result,
-        ],
-    )
+    return {
+        "推荐时机Precision": precision,
+        "推荐时机Recall": recall,
+        "推荐时机F1": f1,
+        "过早推荐率": fp / (tp + fp) if tp + fp else 0,
+        "漏推荐率": fn / (tp + fn) if tp + fn else 0,
+    }
 
 
 # ============================================================
-# Launch
+# Dialogue Level
 # ============================================================
+
+def evaluate_dialogue(data):
+    success = []
+    golden_first = []
+    pred_first = []
+
+    for dialog in data.values():
+        golden_cases = set()
+        predicted_cases = set()
+        g_turn = None
+        p_turn = None
+
+        for turn in dialog["turns"]:
+            # Golden Cases
+            g_cases = extract_case_ids(turn.get("golden_response", ""))
+
+            for case_id in g_cases:
+                golden_cases.add(case_id)
+
+            if g_cases and g_turn is None:
+                g_turn = turn["turn_id"]
+
+            # Predicted Cases
+            p_cases = get_pred_cases(turn.get("policy", {}))
+
+            for case_id in p_cases:
+                predicted_cases.add(case_id)
+
+            if p_cases and p_turn is None:
+                p_turn = turn["turn_id"]
+
+        success.append(bool(golden_cases & predicted_cases))
+
+        if g_turn is not None:
+            golden_first.append(g_turn)
+
+        if p_turn is not None:
+            pred_first.append(p_turn)
+
+    return {
+        "对话成功率": rate(success),
+        "Golden案例首次推荐平均轮数": rate(golden_first),
+        "Predicted案例首次推荐平均轮数": rate(pred_first),
+    }
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def print_result(title, result):
+    print(f"\n========== {title} ==========")
+    for key, value in result.items():
+        print(f"{key}: {value:.4f}" if isinstance(value, float) else f"{key}: {value}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    args = parser.parse_args()
+
+    data = load_json(args.input)
+
+    print_result("案例轮指标", evaluate_case_turn(data))
+    print_result("所有轮推荐时机", evaluate_timing(data))
+    print_result("对话级指标", evaluate_dialogue(data))
+
 
 if __name__ == "__main__":
-    demo.queue().launch(
-        server_name="0.0.0.0",
-        server_port=7866,
-        show_error=True,
-    )
+    main()
