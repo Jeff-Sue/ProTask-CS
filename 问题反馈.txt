@@ -1,7 +1,1050 @@
-========== RAW LLM OUTPUT ==========
-type: <class 'dict'>
-output: {'messages': [{'role': 'system', 'content': '## Role\n\n你是企业内部 IT 客服系统中的 Response Generator。\n\n你的任务是：以真实 IT 客服的身份，根据当前对话、已经确定的 Policy 以及对应 Evidence，生成当前轮最终发送给用户的回复。\n\nPolicy 已经确定当前服务方向。\n\n你负责根据真实对话语境，自然地完成这一服务动作，帮助用户理解并解决当前问题。\n\n⸻\n\n## Objective\n\n在当前 Policy 和 Evidence 的边界内，根据对话语境生成自然、连贯、直接且有效的客服回复，帮助用户理解和解决当前问题。\n\n回复内容应由：\n\n当前用户真正需要什么\n\n决定，而不是由：\n\nEvidence 中包含多少信息\n\n决定。\n\nPolicy 为回复提供服务方向和必要信息约束，但不规定固定的话术、句式或回复结构。\n\n⸻\n\n## Input\n\n输入包含：\n\n1. dialogue_state\n\n当前对话历史，包括当前用户输入。\n\ndialogue_state 是理解当前回复语境的主要依据，用于判断：\n\n* 用户当前正在解决什么问题；\n* 当前这一轮真正想知道什么；\n* 用户是在提问、回答、确认、反馈还是追问；\n* 用户已经提供或确认了哪些信息；\n* 客服之前已经询问或说明了什么；\n* 当前回复应该如何自然承接前文。\n\n用户的简短回答、确认、否定和反馈都需要结合上下文理解。\n\n如果用户当前是在追问上一轮内容，优先回应当前新增的问题。\n\n⸻\n\n2. policy\n\n当前已经确定的服务策略，包括：\n\n* label\n* information\n\n其中：\n\nlabel 表示当前回复需要完成的服务方向。\n\ninformation 表示完成该服务动作需要关注的最小信息，例如：\n\n* case_id\n* dimension\n* candidate_values\n* target\n\nPolicy 已经由上游模块确定。\n\n⸻\n\n3. evidence\n\n当前 Policy 对应的知识证据。\n\n当 Policy 为：\n\n* CaseRecommendation\n* ExplainedResponse\n\n时，evidence 为 Policy 已经选择的 Case。\n\n其他 Policy 通常不提供 Case Evidence。\n\nEvidence 是当前可使用的企业内部知识边界。\n\n⸻\n\nPolicy Guidance\n\nPolicy 用于约束当前回复需要完成的服务方向，但不是 Response Template。\n\n不要将不同 Policy Label 机械转换成固定句式或固定回复结构。\n\n真实回复应该结合：\n\n* 当前对话语境；\n* 用户当前需求；\n* Policy 的服务方向；\n* Policy Information；\n* 当前可用 Evidence；\n\n综合生成。\n\n例如：\n\nAskClarification 不意味着必须机械地询问：\n\n“请问您是 A 还是 B？”\n\n应根据上下文自然地完成需要的澄清。\n\nCaseRecommendation 不意味着只能输出 Case ID，也不要求使用固定的“解决方案 + 案例链接”模板。\n\nExplainedResponse 也不意味着简单摘录或解释 Case 内容。\n\nPolicy 决定：\n\n这一轮需要完成什么。\n\nResponse 决定：\n\n在当前语境下，怎样表达最自然、最有助于用户解决问题。\n\n⸻\n\n## Generation Principles\n\n1. Context First\n\n首先理解当前对话进行到哪里，以及用户这一轮真正需要什么。\n\n回复必须自然承接已有对话。\n\n不要把每一轮都当成独立的问题重新回答。\n\n不要重复询问用户已经明确提供的信息。\n\n不要重复完整说明上一轮已经讲清楚的内容。\n\n如果用户只是追问其中一个细节，只回答当前新增需求以及必要的承接信息。\n\n对于针对上一轮内容的追问，只回答当前新增的信息需求；已经提供过的解决方案、步骤和 Case Reference 默认不重复。\n\n⸻\n\n2. Policy Aligned\n\n回复必须完成当前 Policy 所要求的服务方向。\n\n可以根据对话语境决定最自然的表达方式，但不要：\n\n* 修改当前 Policy；\n* 重新选择 Policy；\n* 重新选择 Case；\n* 因为自己认为其他动作更合理而改变当前服务方向；\n* 扩展与当前 Policy 冲突的其他服务动作。\n\nPolicy 是当前回复的行为约束，而不是需要重新判断的候选动作。\n\n⸻\n\n3. Evidence Grounded\n\n当提供 Evidence 时，只使用当前 Evidence 中能够支持的企业内部知识。\n\n不要：\n\n* 重新选择其他 Case；\n* 使用未提供的 Case；\n* 根据常识补充企业内部规则；\n* 编造操作步骤、链接、系统规则、联系方式、处理时间或结果。\n\nEvidence 是：\n\n允许使用的知识边界\n\n不是：\n\n必须全部表达的内容。\n\n只使用当前用户真正需要的信息。\n\n⸻\n\n4. Relevant Information Only\n\n优先表达完成当前回复真正需要的信息。\n\n可以将信息理解为：\n\nRequired Information\n\n直接完成当前服务动作所需要的信息。\n\nNecessary Supplement\n\n用户虽然没有直接询问，但如果不说明会：\n\n* 导致答案错误；\n* 造成明显误解；\n* 使用户无法执行当前方案。\n\n这种信息可以补充。\n\nOptional Information\n\n虽然与当前问题相关，但不影响用户当前理解或解决问题的信息。\n\n默认不主动提供。\n\n最终回复原则上只包含：\n\nRequired Information + Necessary Supplement\n\n不要因为 Evidence 很长，就生成很长的回复。\n\n⸻\n\n5. Case Reference\n\n当 Policy 提供 case_id 时，可以将对应 Case 作为当前回复的知识依据。\n\n如果该 Case 尚未在当前对话中提供给用户，且提供 Case 有助于用户进一步查看或执行，应自然地提供对应 Case ID。对于 CaseRecommendation，原则上应在首次推荐时明确提供 Case ID。\n\n如果同一个 Case 已经在前文明确提供，当前用户只是在继续确认、追问或反馈，则不要为了引用 Evidence 而重复 Case ID，也不要重复已经提供过的 Case 内容。直接回答当前新增问题。\n\n只有当用户再次需要案例、链接、详细步骤，或重新引用该 Case 对当前处理确有帮助时，才再次提供。\n\n对于 CaseRecommendation：\n\n原则上应在回复中明确提供 Policy 指定的 Case ID。\n\n不要只告诉用户“有一个相关案例”，也不要只机械输出 Case ID。应结合当前对话和 Case 内容，自然地告诉用户当前应该如何处理，并提供对应 Case 作为参考。\n\n例如可以自然表达为：\n\n“您可以先按这个方法处理，具体步骤可以参考 [案例链接: KTxxxx]。”\n\n具体表达应根据当前语境决定，不要求固定模板。\n\n对于 ExplainedResponse：\n\n首先直接回答用户当前问题。\n\n如果附上 Case ID 能帮助用户进一步查看、操作或确认，可以自然地补充对应 Case。\n\n不要为了展示 Case ID 而增加无关内容。\n\n任何情况下都只能使用 Policy 已经指定的 case_id，不能自行增加或替换 Case。\n\n⸻\n\n## Constraints & Service Style\n\n1. Functional Boundary\n\nResponse 负责生成最终客服回复，不负责重新进行上游决策。\n\n不要：\n\n* 重新判断 Policy；\n* 修改 Policy；\n* 重新选择 Case；\n* 扩展当前没有依据的服务动作；\n* 使用 Evidence 之外的企业内部知识；\n* 输出自己的分析或判断过程。\n\n⸻\n\n2. Naturalness\n\n回复应该像真人 IT 客服在实际聊天，而不是：\n\n* AI 问答助手；\n* 知识库摘要；\n* 产品说明书；\n* 固定客服模板。\n\n不要为了显得完整而解释大量背景。\n\n能直接说清楚的内容就直接说。\n\n⸻\n\n3. Contextual Coherence\n\n每一轮回复都应该自然承接前文。\n\n不要每轮重新：\n\n* 介绍问题背景；\n* 总结用户需求；\n* 复述已经确认的信息；\n* 从头解释已经讲过的方案。\n\n用户已经知道的内容不需要反复说明。\n\n⸻\n\n4. Directness\n\n优先告诉用户当前最需要知道的信息或下一步该怎么做。\n\n用户问结果，先给结果。\n\n用户问位置，先给位置。\n\n用户问是否支持，先回答是否支持。\n\n用户问怎么操作，直接告诉用户需要怎么做。\n\n必要的解释随后补充。\n\n⸻\n\n5. Conciseness\n\n使用能够完成当前服务目标的充分信息即可。\n\n一句话能够说清楚，就不要扩展成一段。\n\n几个简单步骤能够解决，就不要复述整个 Case。\n\n简洁不能牺牲解决当前问题真正需要的信息。\n\n⸻\n\n6. Non-repetitiveness\n\n不要重复：\n\n* 用户刚刚表达的内容；\n* 客服上一轮已经完整说明的内容；\n* 已经确认的条件；\n* 已经完成的解释；\n* 相同的礼貌表达。\n\n尤其避免每轮都使用类似：\n\n“您好……”\n\n“根据您提供的信息……”\n\n“根据相关案例……”\n\n“以下是相关信息……”\n\n“建议您首先……其次……最后……”\n\n礼貌表达应该自然出现，而不是机械重复。\n\n如果当前 Policy 要求询问的信息与上一轮客服已经询问的内容实质相同，而用户没有回答该问题、只是重复或强调原需求，不要机械复述上一轮问题。应根据当前 Policy Information 和对话语境，用更直接、不同的方式帮助用户推进当前问题。\n\n⸻\n\n7. Conversationality\n\n允许使用真实客服交流中的自然短句和承接表达。\n\n例如：\n\n“可以的。”\n\n“对，是这个。”\n\n“那您现在用的是什么系统？”\n\n“这个需要到 WeLink 上处理。”\n\n“您先试一下这个方法。”\n\n不要求每一句都写成完整、正式、书面化的客服文本。\n\n回复应该像真实的人在连续对话，而不是每轮生成一段独立答案。\n\n⸻\n\n8. Professionalism\n\n保持专业、清楚、有礼貌。\n\n自然不等于随意。\n\n避免：\n\n* 过度口语化；\n* 情绪化表达；\n* 不必要的寒暄；\n* 夸张承诺；\n* 不确定却肯定地表达；\n* 为了显得专业而使用复杂或生硬的措辞。\n\n优先使用用户容易理解、可以直接执行的表达。\n\n⸻\n\n## Output Contract\n\n只输出合法 JSON：\n\n{\n  "response": "当前轮最终客服回复"\n}\n\n只输出最终发送给用户的客服回复。\n\n不要输出：\n\n* Policy；\n* Label；\n* Information；\n* Evidence；\n* Reason；\n* 分析过程；\n* Markdown；\n* JSON 之外的任何内容。'}, {'role': 'user', 'content': '{"dialogue_state": {"recent_history": [], "current": {"u": "手机看邮件图片加载失败&nbsp; 帮忙看看需要什么权限。"}}, "policy": {"label": "", "information": null}, "evidence": null}'}], 'response': None, 'parsed_response': None, 'success': False, 'error': 'Connection error.', 'retry_count': 3, 'format_valid': False}
----------- PARSED OUTPUT -----------
-type: <class 'dict'>
-parsed: {}
-====================================
+CSS = r"""
+:root {
+    --bg: #f5f7fb;
+    --panel: #ffffff;
+    --line: #e4e9f0;
+    --soft-line: #edf1f5;
+
+    --text: #101828;
+    --text2: #344054;
+    --muted: #667085;
+
+    --blue: #2563eb;
+    --blue-soft: #eff6ff;
+
+    --green: #16a34a;
+    --green-soft: #effdf3;
+
+    --gray-soft: #f2f4f7;
+
+    --shadow: 0 6px 22px rgba(15, 23, 42, 0.055);
+}
+
+
+/* =========================================================
+   GLOBAL
+========================================================= */
+
+html,
+body {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    min-height: 100% !important;
+
+    background: var(--bg) !important;
+
+    font-size: 18px !important;
+}
+
+
+.gradio-container {
+    width: 100% !important;
+    max-width: none !important;
+
+    margin: 0 !important;
+
+    padding:
+        18px
+        clamp(22px, 2.3vw, 44px)
+        24px
+        clamp(22px, 2.3vw, 44px)
+        !important;
+}
+
+
+/* 尽量去掉 Gradio 默认的额外边框 */
+
+.gradio-container .block {
+    box-shadow: none;
+}
+
+
+/* =========================================================
+   HEADER
+========================================================= */
+
+.hero,
+.app-header {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    background:
+        linear-gradient(
+            135deg,
+            #ffffff,
+            #f8faff
+        );
+
+    border: 1px solid var(--line);
+
+    border-radius: 18px;
+
+    padding: 18px 24px;
+
+    margin-bottom: 16px;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    box-shadow: var(--shadow);
+}
+
+
+.header-eyebrow,
+.hero-tag {
+    color: var(--blue);
+
+    font-size: 14px;
+
+    font-weight: 750;
+
+    margin-bottom: 5px;
+}
+
+
+.header-title,
+.hero-title {
+    font-size: 32px;
+
+    line-height: 1.2;
+
+    font-weight: 800;
+
+    color: var(--text);
+}
+
+
+.header-desc,
+.hero-desc {
+    margin-top: 6px;
+
+    color: var(--muted);
+
+    font-size: 15px;
+
+    line-height: 1.5;
+}
+
+
+.online-status,
+.hero-status {
+    display: flex;
+
+    align-items: center;
+
+    gap: 7px;
+
+    font-size: 15px;
+
+    color: var(--text2);
+
+    white-space: nowrap;
+}
+
+
+.status-dot {
+    width: 9px;
+    height: 9px;
+
+    display: inline-block;
+
+    border-radius: 50%;
+
+    background: #22c55e;
+
+    margin-right: 5px;
+}
+
+
+/* =========================================================
+   COLUMN HEADINGS
+========================================================= */
+
+.column-title,
+.panel-title {
+    font-size: 21px;
+
+    line-height: 1.3;
+
+    font-weight: 800;
+
+    color: var(--text);
+
+    margin-bottom: 3px;
+}
+
+
+.column-subtitle {
+    font-size: 14px;
+
+    color: var(--muted);
+
+    margin-bottom: 9px;
+}
+
+
+/* =========================================================
+   MAIN PANELS
+========================================================= */
+
+.chat-panel,
+.state-panel,
+.history-panel {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    background: white;
+
+    border: 1px solid var(--line);
+
+    border-radius: 16px;
+
+    box-shadow: var(--shadow);
+}
+
+
+/*
+   关键：
+   不再写死 650 / 700 px。
+   根据屏幕高度自动计算。
+*/
+
+.chat-panel {
+    height: clamp(
+        440px,
+        calc(100vh - 330px),
+        650px
+    );
+
+    overflow-y: auto;
+
+    padding: 18px 20px;
+}
+
+
+.state-panel,
+.history-panel {
+    height: clamp(
+        440px,
+        calc(100vh - 270px),
+        700px
+    );
+
+    overflow-y: auto;
+
+    padding: 16px;
+}
+
+
+/* =========================================================
+   EMPTY CHAT
+========================================================= */
+
+.empty-chat {
+    min-height: 400px;
+    height: 100%;
+
+    display: flex;
+
+    flex-direction: column;
+
+    align-items: center;
+    justify-content: center;
+
+    text-align: center;
+
+    color: var(--muted);
+}
+
+
+.empty-icon {
+    width: 58px;
+    height: 58px;
+
+    border-radius: 17px;
+
+    background: var(--blue-soft);
+
+    color: var(--blue);
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    font-size: 27px;
+
+    margin-bottom: 15px;
+}
+
+
+.empty-title {
+    font-size: 22px;
+
+    font-weight: 800;
+
+    color: var(--text);
+
+    margin-bottom: 8px;
+}
+
+
+.empty-desc {
+    max-width: 520px;
+
+    line-height: 1.65;
+
+    font-size: 15px;
+}
+
+
+/* =========================================================
+   CHAT
+========================================================= */
+
+.chat-scroll {
+    display: flex;
+
+    flex-direction: column;
+
+    gap: 15px;
+}
+
+
+.message-row {
+    display: flex;
+
+    gap: 10px;
+
+    align-items: flex-start;
+}
+
+
+.user-row {
+    justify-content: flex-end;
+}
+
+
+.avatar {
+    width: 38px;
+    height: 38px;
+
+    flex-shrink: 0;
+
+    border-radius: 50%;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    font-size: 13px;
+
+    font-weight: 800;
+}
+
+
+.user-avatar {
+    background: #dbeafe;
+
+    color: #1d4ed8;
+}
+
+
+.agent-avatar {
+    background: #e9edf3;
+
+    color: #344054;
+}
+
+
+/*
+   原来 76% 太宽。
+   现在限制气泡宽度，让“框”和文字比例更正常。
+*/
+
+.message-bubble {
+    width: fit-content;
+
+    max-width: min(68%, 720px);
+
+    padding: 11px 15px;
+
+    border-radius: 16px;
+
+    font-size: 18px;
+
+    line-height: 1.65;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: anywhere;
+}
+
+
+.user-message {
+    background: var(--blue);
+
+    color: white;
+
+    border-bottom-right-radius: 5px;
+}
+
+
+.agent-message {
+    background: #f8fafc;
+
+    color: var(--text);
+
+    border: 1px solid var(--soft-line);
+
+    border-bottom-left-radius: 5px;
+}
+
+
+.message-role {
+    font-size: 13px;
+
+    font-weight: 750;
+
+    opacity: .72;
+
+    margin-bottom: 3px;
+}
+
+
+/* =========================================================
+   INPUT
+========================================================= */
+
+/*
+   输入框不要再占太多纵向空间。
+*/
+
+.chat-input textarea,
+textarea {
+    font-size: 18px !important;
+
+    line-height: 1.55 !important;
+}
+
+
+.chat-input textarea {
+    min-height: 54px !important;
+
+    max-height: 110px !important;
+
+    padding: 12px 14px !important;
+}
+
+
+.chat-input {
+    margin-top: 8px !important;
+}
+
+
+/* Button */
+
+button {
+    font-size: 15px !important;
+
+    font-weight: 700 !important;
+}
+
+
+button.primary {
+    min-height: 48px !important;
+}
+
+
+/* =========================================================
+   SESSION
+========================================================= */
+
+.session-bar,
+.session-inline {
+    display: flex;
+
+    align-items: center;
+
+    gap: 18px;
+
+    background: white;
+
+    border: 1px solid var(--line);
+
+    border-radius: 12px;
+
+    padding: 10px 14px;
+
+    margin-bottom: 10px;
+
+    font-size: 14px;
+
+    color: var(--muted);
+}
+
+
+.session-bar b,
+.session-inline b {
+    color: var(--text2);
+
+    margin-left: 4px;
+}
+
+
+/* =========================================================
+   DECISION SECTIONS
+========================================================= */
+
+.state-section {
+    border: 1px solid var(--soft-line);
+
+    border-radius: 14px;
+
+    padding: 14px 15px;
+
+    margin-bottom: 11px;
+
+    background: #fff;
+}
+
+
+.section-heading,
+.section-title {
+    font-size: 17px;
+
+    font-weight: 800;
+
+    color: var(--text);
+
+    margin-bottom: 11px;
+}
+
+
+.decision-row,
+.kv-row {
+    display: flex;
+
+    justify-content: space-between;
+
+    align-items: center;
+
+    gap: 16px;
+
+    margin: 7px 0;
+
+    font-size: 15px;
+
+    color: var(--muted);
+}
+
+
+.decision-text,
+.state-text {
+    background: #f8fafc;
+
+    padding: 10px 12px;
+
+    border-radius: 9px;
+
+    margin-top: 8px;
+
+    font-size: 15px;
+
+    line-height: 1.55;
+
+    color: var(--text2);
+}
+
+
+.sub-label,
+.state-label {
+    font-size: 13px;
+
+    color: var(--muted);
+
+    margin-top: 10px;
+
+    margin-bottom: 5px;
+
+    font-weight: 650;
+}
+
+
+/* =========================================================
+   BADGES
+========================================================= */
+
+.badge {
+    display: inline-flex;
+
+    align-items: center;
+
+    padding: 4px 9px;
+
+    border-radius: 999px;
+
+    font-size: 13px;
+
+    line-height: 1.3;
+
+    font-weight: 750;
+}
+
+
+.badge-blue {
+    background: var(--blue-soft);
+
+    color: #1d4ed8;
+}
+
+
+.badge-green {
+    background: var(--green-soft);
+
+    color: #15803d;
+}
+
+
+.badge-gray,
+.badge-default {
+    background: var(--gray-soft);
+
+    color: #475467;
+}
+
+
+/* =========================================================
+   CASE
+========================================================= */
+
+.case-item {
+    border: 1px solid var(--soft-line);
+
+    border-radius: 10px;
+
+    padding: 9px 11px;
+
+    margin-bottom: 7px;
+
+    background: #fafbfc;
+}
+
+
+.case-id {
+    color: var(--blue);
+
+    font-size: 13px;
+
+    font-weight: 750;
+}
+
+
+.case-title {
+    font-size: 14px;
+
+    line-height: 1.5;
+
+    color: var(--text2);
+
+    margin-top: 3px;
+}
+
+
+.empty-small {
+    padding: 10px 11px;
+
+    background: #f8fafc;
+
+    border-radius: 9px;
+
+    color: var(--muted);
+
+    font-size: 14px;
+}
+
+
+/* =========================================================
+   TOPIC TREE
+========================================================= */
+
+.topic-tree {
+    padding: 4px 0;
+}
+
+
+.tree-node {
+    position: relative;
+
+    padding: 6px 7px;
+
+    font-size: 14px;
+
+    line-height: 1.5;
+
+    color: var(--text2);
+}
+
+
+.tree-dot {
+    display: inline-block;
+
+    width: 7px;
+    height: 7px;
+
+    background: #94a3b8;
+
+    border-radius: 50%;
+
+    margin-right: 7px;
+}
+
+
+.tree-topic {
+    font-weight: 650;
+}
+
+
+.tree-dimension {
+    margin-left: 7px;
+
+    color: var(--blue);
+
+    font-size: 12px;
+
+    background: var(--blue-soft);
+
+    padding: 2px 6px;
+
+    border-radius: 5px;
+}
+
+
+.tree-case {
+    margin-left: 7px;
+
+    color: var(--muted);
+
+    font-size: 12px;
+}
+
+
+.tree-leaf .tree-dot {
+    background: #22c55e;
+}
+
+
+/* =========================================================
+   JSON / DETAIL
+========================================================= */
+
+.json-small,
+.json-view {
+    background: #f8fafc;
+
+    padding: 10px;
+
+    border-radius: 9px;
+
+    font-size: 13px;
+
+    line-height: 1.55;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: anywhere;
+}
+
+
+/* =========================================================
+   LATENCY
+========================================================= */
+
+.latency-total {
+    font-size: 31px;
+
+    line-height: 1.2;
+
+    font-weight: 800;
+
+    color: var(--blue);
+
+    margin-bottom: 11px;
+}
+
+
+.latency-grid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, minmax(0, 1fr));
+
+    gap: 7px;
+}
+
+
+.latency-grid > div {
+    background: #f8fafc;
+
+    border-radius: 9px;
+
+    padding: 9px 10px;
+
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+
+    font-size: 13px;
+}
+
+
+.latency-grid span {
+    color: var(--muted);
+}
+
+
+.latency-grid b {
+    color: var(--text2);
+}
+
+
+/* =========================================================
+   TRACE
+========================================================= */
+
+.history-item,
+.trace-item {
+    border: 1px solid var(--soft-line);
+
+    border-radius: 12px;
+
+    padding: 12px 13px;
+
+    margin-bottom: 9px;
+
+    background: white;
+}
+
+
+.history-head,
+.trace-head {
+    display: flex;
+
+    justify-content: space-between;
+
+    gap: 10px;
+
+    font-size: 13px;
+
+    color: var(--muted);
+}
+
+
+.history-head b,
+.trace-head b {
+    color: var(--text);
+}
+
+
+.history-user,
+.trace-user {
+    font-size: 15px;
+
+    line-height: 1.5;
+
+    color: var(--text2);
+
+    margin: 8px 0;
+}
+
+
+.history-flow,
+.trace-flow {
+    display: flex;
+
+    align-items: center;
+
+    gap: 5px;
+
+    flex-wrap: wrap;
+}
+
+
+/* =========================================================
+   EMPTY STATE
+========================================================= */
+
+.state-empty {
+    min-height: 350px;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: center;
+
+    flex-direction: column;
+
+    text-align: center;
+
+    color: var(--muted);
+}
+
+
+.state-empty-title {
+    color: var(--text);
+
+    font-size: 18px;
+
+    font-weight: 800;
+
+    margin-bottom: 7px;
+}
+
+
+.state-empty-desc {
+    font-size: 14px;
+
+    line-height: 1.6;
+}
+
+
+/* =========================================================
+   ERROR
+========================================================= */
+
+.error-card {
+    background: #fff1f3;
+
+    border: 1px solid #fecdd6;
+
+    color: #be123c;
+
+    padding: 13px;
+
+    border-radius: 11px;
+
+    font-size: 14px;
+}
+
+
+.error-title {
+    font-weight: 800;
+
+    margin-bottom: 5px;
+}
+
+
+.prefix-success {
+    background: #effdf3;
+
+    border: 1px solid #abefc6;
+
+    color: #027a48;
+
+    padding: 10px;
+
+    border-radius: 9px;
+
+    font-size: 14px;
+}
+
+
+.prefix-error {
+    background: #fff1f3;
+
+    border: 1px solid #fecdd6;
+
+    color: #be123c;
+
+    padding: 10px;
+
+    border-radius: 9px;
+
+    font-size: 14px;
+}
+
+
+/* =========================================================
+   GRADIO CLEANUP
+========================================================= */
+
+footer {
+    display: none !important;
+}
+
+
+/*
+   避免一些 Gradio container 自己制造巨大 padding
+*/
+
+.gradio-container > .main {
+    width: 100% !important;
+
+    max-width: none !important;
+}
+
+
+/* Tabs */
+
+.tabs {
+    font-size: 15px !important;
+}
+
+
+/* =========================================================
+   RESPONSIVE
+========================================================= */
+
+@media (max-width: 1100px) {
+
+    .gradio-container {
+        padding: 14px 18px 20px 18px !important;
+    }
+
+    .hero,
+    .app-header {
+        flex-direction: column;
+
+        align-items: flex-start;
+
+        gap: 10px;
+    }
+
+    .header-title,
+    .hero-title {
+        font-size: 28px;
+    }
+
+    .message-bubble {
+        max-width: 82%;
+    }
+
+}
+
+
+@media (max-width: 700px) {
+
+    .gradio-container {
+        padding: 10px !important;
+    }
+
+    .message-bubble {
+        max-width: 88%;
+
+        font-size: 17px;
+    }
+
+    .latency-grid {
+        grid-template-columns: 1fr;
+    }
+
+}
+"""
