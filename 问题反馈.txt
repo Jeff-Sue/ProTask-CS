@@ -1,402 +1,187 @@
-## Role
+def normalize_split(split_result, expected_case_ids):
+    if not isinstance(split_result, dict):
+        return None, "output is not a dict"
 
-你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
+    # ========================================================
+    # 1. Validate split
+    # ========================================================
 
-你的任务是：在已有 Topic Structure 的当前节点下，根据当前 Query 和 Cases，继续向下生成一层 Topic 划分。
+    split = split_result.get("split")
 
-你每次只生成当前节点的直接下一层结构，不生成完整 Topic Tree。
+    if not isinstance(split, bool):
+        return None, "missing or invalid split"
 
-⸻
+    # LLM 判断当前节点不应该继续划分
+    if split is False:
+        return {
+            "split": False,
+            "dimension": "",
+            "children": []
+        }, ""
 
-## Objective
+    # ========================================================
+    # 2. Validate dimension
+    # ========================================================
 
-根据 query、parent_path 和当前 cases，识别这些 Cases 在当前语义范围内最主要、最自然的下一层差异，并形成一层清晰的 Case Partition。
+    dimension = str(
+        split_result.get("dimension", "")
+    ).strip()
 
-Topic Structure 用于表示：
+    if not dimension:
+        return None, "missing dimension"
 
-不同 Cases 围绕当前 Query 存在哪些层级语义差异。
+    # ========================================================
+    # 3. Read assignments
+    # ========================================================
 
-它组织的是 Cases 之间的差异，而不是单个 Case 内部的知识结构。
+    assignments = split_result.get(
+        "assignments",
+        []
+    )
 
-一个有效的下一层结构应当能够清楚回答：
+    if not isinstance(assignments, list):
+        return None, "assignments is not a list"
 
-“当前这些 Cases 是在哪一个具体方面存在差异？”
+    if not assignments:
+        return None, "assignments is empty"
 
-⸻
+    expected_case_ids = [
+        str(case_id).strip()
+        for case_id in expected_case_ids
+    ]
 
-## Input
+    expected_set = set(expected_case_ids)
 
-输入包含以下字段：
+    assignment_map = {}
 
-### 1. query
+    # ========================================================
+    # 4. Validate every assignment
+    # ========================================================
 
-当前用户问题对应的检索 Query。
+    for item in assignments:
 
-query 是整个 Topic Structure 的全局语义 Anchor。
+        if not isinstance(item, dict):
+            return None, "assignment is not a dict"
 
-### 2. parent_path
+        case_id = str(
+            item.get("case_id", "")
+        ).strip()
 
-已有 Topic Structure 中，从上层到当前节点的完整 Topic Path。
+        topic = str(
+            item.get("topic", "")
+        ).strip()
 
-例如：
+        if not case_id:
+            return None, "assignment case_id is empty"
 
-["登录场景", "Windows 登录", "密码问题"]
+        if not topic:
+            return None, f"topic of case '{case_id}' is empty"
 
-最后一个 Topic 表示当前需要继续细化的节点。
+        # 不允许生成输入之外的 case
+        if case_id not in expected_set:
+            return None, f"unexpected case_id: {case_id}"
 
-第一层划分时，parent_path 可以为空。
+        # 不允许同一个 case 出现两次
+        if case_id in assignment_map:
+            return None, f"duplicated case_id: {case_id}"
 
-query 和 parent_path 共同限定当前层的语义范围。
+        assignment_map[case_id] = topic
 
-### 3. depth
+    # ========================================================
+    # 5. Check missing cases
+    # ========================================================
 
-当前 Topic Structure 的递归深度。
+    missing = [
+        case_id
+        for case_id in expected_case_ids
+        if case_id not in assignment_map
+    ]
 
-### 4. cases
+    if missing:
+        return None, f"missing case_ids: {missing}"
 
-当前节点下需要进一步区分的 Cases。
+    # ========================================================
+    # 6. Group cases by topic
+    # ========================================================
 
-每个 Case 包含：
+    groups = {}
 
-* case_id
-* title
-* keywords
-* content
+    # 按原始 case 顺序构建，避免 LLM 输出顺序影响结构
+    for case_id in expected_case_ids:
+        topic = assignment_map[case_id]
 
-生成 Topic 划分时综合使用 Case 中提供的信息。
+        if topic not in groups:
+            groups[topic] = []
 
-⸻
+        groups[topic].append(case_id)
 
-## Decision Space
+    # 至少需要两个 sibling topics
+    if len(groups) < 2:
+        return None, (
+            "fewer than 2 valid topic groups: "
+            f"{list(groups.keys())}"
+        )
 
-每次只判断当前节点是否存在一个合理的下一层 Case Partition。
+    # ========================================================
+    # 7. Convert assignments -> children
+    # ========================================================
 
-如果存在，则生成：
+    normalized_children = []
 
-Parent → Dimension → Sibling Topics → Case Assignments
+    for topic, case_ids in groups.items():
+        normalized_children.append({
+            "topic": topic,
+            "case_ids": case_ids
+        })
 
-其中：
+    return {
+        "split": True,
+        "dimension": dimension,
+        "children": normalized_children
+    }, ""
 
-### Dimension
 
-Dimension 表示当前 Cases 之间一个共同的、可比较的语义属性。
 
-它回答：
 
-“这些 Cases 是在哪个具体方面不同？”
 
-例如：
+if not valid_split:
+    print(
+        "[TopicStructure Warning] "
+        "failed split after retries: "
+        f"{task['case_ids']}"
+    )
 
-* 功能目标
-* 问题类型
-* 适用平台
-* 操作对象
-* 使用场景
-* 处理方式
-* 故障表现
+    fallback_to_case_leaves(
+        node,
+        task["case_ids"]
+    )
+    continue
 
-这些只是示例，不构成固定的 Dimension 集合。
 
-### Sibling Topics
+# ========================================================
+# LLM judges that this node should not be refined further
+# ========================================================
 
-Sibling Topics 是同一个 Dimension 下不同的语义取值。
+if valid_split.get("split") is False:
+    print(
+        "[TopicStructure] "
+        "no meaningful split: "
+        f"{task['case_ids']}"
+    )
 
-例如：
+    node["leaf"] = True
+    node["dimension"] = ""
+    node["children"] = []
+    node["split_status"] = "no_meaningful_split"
 
-Dimension = 操作对象
+    continue
 
-可以形成：
 
-* 消息
-* 图片
-* 文件
+# ========================================================
+# Valid split
+# ========================================================
 
-Dimension = 适用平台
-
-可以形成：
-
-* Windows
-* macOS
-* 鸿蒙
-
-所有 Sibling Topics 必须能够自然地回答同一个 Dimension 所提出的问题。
-
-### Case Assignments
-
-根据 Sibling Topics，为每个 Case 指定其唯一所属的 Topic。
-
-如果当前 Cases 之间不存在可靠、自然的下一层划分，则输出：
-
-split = false
-
-⸻
-
-## Decision Process
-
-### Step 1: Anchor
-
-首先根据 query 和 parent_path 确定当前节点的语义范围。
-
-当前划分必须：
-
-* 围绕 Query 的核心问题；
-* 是当前 Topic Path 的自然下一层细化；
-* 只处理当前 Cases 之间尚未区分的差异；
-* 不重复上层已经完成的划分。
-
-不要因为某个 Case 包含大量细节，就被与当前语义范围无关的信息带离当前 Topic。
-
-⸻
-
-### Step 2: Compare Cases
-
-逐个比较当前 Cases，识别真正存在于 Cases 之间的语义差异。
-
-重点判断：
-
-“Case A、Case B、Case C 解决的问题究竟在哪些方面不同？”
-
-而不是：
-
-“每个 Case 分别包含哪些内容？”
-
-候选差异必须能够作为多个 Cases 之间的共同比较属性。
-
-如果一个所谓的差异只是在描述某一个 Case 的内部内容，则不适合作为 Dimension。
-
-⸻
-
-### Step 3: Select the Dimension
-
-从 Case-level Differences 中选择当前层最自然的一个 Dimension。
-
-一个好的 Dimension 必须同时满足：
-
-#### 1. Query / Path Alignment
-
-Dimension 与当前 Query 和 parent_path 直接相关。
-
-它应当是当前节点继续向下时自然出现的语义差异，而不是被 Case 中次要细节带出的属性。
-
-#### 2. Natural Semantic Progression
-
-Dimension 应处于当前节点自然的下一层。
-
-整体结构应保持：
-
-粗粒度 → 中粒度 → 细粒度
-
-不要跳过明显的高层差异，直接使用过细的 Case 细节进行划分。
-
-#### 3. Semantic Specificity
-
-Dimension 必须明确指出：
-
-“Cases 是在哪一个具体语义属性上进行比较。”
-
-仅看到 Dimension 名称，就应该能够理解当前 Cases 的比较依据，而不需要依赖 Sibling Topics 才能猜测它的含义。
-
-优先使用自然、明确的语义属性名称，例如：
-
-* 功能目标
-* 适用平台
-* 问题类型
-* 操作对象
-* 使用场景
-* 处理方式
-
-避免使用语义边界模糊、需要进一步解释才能理解比较依据的名称，例如：
-
-* 功能差异
-* 相关类型
-* 使用方式
-* 设置层级
-* 场景差异
-* 其他差异
-
-除非这些名称在当前语境中本身已经具有明确、具体的含义。
-
-如果看到 Dimension 后仍然需要追问：
-
-“具体是哪个方面？”
-
-说明这个 Dimension 太模糊，应继续寻找更明确的语义属性。
-
-#### 4. Faithful Case Partition
-
-Dimension 必须来自 Cases 实际表达的差异，并能够形成可靠的 Case Groups。
-
-不能为了形成分类而：
-
-* 添加 Cases 中不存在的条件；
-* 推断未明确表达的适用范围；
-* 人为制造相反属性；
-* 强行制造不存在的差异。
-
-#### 5. Diversity
-
-只有在前面的条件都满足且多个 Dimension 同样合理时，才优先选择能够更有效地区分当前 Cases 的 Dimension。
-
-Diversity 不能优先于语义自然性和准确性。
-
-⸻
-
-### Step 4: Form Sibling Topics
-
-确定 Dimension 后，根据该 Dimension 为当前 Cases 形成 Sibling Topics。
-
-所有 Sibling Topics 必须：
-
-* 属于同一个 Dimension；
-* 处于相近的抽象层级；
-* 语义边界清楚；
-* 能够作为该 Dimension 的自然取值。
-
-可以进行一个简单检查：
-
-Dimension = X
-
-Topic A / Topic B / Topic C 是否都是在回答：
-
-“这个 Case 的 X 是什么？”
-
-如果不是，则说明 Dimension 或 Sibling Topics 不一致，需要重新选择。
-
-不要在同一层混合不同性质的分类依据。
-
-⸻
-
-### Step 5: Assign Cases
-
-按照输入 Cases 逐个进行 Assignment。
-
-每个 Case 必须且只能属于一个 Sibling Topic。
-
-不得：
-
-* 遗漏 Case；
-* 重复 Case；
-* 新增 Case；
-* 将同一个 Case 同时分配到多个 Topic。
-
-如果选定的 Dimension 会使某个 Case 自然属于多个 Sibling Topics，说明该 Dimension 不适合作为 Case Partition。
-
-此时应重新选择其他 Dimension。
-
-如果不存在更合适的 Dimension，则输出 split = false。
-
-完成当前层划分后停止，不继续向下生成结构。
-
-⸻
-
-## Core Constraints
-
-### 1. Case-level Difference
-
-Topic Structure 描述的是 Cases 之间的差异。
-
-不要把单个 Case 内部包含的：
-
-* 多个步骤
-* 多个设置项
-* 多个操作位置
-* 多个结果
-* 多个功能描述
-
-直接展开成 Sibling Topics。
-
-### 2. Single Semantic Axis
-
-每层只能使用一个 Dimension。
-
-Sibling Topics 必须全部是该 Dimension 下的并列语义取值。
-
-### 3. Complete and Exclusive Assignment
-
-每个输入 Case 必须出现且只能出现一次。
-
-### 4. Faithfulness
-
-所有 Dimension、Topic 和 Assignment 必须有当前 Cases 的实际内容支持。
-
-### 5. Stop When Necessary
-
-Topic Structure 不要求为了形成更深的树而持续划分。
-
-如果当前 Cases 已经不存在一个自然、明确、可靠的共同比较维度，应输出 split = false。
-
-一个不自然的划分比停止划分更差。
-
-### 6. Functional Boundary
-
-Topic Structure 只表示：
-
-Cases 之间有哪些层级语义差异。
-
-它不判断：
-
-* 用户属于哪个 Sibling Topic；
-* 用户需要确认什么；
-* 应该询问用户什么；
-* 哪个 Case 应该被推荐；
-* Evidence 是否充分；
-* 下一步采取什么 Policy；
-* 应该如何回复用户。
-
-这些判断由其他模块完成。
-
-### 7. One-level Boundary
-
-每次只生成当前节点的直接下一层结构。
-
-如果某个 Sibling Topic 下仍包含多个 Cases，也不要继续生成其子结构。
-
-后续递归由外部程序完成。
-
-⸻
-
-## Output Contract
-
-只输出合法 JSON，不输出任何额外内容。
-
-### 存在合理划分时
-
-{
-  "split": true,
-  "dimension": "当前层用于区分 Cases 的明确语义维度",
-  "assignments": [
-    {
-      "case_id": "KTxxxx",
-      "topic": "该 Case 所属的 Sibling Topic"
-    },
-    {
-      "case_id": "KTxxxx",
-      "topic": "该 Case 所属的 Sibling Topic"
-    }
-  ]
-}
-
-必须满足：
-
-* split = true；
-* dimension 只表示一个明确的语义属性；
-* 相同 topic 表示 Cases 属于同一个 Case Group；
-* 不同 topic 表示同一 Dimension 下不同的 Sibling Topics；
-* 最终至少形成两个不同的 Sibling Topics；
-* 每个输入 case_id 必须出现且只能出现一次；
-* 不得遗漏或新增 case_id；
-* 不输出 children；
-* 不输出嵌套结构；
-* 不生成当前层以下的 Topic Structure。
-
-### 当前不存在合理划分时
-
-{
-  "split": false,
-  "dimension": "",
-  "assignments": []
-}
-
-只有当当前 Cases 之间不存在可靠、自然且符合当前 Query / Path 的下一层 Case-level Difference 时，才输出 split = false。
-
-不要为了继续生成 Topic Structure 而强行制造差异。
+node["leaf"] = False
+node["dimension"] = valid_split["dimension"]
+node["split_status"] = "valid"
+node["children"] = []
