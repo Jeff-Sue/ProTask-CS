@@ -1,1364 +1,182 @@
-import argparse
-import json
-import re
-from collections import Counter
-from pathlib import Path
-
-
-# ============================================================
-# Config
-# ============================================================
-
-KNOWLEDGE_POLICY = {
-    "ExplainedResponse",
-    "CaseRecommendation",
-}
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-def extract_case_ids(text):
-    if not text:
-        return []
-
-    return re.findall(
-        r"KT\d+",
-        text,
-    )
-
-
-def normalize_case_ids(value):
-    if value is None:
-        return []
-
-    if isinstance(value, str):
-        value = [value]
-
-    if not isinstance(value, list):
-        return []
-
-    return list(
-        dict.fromkeys(
-            str(x).strip()
-            for x in value
-            if str(x).strip()
-        )
-    )
-
-
-def get_policy_label(policy):
-    if not isinstance(policy, dict):
-        return ""
-
-    return str(
-        policy.get("label", "")
-    ).strip()
-
-
-def get_policy_information(policy):
-    if not isinstance(policy, dict):
-        return {}
-
-    information = policy.get("information")
-
-    if isinstance(information, dict):
-        return information
-
-    return {}
-
-
-def get_pred_cases(policy):
-    if get_policy_label(policy) not in KNOWLEDGE_POLICY:
-        return []
-
-    information = get_policy_information(policy)
-
-    return normalize_case_ids(
-        information.get("case_id")
-        or information.get("case_ids")
-    )
-
-
-def get_retrieved_case_ids(turn):
-    result = []
-
-    for case in turn.get("evidence", []):
-
-        if not isinstance(case, dict):
-            continue
-
-        case_id = str(
-            case.get("case_id", "")
-        ).strip()
-
-        if case_id:
-            result.append(case_id)
-
-    return result
-
-
-def get_case_rank(
-    case_id,
-    retrieved_cases,
-):
-    try:
-        return (
-            retrieved_cases.index(case_id)
-            + 1
-        )
-
-    except ValueError:
-        return None
-
-
-def rate(values):
-    return (
-        sum(values) / len(values)
-        if values
-        else 0
-    )
-
-
-def counter_to_dict(counter):
-    return {
-        key: value
-        for key, value
-        in counter.most_common()
-    }
-
-
-# ============================================================
-# Error Record
-# ============================================================
-
-def make_turn_record(
-    dialog_id,
-    turn,
-    error_type=None,
-):
-
-    golden_cases = extract_case_ids(
-        turn.get(
-            "golden_response",
-            ""
-        )
-    )
-
-    policy = turn.get(
-        "policy",
-        {}
-    )
-
-    pred_cases = get_pred_cases(
-        policy
-    )
-
-    retrieved_cases = (
-        get_retrieved_case_ids(turn)
-    )
-
-    golden_ranks = {
-        case_id:
-            get_case_rank(
-                case_id,
-                retrieved_cases,
-            )
-        for case_id
-        in golden_cases
-    }
-
-    return {
-        "error_type":
-            error_type,
-
-        "dialog_id":
-            dialog_id,
-
-        "turn_id":
-            turn.get("turn_id"),
-
-        "user":
-            turn.get("user", ""),
-
-        "golden_response":
-            turn.get(
-                "golden_response",
-                ""
-            ),
-
-        "golden_cases":
-            golden_cases,
-
-        "predicted_cases":
-            pred_cases,
-
-        "retrieved_cases":
-            retrieved_cases,
-
-        "golden_ranks":
-            golden_ranks,
-
-        "query":
-            turn.get(
-                "query",
-                {}
-            ),
-
-        "trigger":
-            turn.get(
-                "trigger",
-                {}
-            ),
-
-        "topic_structure":
-            turn.get(
-                "topic_structure",
-                {}
-            ),
-
-        "policy":
-            policy,
-
-        "response":
-            turn.get(
-                "response",
-                {}
-            ),
-    }
-
-
-# ============================================================
-# Case Turn Evaluation
-# ============================================================
-
-def evaluate_case_turn(
-    data,
-    details=None,
-):
-
-    # --------------------------------------------------------
-    # Counts
-    # --------------------------------------------------------
-
-    total_case_turn = 0
-
-    evidence_available = 0
-
-    top5_hit = 0
-    top3_hit = 0
-    top1_hit = 0
-
-    policy_hit = 0
-    selection_hit = 0
-
-    final_correct = 0
-
-    # --------------------------------------------------------
-    # Loop
-    # --------------------------------------------------------
-
-    for dialog_id, dialog in data.items():
-
-        for turn in dialog["turns"]:
-
-            golden_cases = extract_case_ids(
-                turn.get(
-                    "golden_response",
-                    ""
-                )
-            )
-
-            # =================================================
-            # 只看 Golden 需要推荐 Case 的轮次
-            # =================================================
-
-            if not golden_cases:
-                continue
-
-            total_case_turn += 1
-
-            # 保持原逻辑：
-            # 多个 Golden Case 时以第一个为准
-            golden_case = golden_cases[0]
-
-            # -------------------------------------------------
-            # Policy
-            # -------------------------------------------------
-
-            policy = turn.get(
-                "policy",
-                {}
-            )
-
-            policy_label = (
-                get_policy_label(policy)
-            )
-
-            pred_cases = (
-                get_pred_cases(policy)
-            )
-
-            # -------------------------------------------------
-            # Evidence
-            # -------------------------------------------------
-
-            retrieved_cases = (
-                get_retrieved_case_ids(turn)
-            )
-
-            has_evidence = bool(
-                retrieved_cases
-            )
-
-            # =================================================
-            # 0. FIRST:
-            # Final correctness
-            # =================================================
-
-            is_final_correct = (
-                policy_label
-                in KNOWLEDGE_POLICY
-                and
-                golden_case
-                in pred_cases
-            )
-
-            if is_final_correct:
-
-                final_correct += 1
-
-                if details is not None:
-
-                    details[
-                        "case_turn_analysis"
-                    ][
-                        "correct"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            error_type=None,
-                        )
-                    )
-
-            # =================================================
-            # 1. Evidence Availability
-            # =================================================
-
-            if has_evidence:
-
-                evidence_available += 1
-
-            # =================================================
-            # 2. Retrieval Metrics
-            #
-            # 只有 Evidence 非空才计算 conditional recall
-            # =================================================
-
-            hit5 = False
-            hit3 = False
-            hit1 = False
-
-            if has_evidence:
-
-                hit5 = (
-                    golden_case
-                    in retrieved_cases[:5]
-                )
-
-                hit3 = (
-                    golden_case
-                    in retrieved_cases[:3]
-                )
-
-                hit1 = (
-                    golden_case
-                    in retrieved_cases[:1]
-                )
-
-                top5_hit += int(hit5)
-                top3_hit += int(hit3)
-                top1_hit += int(hit1)
-
-            # =================================================
-            # 3. Policy Metric
-            #
-            # Golden 已进入 Top-5 后：
-            # Policy 是否进入知识型动作
-            # =================================================
-
-            if hit5:
-
-                if (
-                    policy_label
-                    in KNOWLEDGE_POLICY
-                ):
-                    policy_hit += 1
-
-            # =================================================
-            # 4. Selection Metric
-            #
-            # Golden 已进入 Top-5
-            # 且 Policy 是知识型：
-            # 是否选择正确 Case
-            # =================================================
-
-            if (
-                hit5
-                and
-                policy_label
-                in KNOWLEDGE_POLICY
-            ):
-
-                if golden_case in pred_cases:
-                    selection_hit += 1
-
-            # =================================================
-            # 如果最终正确：
-            # 不再做错误归因
-            # =================================================
-
-            if is_final_correct:
-                continue
-
-            # =================================================
-            # ERROR ATTRIBUTION
-            #
-            # 最终错误后才从上到下归因
-            # =================================================
-
-            error_type = None
-
-            # -------------------------------------------------
-            # Error 1:
-            # Evidence Missing
-            # -------------------------------------------------
-
-            if not has_evidence:
-
-                error_type = (
-                    "evidence_missing"
-                )
-
-            # -------------------------------------------------
-            # Error 2:
-            # Golden 不在 Top-5
-            # -------------------------------------------------
-
-            elif not hit5:
-
-                error_type = (
-                    "retrieval_error"
-                )
-
-            # -------------------------------------------------
-            # Error 3:
-            # Evidence 正确，但 Policy 错
-            # -------------------------------------------------
-
-            elif (
-                policy_label
-                not in KNOWLEDGE_POLICY
-            ):
-
-                error_type = (
-                    "policy_error"
-                )
-
-            # -------------------------------------------------
-            # Error 4:
-            # Policy 正确，但 Case 选择错误
-            # -------------------------------------------------
-
-            elif golden_case not in pred_cases:
-
-                error_type = (
-                    "selection_error"
-                )
-
-            # -------------------------------------------------
-            # Fallback
-            # -------------------------------------------------
-
-            else:
-
-                error_type = (
-                    "unknown_error"
-                )
-
-            # =================================================
-            # Save Error
-            # =================================================
-
-            if details is not None:
-
-                record = make_turn_record(
-                    dialog_id,
-                    turn,
-                    error_type=error_type,
-                )
-
-                details[
-                    "case_turn_analysis"
-                ][
-                    "errors"
-                ][
-                    error_type
-                ].append(
-                    record
-                )
-
-                details[
-                    "case_frequency"
-                ][
-                    error_type
-                ][golden_case] += 1
-
-                # ---------------------------------------------
-                # Selection confusion
-                # ---------------------------------------------
-
-                if error_type == "selection_error":
-
-                    if pred_cases:
-
-                        for pred_case in pred_cases:
-
-                            key = (
-                                f"{golden_case}"
-                                f" -> "
-                                f"{pred_case}"
-                            )
-
-                            details[
-                                "case_confusion"
-                            ][key] += 1
-
-                    else:
-
-                        key = (
-                            f"{golden_case}"
-                            f" -> NO_CASE"
-                        )
-
-                        details[
-                            "case_confusion"
-                        ][key] += 1
-
-    # ========================================================
-    # Result
-    # ========================================================
-
-    return {
-        "案例轮数量":
-            total_case_turn,
-
-        "候选证据可用率":
-            (
-                evidence_available
-                / total_case_turn
-                if total_case_turn
-                else 0
-            ),
-
-        "Top-5有效案例召回率":
-            (
-                top5_hit
-                / evidence_available
-                if evidence_available
-                else 0
-            ),
-
-        "Top-3有效案例召回率":
-            (
-                top3_hit
-                / evidence_available
-                if evidence_available
-                else 0
-            ),
-
-        "Top-1有效案例召回率":
-            (
-                top1_hit
-                / evidence_available
-                if evidence_available
-                else 0
-            ),
-
-        "知识型策略命中率":
-            (
-                policy_hit
-                / top5_hit
-                if top5_hit
-                else 0
-            ),
-
-        "案例选择准确率":
-            (
-                selection_hit
-                / policy_hit
-                if policy_hit
-                else 0
-            ),
-
-        "最终案例推荐准确率":
-            (
-                final_correct
-                / total_case_turn
-                if total_case_turn
-                else 0
-            ),
-    }
-
-
-# ============================================================
-# Timing Evaluation
-# ============================================================
-
-def evaluate_timing(
-    data,
-    details=None,
-):
-
-    pred = []
-    gold = []
-
-    for dialog_id, dialog in data.items():
-
-        for turn in dialog["turns"]:
-
-            golden_cases = extract_case_ids(
-                turn.get(
-                    "golden_response",
-                    ""
-                )
-            )
-
-            golden_case = bool(
-                golden_cases
-            )
-
-            policy = turn.get(
-                "policy",
-                {}
-            )
-
-            policy_label = (
-                get_policy_label(policy)
-            )
-
-            predicted = (
-                policy_label
-                in KNOWLEDGE_POLICY
-            )
-
-            gold.append(
-                golden_case
-            )
-
-            pred.append(
-                predicted
-            )
-
-            # =================================================
-            # FP
-            # =================================================
-
-            if (
-                predicted
-                and
-                not golden_case
-            ):
-
-                if details is not None:
-
-                    details[
-                        "timing_errors"
-                    ][
-                        "false_positive"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            error_type=(
-                                "timing_false_positive"
-                            ),
-                        )
-                    )
-
-            # =================================================
-            # FN
-            # =================================================
-
-            if (
-                not predicted
-                and
-                golden_case
-            ):
-
-                if details is not None:
-
-                    details[
-                        "timing_errors"
-                    ][
-                        "false_negative"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            error_type=(
-                                "timing_false_negative"
-                            ),
-                        )
-                    )
-
-    # --------------------------------------------------------
-    # Metrics
-    # --------------------------------------------------------
-
-    tp = sum(
-        p and g
-        for p, g
-        in zip(pred, gold)
-    )
-
-    fp = sum(
-        p and not g
-        for p, g
-        in zip(pred, gold)
-    )
-
-    fn = sum(
-        not p and g
-        for p, g
-        in zip(pred, gold)
-    )
-
-    precision = (
-        tp / (tp + fp)
-        if tp + fp
-        else 0
-    )
-
-    recall = (
-        tp / (tp + fn)
-        if tp + fn
-        else 0
-    )
-
-    f1 = (
-        2 * precision * recall
-        / (precision + recall)
-        if precision + recall
-        else 0
-    )
-
-    return {
-        "推荐时机Precision":
-            precision,
-
-        "推荐时机Recall":
-            recall,
-
-        "推荐时机F1":
-            f1,
-
-        "过早推荐率":
-            (
-                fp / (tp + fp)
-                if tp + fp
-                else 0
-            ),
-
-        "漏推荐率":
-            (
-                fn / (tp + fn)
-                if tp + fn
-                else 0
-            ),
-    }
-
-
-# ============================================================
-# Dialogue Level
-# ============================================================
-
-def evaluate_dialogue(
-    data,
-    details=None,
-):
-
-    success = []
-
-    golden_first = []
-    pred_first = []
-
-    for dialog_id, dialog in data.items():
-
-        golden_cases = set()
-        predicted_cases = set()
-
-        g_turn = None
-        p_turn = None
-
-        for turn in dialog["turns"]:
-
-            # -------------------------------------------------
-            # Golden
-            # -------------------------------------------------
-
-            g_cases = extract_case_ids(
-                turn.get(
-                    "golden_response",
-                    ""
-                )
-            )
-
-            golden_cases.update(
-                g_cases
-            )
-
-            if (
-                g_cases
-                and
-                g_turn is None
-            ):
-                g_turn = turn.get(
-                    "turn_id"
-                )
-
-            # -------------------------------------------------
-            # Prediction
-            # -------------------------------------------------
-
-            p_cases = get_pred_cases(
-                turn.get(
-                    "policy",
-                    {}
-                )
-            )
-
-            predicted_cases.update(
-                p_cases
-            )
-
-            if (
-                p_cases
-                and
-                p_turn is None
-            ):
-                p_turn = turn.get(
-                    "turn_id"
-                )
-
-        # -----------------------------------------------------
-        # Dialogue Success
-        # -----------------------------------------------------
-
-        dialog_success = bool(
-            golden_cases
-            & predicted_cases
-        )
-
-        success.append(
-            dialog_success
-        )
-
-        if g_turn is not None:
-            golden_first.append(
-                g_turn
-            )
-
-        if p_turn is not None:
-            pred_first.append(
-                p_turn
-            )
-
-        # -----------------------------------------------------
-        # Detail
-        # -----------------------------------------------------
-
-        if details is not None:
-
-            turn_difference = None
-            timing_type = None
-
-            if (
-                g_turn is not None
-                and
-                p_turn is not None
-            ):
-
-                turn_difference = (
-                    p_turn - g_turn
-                )
-
-                if turn_difference < 0:
-                    timing_type = "early"
-
-                elif turn_difference > 0:
-                    timing_type = "late"
-
-                else:
-                    timing_type = "same_turn"
-
-            elif (
-                g_turn is not None
-                and
-                p_turn is None
-            ):
-
-                timing_type = (
-                    "never_recommend"
-                )
-
-            elif (
-                g_turn is None
-                and
-                p_turn is not None
-            ):
-
-                timing_type = (
-                    "unnecessary_recommend"
-                )
-
-            else:
-
-                timing_type = (
-                    "no_case_required"
-                )
-
-            record = {
-                "dialog_id":
-                    dialog_id,
-
-                "success":
-                    dialog_success,
-
-                "golden_cases":
-                    sorted(
-                        golden_cases
-                    ),
-
-                "predicted_cases":
-                    sorted(
-                        predicted_cases
-                    ),
-
-                "golden_first_turn":
-                    g_turn,
-
-                "predicted_first_turn":
-                    p_turn,
-
-                "turn_difference":
-                    turn_difference,
-
-                "timing_type":
-                    timing_type,
-            }
-
-            details[
-                "dialogue_analysis"
-            ][
-                "all_dialogues"
-            ].append(
-                record
-            )
-
-            if not dialog_success:
-
-                failure_record = dict(
-                    record
-                )
-
-                if (
-                    golden_cases
-                    and
-                    not predicted_cases
-                ):
-
-                    failure_type = (
-                        "never_recommend"
-                    )
-
-                elif (
-                    golden_cases
-                    and
-                    predicted_cases
-                ):
-
-                    failure_type = (
-                        "wrong_case"
-                    )
-
-                elif (
-                    not golden_cases
-                    and
-                    predicted_cases
-                ):
-
-                    failure_type = (
-                        "unnecessary_recommend"
-                    )
-
-                else:
-
-                    failure_type = (
-                        "no_case_required"
-                    )
-
-                failure_record[
-                    "failure_type"
-                ] = failure_type
-
-                details[
-                    "dialogue_analysis"
-                ][
-                    "failures"
-                ].append(
-                    failure_record
-                )
-
-    return {
-        "对话成功率":
-            rate(success),
-
-        "Golden案例首次推荐平均轮数":
-            rate(golden_first),
-
-        "Predicted案例首次推荐平均轮数":
-            rate(pred_first),
-    }
-
-
-# ============================================================
-# Detail Summary
-# ============================================================
-
-def build_detail_summary(
-    data,
-    case_result,
-    timing_result,
-    dialogue_result,
-    details,
-):
-
-    error_groups = (
-        details[
-            "case_turn_analysis"
-        ][
-            "errors"
+    "KT00002636": {
+        "case_name": "WeLink如何关闭/打开自动翻译？",
+        "text": [
+            "解决方法：",
+            "打开WeLink--》打开被反应的对话框--》点击右上角头像--》翻译--》关闭/打开翻译开关",
+            "注意：前群组和个人聊天都有自动翻译的开关，设置全局翻译暂时不支持。"
         ]
-    )
+    },
 
-    error_counts = {
-        key: len(value)
-        for key, value
-        in error_groups.items()
-    }
-
-    timing_counts = {
-        key: len(value)
-        for key, value
-        in details[
-            "timing_errors"
-        ].items()
-    }
-
-    dialogue_failures = len(
-        details[
-            "dialogue_analysis"
-        ][
-            "failures"
+    "KT00360945": {
+        "case_name": "【鸿蒙单框架】手机welink如何消息翻译",
+        "text": [
+            "鸿蒙单框架手机welink如何消息翻译？",
+            "鸿蒙单框架手机welink消息翻译需要更新welink版本至1.16.7及以上支持，在聊天界面长按消息弹出选项中选择翻译即可。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1121481283831869689"
         ]
-    )
-
-    return {
-        "dataset": {
-            "dialogues":
-                len(data),
-
-            "turns":
-                sum(
-                    len(
-                        dialog.get(
-                            "turns",
-                            []
-                        )
-                    )
-                    for dialog
-                    in data.values()
-                ),
-        },
-
-        "metrics": {
-            "case_turn":
-                case_result,
-
-            "timing":
-                timing_result,
-
-            "dialogue":
-                dialogue_result,
-        },
-
-        "case_turn_error_counts":
-            error_counts,
-
-        "timing_error_counts":
-            timing_counts,
-
-        "dialogue_failure_count":
-            dialogue_failures,
-    }
+    },
 
 
-# ============================================================
-# Finalize Details
-# ============================================================
-
-def finalize_details(details):
-
-    details["case_frequency"] = {
-        name:
-            counter_to_dict(counter)
-
-        for name, counter
-        in details[
-            "case_frequency"
-        ].items()
-    }
-
-    details["case_confusion"] = (
-        counter_to_dict(
-            details[
-                "case_confusion"
-            ]
-        )
-    )
-
-    return details
+    "KT00002907": {
+        "case_name": "WeLink怎样选择翻译语言",
+        "text": [
+            "解决方法：1.打开WeLink--》点击左上角头像--》设置--》应用设置--》翻译--》选择您需要将其他语言翻译过来的语言。比如您需要将英文反应成中文，则选择中文。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1124079892838396153",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N706635224884998306",
+            "2.打开对话框--》点击右上角的头像--》翻译， 打开翻译开关。",
+            "【图片链接】：http://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M1T1S781N706635227552465162"
+        ]
+    },
 
 
-# ============================================================
-# Print
-# ============================================================
 
-def print_result(
-    title,
-    result,
-):
+"KT00344536": {
+        "case_name": "【鸿蒙单框架】WeLink支持翻译功能吗？怎么开启翻译功能？",
+        "text": [
+            "【案例标题】：",
+            "鸿蒙单框架WeLink支持翻译功能吗？怎么开启翻译功能？",
+            "【解决方法】：",
+            "您好，现鸿蒙单框架WeLink支持翻译功能：",
+            "开启方法：打开需要翻译的对话框，点击对话框右上角的头像---进入个人聊天设置---打开翻译按钮,这样对话就可以实时翻译了。",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1086790806667186463",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1086790938588401718"
+        ]
+    },
 
-    print(
-        f"\n========== {title} =========="
-    )
-
-    for key, value in result.items():
-
-        if isinstance(value, float):
-
-            print(
-                f"{key}: {value:.4f}"
-            )
-
-        else:
-
-            print(
-                f"{key}: {value}"
-            )
+    "KT00406288": {
+        "case_name": "【鸿蒙单框架】WeLink如何使用图片翻译、文字提取功能",
+        "text": [
+            "鸿蒙单框架手机WeLink如何使用图片翻译、文字提取功能",
+            "选中图片--长按图片选择图片翻译、文字提取",
+            "【图片链接】：https://w3.huawei.com/itsckbms/services/file/edm/doDownloadEdm?edocId=M3T1S781N1198274328955920617"
+        ]
+    },
 
 
-# ============================================================
-# Main
-# ============================================================
 
-def main():
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--input",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--details_output",
-        default=None,
-    )
-
-    args = parser.parse_args()
-
-    # ========================================================
-    # Load
-    # ========================================================
-
-    data = load_json(
-        args.input
-    )
-
-    # ========================================================
-    # Detail Collector
-    # ========================================================
-
-    details = {
-        "summary": {},
-
-        "case_turn_analysis": {
-
-            "correct": [],
-
-            "errors": {
-                "evidence_missing": [],
-                "retrieval_error": [],
-                "policy_error": [],
-                "selection_error": [],
-                "unknown_error": [],
+          "error_type": "selection_error",
+          "dialog_id": "220603340",
+          "turn_id": 0,
+          "user": "WELINK 手机端可以自动翻译吗？",
+          "golden_response": "WeLink如何关闭/打开自动翻译？[案例链接: KT00002636]。\n参考打开下呢？",
+          "golden_cases": [
+            "KT00002636"
+          ],
+          "predicted_cases": [
+            "KT00344536"
+          ],
+          "retrieved_cases": [
+            "KT00002636",
+            "KT00360945",
+            "KT00344536",
+            "KT00002907",
+            "KT00406288"
+          ],
+          "golden_ranks": {
+            "KT00002636": 1
+          },
+          "query": {
+            "query_mode": "rewrite",
+            "query_text": "WELINK 手机端是否支持自动翻译",
+            "reason": "用户提出了一个新的 IT 问题，需要重新构造 Query"
+          },
+          "trigger": {
+            "trigger": true,
+            "evidence_mode": "retrieve_new_evidence",
+            "reason": "当前没有可复用案例"
+          },
+          "topic_structure": {
+            "query": "WELINK 手机端是否支持自动翻译",
+            "topic": "WELINK 手机端是否支持自动翻译",
+            "case_ids": [
+              "KT00002636",
+              "KT00360945",
+              "KT00344536",
+              "KT00002907",
+              "KT00406288"
+            ],
+            "leaf": false,
+            "children": [
+              {
+                "topic": "自动翻译开关设置",
+                "case_ids": [
+                  "KT00002636",
+                  "KT00344536",
+                  "KT00002907"
+                ],
+                "leaf": false,
+                "children": [
+                  {
+                    "topic": "群组和个人聊天的翻译开关设置",
+                    "case_ids": [
+                      "KT00002636"
+                    ],
+                    "leaf": true,
+                    "children": [],
+                    "case_id": "KT00002636"
+                  },
+                  {
+                    "topic": "鸿蒙单框架下的翻译功能开启方法",
+                    "case_ids": [
+                      "KT00344536"
+                    ],
+                    "leaf": true,
+                    "children": [],
+                    "case_id": "KT00344536"
+                  },
+                  {
+                    "topic": "翻译语言的选择设置",
+                    "case_ids": [
+                      "KT00002907"
+                    ],
+                    "leaf": true,
+                    "children": [],
+                    "case_id": "KT00002907"
+                  }
+                ],
+                "dimension": "翻译功能的设置层级",
+                "split_status": "valid"
+              },
+              {
+                "topic": "消息/图片翻译操作",
+                "case_ids": [
+                  "KT00360945",
+                  "KT00406288"
+                ],
+                "leaf": false,
+                "children": [
+                  {
+                    "topic": "消息翻译",
+                    "case_ids": [
+                      "KT00360945"
+                    ],
+                    "leaf": true,
+                    "children": [],
+                    "case_id": "KT00360945"
+                  },
+                  {
+                    "topic": "图片翻译与文字提取",
+                    "case_ids": [
+                      "KT00406288"
+                    ],
+                    "leaf": true,
+                    "children": [],
+                    "case_id": "KT00406288"
+                  }
+                ],
+                "dimension": "功能类型",
+                "split_status": "valid"
+              }
+            ],
+            "dimension": "翻译功能的使用方式",
+            "split_status": "valid"
+          },
+          "policy": {
+            "label": "CaseRecommendation",
+            "information": {
+              "case_id": "KT00344536"
             },
+            "reason": "当前用户询问WELINK手机端是否支持自动翻译，案例KT00344536明确说明鸿蒙单框架WeLink支持翻译功能并提供开启方法，与问题整体匹配。"
+          },
+          "response": "WeLink手机端目前支持翻译功能。您可以在需要翻译的对话框中，点击右上角头像进入个人聊天设置，打开翻译按钮即可开启实时翻译。具体操作可以参考案例 [KT00344536]。"
         },
-
-        "timing_errors": {
-            "false_positive": [],
-            "false_negative": [],
-        },
-
-        "dialogue_analysis": {
-            "all_dialogues": [],
-            "failures": [],
-        },
-
-        "case_frequency": {
-            "evidence_missing":
-                Counter(),
-
-            "retrieval_error":
-                Counter(),
-
-            "policy_error":
-                Counter(),
-
-            "selection_error":
-                Counter(),
-
-            "unknown_error":
-                Counter(),
-        },
-
-        "case_confusion":
-            Counter(),
-    }
-
-    # ========================================================
-    # Evaluate
-    # ========================================================
-
-    case_result = evaluate_case_turn(
-        data,
-        details,
-    )
-
-    timing_result = evaluate_timing(
-        data,
-        details,
-    )
-
-    dialogue_result = evaluate_dialogue(
-        data,
-        details,
-    )
-
-    # ========================================================
-    # Terminal Output
-    # ========================================================
-
-    print_result(
-        "案例轮指标",
-        case_result,
-    )
-
-    print_result(
-        "所有轮推荐时机",
-        timing_result,
-    )
-
-    print_result(
-        "对话级指标",
-        dialogue_result,
-    )
-
-    # ========================================================
-    # Detail Summary
-    # ========================================================
-
-    details["summary"] = (
-        build_detail_summary(
-            data,
-            case_result,
-            timing_result,
-            dialogue_result,
-            details,
-        )
-    )
-
-    details = finalize_details(
-        details
-    )
-
-    # ========================================================
-    # Output
-    # ========================================================
-
-    if args.details_output:
-
-        details_path = Path(
-            args.details_output
-        )
-
-    else:
-
-        input_path = Path(
-            args.input
-        )
-
-        details_path = (
-            input_path.parent
-            /
-            (
-                input_path.stem
-                + "_details.json"
-            )
-        )
-
-    save_json(
-        details_path,
-        details,
-    )
-
-    print(
-        "\n详细错误分析已保存到: "
-        f"{details_path}"
-    )
-
-
-if __name__ == "__main__":
-    main()
