@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
@@ -19,7 +20,11 @@ if str(ROOT_DIR) not in sys.path:
 
 
 from Agent.agentv2_3 import MemoryAgent
+
+from project.logger import save_session
+
 from project.styles import CSS
+
 from project.ui import (
     render_header,
     render_session,
@@ -27,7 +32,41 @@ from project.ui import (
     render_decision,
     render_trace,
     render_prefix_result,
+    render_feedback_hint,
+    render_feedback_result,
 )
+
+
+# ============================================================
+# Feedback
+# ============================================================
+
+FEEDBACK_REASONS = {
+    "没理解我的问题":
+        "misunderstanding",
+
+    "重复或多余询问":
+        "repeated_or_unnecessary_question",
+
+    "推荐结果不对":
+        "wrong_result",
+
+    "回复内容有问题":
+        "response_problem",
+
+    "其他":
+        "other",
+}
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def now_iso():
+    return datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
 
 
 # ============================================================
@@ -35,8 +74,13 @@ from project.ui import (
 # ============================================================
 
 def new_session():
+
     return {
-        "session_id": "web_" + uuid.uuid4().hex[:10],
+        "session_id":
+            "web_" + uuid.uuid4().hex[:10],
+
+        "created_at":
+            now_iso(),
 
         "agent": MemoryAgent(
             mode="single",
@@ -44,9 +88,26 @@ def new_session():
         ),
 
         "history": [],
+
+        # 系统真实运行产生的 turn
         "trace": [],
+
+        # 用户加载的已有历史
+        "prefix_history": [],
+
         "turns": 0,
+
         "mode": "user",
+
+        # {
+        #     turn_id: {
+        #         rating,
+        #         reason,
+        #         comment,
+        #         created_at
+        #     }
+        # }
+        "feedback": {},
     }
 
 
@@ -55,26 +116,6 @@ def new_session():
 # ============================================================
 
 def get_last_run(agent):
-    """
-    MemoryAgent.reply() 当前实际暴露的是：
-
-    agent.last_turn_state = {
-        "query": ...,
-        "trigger": ...,
-        "evidence": ...,
-        "policy": ...,
-        "response": ...,
-        "latency": ...
-    }
-
-    UI 内部统一转换成：
-        query_state
-        trigger_state
-        evidence_state
-        policy_state
-        response
-        latency
-    """
 
     turn_state = getattr(
         agent,
@@ -83,36 +124,43 @@ def get_last_run(agent):
     )
 
     if turn_state:
+
         return {
-            "query_state": turn_state.get(
-                "query",
-                {},
-            ) or {},
+            "query_state":
+                turn_state.get(
+                    "query",
+                    {},
+                ) or {},
 
-            "trigger_state": turn_state.get(
-                "trigger",
-                {},
-            ) or {},
+            "trigger_state":
+                turn_state.get(
+                    "trigger",
+                    {},
+                ) or {},
 
-            "evidence_state": turn_state.get(
-                "evidence",
-                {},
-            ) or {},
+            "evidence_state":
+                turn_state.get(
+                    "evidence",
+                    {},
+                ) or {},
 
-            "policy_state": turn_state.get(
-                "policy",
-                {},
-            ) or {},
+            "policy_state":
+                turn_state.get(
+                    "policy",
+                    {},
+                ) or {},
 
-            "response": turn_state.get(
-                "response",
-                "",
-            ),
+            "response":
+                turn_state.get(
+                    "response",
+                    "",
+                ),
 
-            "latency": turn_state.get(
-                "latency",
-                {},
-            ) or {},
+            "latency":
+                turn_state.get(
+                    "latency",
+                    {},
+                ) or {},
         }
 
     # fallback
@@ -124,21 +172,31 @@ def get_last_run(agent):
 
     return {
         "query_state": {},
+
         "trigger_state": {},
 
-        "evidence_state": memory.get(
-            "evidence_state",
-            {},
-        ) or {},
+        "evidence_state":
+            memory.get(
+                "evidence_state",
+                {},
+            ) or {},
 
-        "policy_state": (
-            memory
-            .get("interaction_state", {})
-            .get("last_policy", {})
-            or {}
-        ),
+        "policy_state":
+            (
+                memory
+                .get(
+                    "interaction_state",
+                    {},
+                )
+                .get(
+                    "last_policy",
+                    {},
+                )
+                or {}
+            ),
 
         "response": "",
+
         "latency": {},
     }
 
@@ -148,18 +206,21 @@ def get_last_run(agent):
 # ============================================================
 
 def parse_prefix(text):
+
     history = []
 
     if not text:
         return history
 
     for raw_line in text.splitlines():
+
         line = raw_line.strip()
 
         if not line:
             continue
 
         if line.startswith("用户:"):
+
             content = line.split(
                 "用户:",
                 1,
@@ -171,6 +232,7 @@ def parse_prefix(text):
             })
 
         elif line.startswith("用户："):
+
             content = line.split(
                 "用户：",
                 1,
@@ -182,6 +244,7 @@ def parse_prefix(text):
             })
 
         elif line.startswith("客服:"):
+
             content = line.split(
                 "客服:",
                 1,
@@ -193,6 +256,7 @@ def parse_prefix(text):
             })
 
         elif line.startswith("客服："):
+
             content = line.split(
                 "客服：",
                 1,
@@ -211,6 +275,7 @@ def parse_prefix(text):
 # ============================================================
 
 def session_html(state):
+
     return render_session(
         state["session_id"],
         state["turns"],
@@ -218,6 +283,7 @@ def session_html(state):
 
 
 def developer_chat_html(state):
+
     return render_chat(
         state["history"],
         user_mode=False,
@@ -225,6 +291,7 @@ def developer_chat_html(state):
 
 
 def user_chat_html(state):
+
     return render_chat(
         state["history"],
         user_mode=True,
@@ -232,8 +299,11 @@ def user_chat_html(state):
 
 
 def current_decision_html(state):
+
     if not state["trace"]:
-        return render_decision(None)
+        return render_decision(
+            None
+        )
 
     return render_decision(
         state["trace"][-1]
@@ -241,8 +311,33 @@ def current_decision_html(state):
 
 
 def trace_html(state):
+
     return render_trace(
-        state["trace"]
+        state["trace"],
+        state.get("feedback", {}),
+    )
+
+
+
+def feedback_hint_html(state):
+
+    if not state:
+        return render_feedback_hint(
+            None
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+        return render_feedback_hint(
+            None
+        )
+
+    return render_feedback_hint(
+        turn
     )
 
 
@@ -250,7 +345,10 @@ def trace_html(state):
 # Chat
 # ============================================================
 
-def chat(user_input, state):
+def chat(
+    user_input,
+    state,
+):
 
     if state is None:
         state = new_session()
@@ -260,6 +358,7 @@ def chat(user_input, state):
     ).strip()
 
     if not user_input:
+
         return (
             "",
             user_chat_html(state),
@@ -268,6 +367,9 @@ def chat(user_input, state):
             trace_html(state),
             session_html(state),
             state,
+            feedback_hint_html(state),
+            "",
+            gr.update(visible=False),
         )
 
     history = list(
@@ -280,11 +382,15 @@ def chat(user_input, state):
     })
 
     try:
-        response = state["agent"].reply(
+
+        response = state[
+            "agent"
+        ].reply(
             history
         )
 
     except Exception as exc:
+
         response = (
             "Agent 执行失败："
             f"{type(exc).__name__}: {exc}"
@@ -300,20 +406,43 @@ def chat(user_input, state):
     })
 
     state["history"] = history
+
     state["turns"] += 1
 
     snapshot = get_last_run(
         state["agent"]
     )
 
-    snapshot = dict(snapshot)
+    snapshot = dict(
+        snapshot
+    )
 
-    snapshot["turn"] = state["turns"]
-    snapshot["user"] = user_input
-    snapshot["response"] = response
+    snapshot["turn"] = (
+        state["turns"]
+    )
+
+    snapshot["user"] = (
+        user_input
+    )
+
+    snapshot["response"] = (
+        response
+    )
+
+    snapshot["created_at"] = (
+        now_iso()
+    )
 
     state["trace"].append(
         snapshot
+    )
+
+    # --------------------------------------------------------
+    # 每轮立即保存
+    # --------------------------------------------------------
+
+    save_session(
+        state
     )
 
     return (
@@ -324,6 +453,253 @@ def chat(user_input, state):
         trace_html(state),
         session_html(state),
         state,
+        feedback_hint_html(state),
+        "",
+        gr.update(visible=False),
+    )
+
+
+# ============================================================
+# Feedback
+# ============================================================
+
+def submit_positive(
+    state,
+):
+
+    if state is None:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=False
+            ),
+
+            render_trace(
+                [],
+                {},
+            ),
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=False
+            ),
+
+            trace_html(state),
+        )
+
+    state.setdefault(
+        "feedback",
+        {},
+    )
+
+    state["feedback"][turn] = {
+        "rating": "positive",
+        "reason": None,
+        "reason_text": None,
+        "comment": "",
+        "created_at": now_iso(),
+    }
+
+    # 保存到后台日志
+    save_session(
+        state
+    )
+
+    return (
+        state,
+
+        render_feedback_result(
+            True,
+            "感谢您的反馈。",
+        ),
+
+        gr.update(
+            visible=False
+        ),
+
+        # 立即刷新开发者运行轨迹
+        trace_html(state),
+    )
+
+
+
+def show_negative_feedback(
+    state,
+):
+
+    if (
+        state is None
+        or state.get("turns", 0) <= 0
+    ):
+
+        return (
+            gr.update(
+                visible=False
+            ),
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+        )
+
+    return (
+        gr.update(
+            visible=True
+        ),
+
+        "",
+    )
+
+
+def submit_negative(
+    reason_text,
+    comment,
+    state,
+):
+
+    if state is None:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            render_trace(
+                [],
+                {},
+            ),
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            trace_html(state),
+        )
+
+    reason_text = str(
+        reason_text or ""
+    ).strip()
+
+    if not reason_text:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "请选择一个不满意原因。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            trace_html(state),
+        )
+
+    reason_code = FEEDBACK_REASONS.get(
+        reason_text,
+        "other",
+    )
+
+    comment = str(
+        comment or ""
+    ).strip()
+
+    state.setdefault(
+        "feedback",
+        {},
+    )
+
+    state["feedback"][turn] = {
+        "rating": "negative",
+        "reason": reason_code,
+        "reason_text": reason_text,
+        "comment": comment,
+        "created_at": now_iso(),
+    }
+
+    # 保存到后台日志
+    save_session(
+        state
+    )
+
+    return (
+        state,
+
+        render_feedback_result(
+            True,
+            "感谢您的反馈。",
+        ),
+
+        gr.update(
+            visible=False
+        ),
+
+        None,
+
+        "",
+
+        # 立即刷新开发者运行轨迹
+        trace_html(state),
     )
 
 
@@ -344,6 +720,12 @@ def reset_chat():
         session_html(state),
         state,
         "",
+        feedback_hint_html(state),
+        gr.update(
+            visible=False
+        ),
+        None,
+        "",
     )
 
 
@@ -351,7 +733,10 @@ def reset_chat():
 # Load Prefix
 # ============================================================
 
-def load_prefix(prefix_text, state):
+def load_prefix(
+    prefix_text,
+    state,
+):
 
     if state is None:
         state = new_session()
@@ -361,12 +746,14 @@ def load_prefix(prefix_text, state):
     )
 
     if not history:
+
         return (
             developer_chat_html(state),
             current_decision_html(state),
             trace_html(state),
             session_html(state),
             state,
+
             render_prefix_result(
                 False,
                 "没有识别到有效对话。",
@@ -379,12 +766,21 @@ def load_prefix(prefix_text, state):
     )
 
     state["history"] = history
+
+    # 这里不把加载历史伪装成真实 Agent trace
     state["trace"] = []
 
-    state["turns"] = sum(
-        1
-        for item in history
-        if item.get("role") == "user"
+    state["prefix_history"] = list(
+        history
+    )
+
+    # 真实运行 turn 从 0 开始重新记录
+    state["turns"] = 0
+
+    state["feedback"] = {}
+
+    save_session(
+        state
     )
 
     return (
@@ -393,6 +789,7 @@ def load_prefix(prefix_text, state):
         trace_html(state),
         session_html(state),
         state,
+
         render_prefix_result(
             True,
             f"已加载 {len(history)} 条历史消息。",
@@ -405,31 +802,51 @@ def load_prefix(prefix_text, state):
 # ============================================================
 
 def show_user_view():
-    return (
-        gr.update(visible=True),
-        gr.update(visible=False),
 
+    return (
         gr.update(
-            elem_classes=["mode-active"]
+            visible=True
         ),
 
         gr.update(
-            elem_classes=["mode-inactive"]
+            visible=False
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-active"
+            ]
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-inactive"
+            ]
         ),
     )
 
 
 def show_developer_view():
-    return (
-        gr.update(visible=False),
-        gr.update(visible=True),
 
+    return (
         gr.update(
-            elem_classes=["mode-inactive"]
+            visible=False
         ),
 
         gr.update(
-            elem_classes=["mode-active"]
+            visible=True
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-inactive"
+            ]
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-active"
+            ]
         ),
     )
 
@@ -466,19 +883,25 @@ with gr.Blocks(
     # ========================================================
 
     with gr.Row(
-        elem_classes=["mode-switch"]
+        elem_classes=[
+            "mode-switch"
+        ]
     ):
 
         user_mode_button = gr.Button(
             "👤 用户界面",
             variant="secondary",
-            elem_classes=["mode-active"],
+            elem_classes=[
+                "mode-active"
+            ],
         )
 
         developer_mode_button = gr.Button(
             "</> 开发者界面",
             variant="secondary",
-            elem_classes=["mode-inactive"],
+            elem_classes=[
+                "mode-inactive"
+            ],
         )
 
     # ========================================================
@@ -487,12 +910,15 @@ with gr.Blocks(
 
     with gr.Column(
         visible=True,
-        elem_classes=["user-workspace"],
+        elem_classes=[
+            "user-workspace"
+        ],
     ) as user_view:
 
         gr.HTML(
             """
             <div class="workspace-heading">
+
                 <div class="column-title">
                     IT 智能客服
                 </div>
@@ -500,6 +926,7 @@ with gr.Blocks(
                 <div class="column-subtitle">
                     Huawei IT Support
                 </div>
+
             </div>
             """,
             container=False,
@@ -516,23 +943,119 @@ with gr.Blocks(
             ],
         )
 
+        # ====================================================
+        # Feedback
+        # ====================================================
+
+        with gr.Column(
+            elem_classes=[
+                "feedback-area"
+            ],
+        ):
+
+            feedback_hint = gr.HTML(
+                feedback_hint_html(
+                    initial_state
+                ),
+                container=False,
+            )
+
+            with gr.Row(
+                elem_classes=[
+                    "feedback-buttons"
+                ]
+            ):
+
+                positive_button = gr.Button(
+                    "👍 满意",
+                    size="sm",
+                    variant="secondary",
+                    elem_classes=[
+                        "feedback-button"
+                    ],
+                )
+
+                negative_button = gr.Button(
+                    "👎 不满意",
+                    size="sm",
+                    variant="secondary",
+                    elem_classes=[
+                        "feedback-button"
+                    ],
+                )
+
+            feedback_result = gr.HTML(
+                "",
+                container=False,
+            )
+
+            with gr.Column(
+                visible=False,
+                elem_classes=[
+                    "feedback-detail"
+                ],
+            ) as negative_feedback_panel:
+
+                feedback_reason = gr.Radio(
+                    choices=list(
+                        FEEDBACK_REASONS.keys()
+                    ),
+                    label="请选择不满意的原因",
+                    elem_classes=[
+                        "feedback-reason"
+                    ],
+                )
+
+                feedback_comment = gr.Textbox(
+                    label="补充说明（可选）",
+                    placeholder=(
+                        "如果方便，可以简单说明具体问题..."
+                    ),
+                    lines=2,
+                    max_lines=3,
+                    elem_classes=[
+                        "feedback-comment"
+                    ],
+                )
+
+                feedback_submit = gr.Button(
+                    "提交反馈",
+                    variant="primary",
+                    size="sm",
+                    elem_classes=[
+                        "feedback-submit"
+                    ],
+                )
+
+        # ====================================================
+        # Input
+        # ====================================================
+
         with gr.Row(
-            elem_classes=["chat-input-row"]
+            elem_classes=[
+                "chat-input-row"
+            ]
         ):
 
             user_input = gr.Textbox(
-                placeholder="请输入您的 IT 问题...",
+                placeholder=(
+                    "请输入您的 IT 问题..."
+                ),
                 show_label=False,
                 lines=2,
                 max_lines=4,
-                elem_classes=["chat-input"],
+                elem_classes=[
+                    "chat-input"
+                ],
                 scale=12,
             )
 
             user_send = gr.Button(
                 "发送",
                 variant="primary",
-                elem_classes=["send-button"],
+                elem_classes=[
+                    "send-button"
+                ],
                 scale=1,
                 min_width=110,
             )
@@ -543,7 +1066,9 @@ with gr.Blocks(
 
     with gr.Row(
         visible=False,
-        elem_classes=["developer-workspace"],
+        elem_classes=[
+            "developer-workspace"
+        ],
         equal_height=True,
     ) as developer_view:
 
@@ -554,20 +1079,21 @@ with gr.Blocks(
         with gr.Column(
             scale=52,
             min_width=0,
-            elem_classes=["chat-column"],
+            elem_classes=[
+                "chat-column"
+            ],
         ):
 
-            # -----------------------------------------------
-            # Conversation Header
-            # -----------------------------------------------
-
             with gr.Row(
-                elem_classes=["panel-heading-row"]
+                elem_classes=[
+                    "panel-heading-row"
+                ]
             ):
 
                 gr.HTML(
                     """
                     <div>
+
                         <div class="column-title">
                             Conversation
                         </div>
@@ -575,6 +1101,7 @@ with gr.Blocks(
                         <div class="column-subtitle">
                             Current dialogue
                         </div>
+
                     </div>
                     """,
                     container=False,
@@ -585,26 +1112,24 @@ with gr.Blocks(
                         initial_state
                     ),
                     container=False,
-                    elem_classes=["session-html"],
+                    elem_classes=[
+                        "session-html"
+                    ],
                 )
 
-            # -----------------------------------------------
-            # Toolbar
-            # -----------------------------------------------
-
             with gr.Row(
-                elem_classes=["chat-toolbar"]
+                elem_classes=[
+                    "chat-toolbar"
+                ]
             ):
 
                 new_chat_button = gr.Button(
                     "新建会话",
                     size="sm",
-                    elem_classes=["new-chat-button"],
+                    elem_classes=[
+                        "new-chat-button"
+                    ],
                 )
-
-            # -----------------------------------------------
-            # Conversation
-            # -----------------------------------------------
 
             developer_chat = gr.HTML(
                 developer_chat_html(
@@ -617,39 +1142,41 @@ with gr.Blocks(
                 ],
             )
 
-            # -----------------------------------------------
-            # Input
-            # -----------------------------------------------
-
             with gr.Row(
-                elem_classes=["chat-input-row"]
+                elem_classes=[
+                    "chat-input-row"
+                ]
             ):
 
                 developer_input = gr.Textbox(
-                    placeholder="请输入 IT 问题...",
+                    placeholder=(
+                        "请输入 IT 问题..."
+                    ),
                     show_label=False,
                     lines=2,
                     max_lines=4,
-                    elem_classes=["chat-input"],
+                    elem_classes=[
+                        "chat-input"
+                    ],
                     scale=12,
                 )
 
                 developer_send = gr.Button(
                     "发送",
                     variant="primary",
-                    elem_classes=["send-button"],
+                    elem_classes=[
+                        "send-button"
+                    ],
                     scale=1,
                     min_width=105,
                 )
 
-            # -----------------------------------------------
-            # History
-            # -----------------------------------------------
-
             with gr.Accordion(
                 "加载已有对话",
                 open=False,
-                elem_classes=["history-loader"],
+                elem_classes=[
+                    "history-loader"
+                ],
             ):
 
                 prefix_text = gr.Textbox(
@@ -670,7 +1197,9 @@ with gr.Blocks(
                 prefix_result = gr.HTML(
                     "",
                     container=False,
-                    elem_classes=["prefix-area"],
+                    elem_classes=[
+                        "prefix-area"
+                    ],
                 )
 
         # ====================================================
@@ -680,12 +1209,15 @@ with gr.Blocks(
         with gr.Column(
             scale=48,
             min_width=0,
-            elem_classes=["decision-column"],
+            elem_classes=[
+                "decision-column"
+            ],
         ):
 
             gr.HTML(
                 """
                 <div class="workspace-heading">
+
                     <div class="column-title">
                         Agent Decision
                     </div>
@@ -693,13 +1225,16 @@ with gr.Blocks(
                     <div class="column-subtitle">
                         Internal execution state
                     </div>
+
                 </div>
                 """,
                 container=False,
             )
 
             with gr.Tabs(
-                elem_classes=["decision-tabs"]
+                elem_classes=[
+                    "decision-tabs"
+                ]
             ):
 
                 with gr.Tab(
@@ -711,7 +1246,9 @@ with gr.Blocks(
                             initial_state
                         ),
                         container=False,
-                        elem_classes=["decision-html"],
+                        elem_classes=[
+                            "decision-html"
+                        ],
                     )
 
                 with gr.Tab(
@@ -723,7 +1260,9 @@ with gr.Blocks(
                             initial_state
                         ),
                         container=False,
-                        elem_classes=["trace-html"],
+                        elem_classes=[
+                            "trace-html"
+                        ],
                     )
 
     # ========================================================
@@ -738,6 +1277,9 @@ with gr.Blocks(
         trace_panel,
         developer_session,
         session_state,
+        feedback_hint,
+        feedback_result,
+        negative_feedback_panel,
     ]
 
     user_send.click(
@@ -759,6 +1301,10 @@ with gr.Blocks(
         outputs=chat_outputs,
     )
 
+    # --------------------------------------------------------
+    # Developer Chat
+    # --------------------------------------------------------
+
     developer_chat_outputs = [
         developer_input,
         user_chat,
@@ -767,6 +1313,9 @@ with gr.Blocks(
         trace_panel,
         developer_session,
         session_state,
+        feedback_hint,
+        feedback_result,
+        negative_feedback_panel,
     ]
 
     developer_send.click(
@@ -786,6 +1335,57 @@ with gr.Blocks(
         ],
         outputs=developer_chat_outputs,
     )
+
+    # --------------------------------------------------------
+    # Feedback
+    # --------------------------------------------------------
+
+    positive_button.click(
+        fn=submit_positive,
+        inputs=[
+            session_state
+        ],
+        outputs=[
+            session_state,
+            feedback_result,
+            negative_feedback_panel,
+            trace_panel,
+        ],
+    )
+
+
+    negative_button.click(
+        fn=show_negative_feedback,
+        inputs=[
+            session_state
+        ],
+        outputs=[
+            negative_feedback_panel,
+            feedback_result,
+        ],
+    )
+
+
+    feedback_submit.click(
+        fn=submit_negative,
+        inputs=[
+            feedback_reason,
+            feedback_comment,
+            session_state,
+        ],
+        outputs=[
+            session_state,
+            feedback_result,
+            negative_feedback_panel,
+            feedback_reason,
+            feedback_comment,
+            trace_panel,
+        ],
+    )
+
+    # --------------------------------------------------------
+    # Mode
+    # --------------------------------------------------------
 
     user_mode_button.click(
         fn=show_user_view,
@@ -807,6 +1407,10 @@ with gr.Blocks(
         ],
     )
 
+    # --------------------------------------------------------
+    # Reset
+    # --------------------------------------------------------
+
     new_chat_button.click(
         fn=reset_chat,
         outputs=[
@@ -818,8 +1422,16 @@ with gr.Blocks(
             developer_session,
             session_state,
             prefix_result,
+            feedback_hint,
+            negative_feedback_panel,
+            feedback_reason,
+            feedback_comment,
         ],
     )
+
+    # --------------------------------------------------------
+    # Prefix
+    # --------------------------------------------------------
 
     load_button.click(
         fn=load_prefix,
@@ -852,908 +1464,1471 @@ if __name__ == "__main__":
 
 
 
-import html
-import json
+
+
+from __future__ import annotations
+
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+import gradio as gr
+
+
+# ============================================================
+# Project Path
+# ============================================================
+
+PROJECT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = PROJECT_DIR.parent
+
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+
+from Agent.agentv2_3 import MemoryAgent
+
+from project.logger import save_session
+
+from project.styles import CSS
+
+from project.ui import (
+    render_header,
+    render_session,
+    render_chat,
+    render_decision,
+    render_trace,
+    render_prefix_result,
+    render_feedback_hint,
+    render_feedback_result,
+)
+
+
+# ============================================================
+# Feedback
+# ============================================================
+
+FEEDBACK_REASONS = {
+    "没理解我的问题":
+        "misunderstanding",
+
+    "重复或多余询问":
+        "repeated_or_unnecessary_question",
+
+    "推荐结果不对":
+        "wrong_result",
+
+    "回复内容有问题":
+        "response_problem",
+
+    "其他":
+        "other",
+}
 
 
 # ============================================================
 # Utils
 # ============================================================
 
-def escape(value):
-    if value is None:
-        return ""
-
-    return html.escape(
-        str(value)
+def now_iso():
+    return datetime.now().astimezone().isoformat(
+        timespec="seconds"
     )
-
-
-def json_text(value):
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    except Exception:
-        return str(value)
-
-
-def badge(text, kind="gray"):
-
-    if text is None:
-        text = ""
-
-    return (
-        f'<span class="badge badge-{kind}">'
-        f'{escape(text)}'
-        f'</span>'
-    )
-
-
-# ============================================================
-# Header
-# ============================================================
-
-def render_header():
-
-    return """
-    <div class="app-header">
-
-        <div class="header-left">
-
-            <div class="header-eyebrow">
-                Huawei IT Support · Agent Console
-            </div>
-
-            <div class="header-title">
-                IT 智能客服 Agent
-            </div>
-
-            <div class="header-desc">
-                Query · Evidence Retrieval · Topic Structure ·
-                Policy Decision · Response
-            </div>
-
-        </div>
-
-        <div class="online-status">
-            <span class="online-dot"></span>
-            Agent Online
-        </div>
-
-    </div>
-    """
 
 
 # ============================================================
 # Session
 # ============================================================
 
-def render_session(session_id, turns):
+def new_session():
 
-    return f"""
-    <div class="session-inline">
+    return {
+        "session_id":
+            "web_" + uuid.uuid4().hex[:10],
 
-        <span class="session-status">
-            <span class="running-dot"></span>
-            Running
-        </span>
+        "created_at":
+            now_iso(),
 
-        <span class="session-divider"></span>
+        "agent": MemoryAgent(
+            mode="single",
+            show_state=False,
+        ),
 
-        <span>
-            Session
-            <b>{escape(session_id)}</b>
-        </span>
+        "history": [],
 
-        <span class="session-divider"></span>
+        # 系统真实运行产生的 turn
+        "trace": [],
 
-        <span>
-            Turn
-            <b>{turns}</b>
-        </span>
+        # 用户加载的已有历史
+        "prefix_history": [],
 
-    </div>
-    """
+        "turns": 0,
+
+        "mode": "user",
+
+        # {
+        #     turn_id: {
+        #         rating,
+        #         reason,
+        #         comment,
+        #         created_at
+        #     }
+        # }
+        "feedback": {},
+    }
+
+
+# ============================================================
+# Agent Snapshot
+# ============================================================
+
+def get_last_run(agent):
+
+    turn_state = getattr(
+        agent,
+        "last_turn_state",
+        None,
+    )
+
+    if turn_state:
+
+        return {
+            "query_state":
+                turn_state.get(
+                    "query",
+                    {},
+                ) or {},
+
+            "trigger_state":
+                turn_state.get(
+                    "trigger",
+                    {},
+                ) or {},
+
+            "evidence_state":
+                turn_state.get(
+                    "evidence",
+                    {},
+                ) or {},
+
+            "policy_state":
+                turn_state.get(
+                    "policy",
+                    {},
+                ) or {},
+
+            "response":
+                turn_state.get(
+                    "response",
+                    "",
+                ),
+
+            "latency":
+                turn_state.get(
+                    "latency",
+                    {},
+                ) or {},
+        }
+
+    # fallback
+    memory = getattr(
+        agent,
+        "memory",
+        {},
+    ) or {}
+
+    return {
+        "query_state": {},
+
+        "trigger_state": {},
+
+        "evidence_state":
+            memory.get(
+                "evidence_state",
+                {},
+            ) or {},
+
+        "policy_state":
+            (
+                memory
+                .get(
+                    "interaction_state",
+                    {},
+                )
+                .get(
+                    "last_policy",
+                    {},
+                )
+                or {}
+            ),
+
+        "response": "",
+
+        "latency": {},
+    }
+
+
+# ============================================================
+# History Parser
+# ============================================================
+
+def parse_prefix(text):
+
+    history = []
+
+    if not text:
+        return history
+
+    for raw_line in text.splitlines():
+
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("用户:"):
+
+            content = line.split(
+                "用户:",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "user",
+                "content": content,
+            })
+
+        elif line.startswith("用户："):
+
+            content = line.split(
+                "用户：",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "user",
+                "content": content,
+            })
+
+        elif line.startswith("客服:"):
+
+            content = line.split(
+                "客服:",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "assistant",
+                "content": content,
+            })
+
+        elif line.startswith("客服："):
+
+            content = line.split(
+                "客服：",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "assistant",
+                "content": content,
+            })
+
+    return history
+
+
+# ============================================================
+# Render Helpers
+# ============================================================
+
+def session_html(state):
+
+    return render_session(
+        state["session_id"],
+        state["turns"],
+    )
+
+
+def developer_chat_html(state):
+
+    return render_chat(
+        state["history"],
+        user_mode=False,
+    )
+
+
+def user_chat_html(state):
+
+    return render_chat(
+        state["history"],
+        user_mode=True,
+    )
+
+
+def current_decision_html(state):
+
+    if not state["trace"]:
+        return render_decision(
+            None
+        )
+
+    return render_decision(
+        state["trace"][-1]
+    )
+
+
+def trace_html(state):
+
+    return render_trace(
+        state["trace"],
+        state.get("feedback", {}),
+    )
+
+
+
+def feedback_hint_html(state):
+
+    if not state:
+        return render_feedback_hint(
+            None
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+        return render_feedback_hint(
+            None
+        )
+
+    return render_feedback_hint(
+        turn
+    )
 
 
 # ============================================================
 # Chat
 # ============================================================
 
-def render_empty_chat(user_mode=False):
-
-    if user_mode:
-
-        title = "您好，有什么可以帮您？"
-
-        desc = (
-            "请描述您遇到的 IT 问题，"
-            "我会尽力协助您解决。"
-        )
-
-    else:
-
-        title = "开始新的 IT 支持会话"
-
-        desc = (
-            "输入用户问题后，Agent 将执行 Query、Retrieval、"
-            "Topic Analysis、Policy 和 Response。"
-        )
-
-    return f"""
-    <div class="chat-surface">
-
-        <div class="empty-chat">
-
-            <div class="empty-symbol">
-                ✦
-            </div>
-
-            <div class="empty-title">
-                {title}
-            </div>
-
-            <div class="empty-desc">
-                {desc}
-            </div>
-
-        </div>
-
-    </div>
-    """
-
-
-def render_chat(history, user_mode=False):
-
-    if not history:
-        return render_empty_chat(
-            user_mode=user_mode
-        )
-
-    rows = []
-
-    for message in history:
-
-        role = message.get(
-            "role"
-        )
-
-        content = escape(
-            message.get(
-                "content",
-                "",
-            )
-        )
-
-        if role == "user":
-
-            rows.append(
-                f"""
-                <div class="message-row user-row">
-
-                    <div class="message-wrap user-wrap">
-
-                        <div class="message-role user-role">
-                            用户
-                        </div>
-
-                        <div class="message-bubble user-message">
-                            {content}
-                        </div>
-
-                    </div>
-
-                    <div class="avatar user-avatar">
-                        U
-                    </div>
-
-                </div>
-                """
-            )
-
-        elif role == "assistant":
-
-            rows.append(
-                f"""
-                <div class="message-row agent-row">
-
-                    <div class="avatar agent-avatar">
-                        AI
-                    </div>
-
-                    <div class="message-wrap agent-wrap">
-
-                        <div class="message-role">
-                            智能客服
-                        </div>
-
-                        <div class="message-bubble agent-message">
-                            {content}
-                        </div>
-
-                    </div>
-
-                </div>
-                """
-            )
-
-    return f"""
-    <div class="chat-surface">
-
-        <div class="chat-scroll">
-            {''.join(rows)}
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Topic Tree
-# ============================================================
-
-def render_topic_tree(tree):
-
-    if not tree:
-
-        return """
-        <div class="empty-small">
-            暂无 Topic Structure
-        </div>
-        """
-
-    def walk(node, depth=0):
-
-        topic = escape(
-            node.get(
-                "topic",
-                "",
-            )
-        )
-
-        dimension = escape(
-            node.get(
-                "dimension",
-                "",
-            )
-        )
-
-        case_ids = (
-            node.get("case_ids")
-            or []
-        )
-
-        if isinstance(
-            case_ids,
-            str,
-        ):
-            case_ids = [case_ids]
-
-        case_text = ", ".join(
-            escape(x)
-            for x in case_ids
-        )
-
-        leaf = bool(
-            node.get("leaf")
-        )
-
-        node_class = (
-            "tree-node tree-leaf"
-            if leaf
-            else "tree-node"
-        )
-
-        margin = depth * 20
-
-        dimension_html = ""
-
-        if dimension:
-            dimension_html = (
-                f'<span class="tree-dimension">'
-                f'{dimension}'
-                f'</span>'
-            )
-
-        case_html = ""
-
-        if case_text:
-            case_html = (
-                f'<span class="tree-case">'
-                f'{case_text}'
-                f'</span>'
-            )
-
-        current = f"""
-        <div
-            class="{node_class}"
-            style="margin-left:{margin}px"
-        >
-
-            <span class="tree-dot"></span>
-
-            <span class="tree-topic">
-                {topic}
-            </span>
-
-            {dimension_html}
-
-            {case_html}
-
-        </div>
-        """
-
-        children = (
-            node.get("children")
-            or []
-        )
-
-        return current + "".join(
-            walk(
-                child,
-                depth + 1,
-            )
-            for child in children
-        )
-
-    return f"""
-    <div class="topic-tree">
-        {walk(tree)}
-    </div>
-    """
-
-
-# ============================================================
-# Evidence
-# ============================================================
-
-def render_cases(cases):
-
-    if not cases:
-        return """
-        <div class="empty-small">
-            当前没有 Active Cases
-        </div>
-        """
-
-    items = []
-
-    for index, case in enumerate(cases):
-        if not isinstance(case, dict):
-            continue
-        case_id = (
-            case.get("case_id")
-            or case.get("id")
-            or case.get("caseId")
-            or f"Case {index + 1}"
-        )
-
-        # ----------------------------------------------------
-        # 尝试寻找适合作为卡片摘要的字段
-        # ----------------------------------------------------
-
-        title = (
-            case.get("title")
-            or case.get("name")
-            or case.get("question")
-            or case.get("text")
-            or case.get("content")
-            or case.get("problem")
-            or ""
-        )
-
-        title = str(title).strip()
-
-        # 卡片外面只显示摘要
-        preview = title
-
-        if len(preview) > 100:
-            preview = preview[:100] + "..."
-
-        # ----------------------------------------------------
-        # 完整内容
-        # ----------------------------------------------------
-        detail_rows = []
-        for key, value in case.items():
-            if value is None:
-                continue
-            if isinstance(value, (dict, list)):
-                value_text = json_text(value)
-            else:
-                value_text = str(value)
-            if not value_text.strip():
-                continue
-            detail_rows.append(
-                f"""
-                <div class="case-detail-row">
-                    <div class="case-detail-key">
-                        {escape(key)}
-                    </div>
-                    <div class="case-detail-value">
-                        {escape(value_text)}
-                    </div>
-                </div>
-                """
-            )
-        details_html = "".join(detail_rows)
-        items.append(
-            f"""
-            <details class="case-card">
-                <summary class="case-card-summary">
-                    <div class="case-card-main">
-                        <div class="case-card-id">
-                            {escape(case_id)}
-                        </div>
-                        <div class="case-card-preview">
-                            {escape(preview) if preview else "点击查看案例详情"}
-                        </div>
-                    </div>
-                    <div class="case-card-action">
-                        <span class="case-expand-text">
-                            查看详情
-                        </span>
-                        <span class="case-chevron">
-                            ›
-                        </span>
-                    </div>
-                </summary>
-                <div class="case-detail">
-                    <div class="case-detail-header">
-                        Case Detail
-                    </div>
-                    {details_html}
-                </div>
-            </details>
-            """
-        )
-    if not items:
-        return """
-        <div class="empty-small">
-            当前没有可显示的 Active Cases
-        </div>
-        """
-    return "".join(items)
-
-
-
-# ============================================================
-# Latency
-# ============================================================
-
-def render_latency(latency):
-
-    latency = latency or {}
-
-    def ms_value(name):
-        value = latency.get(
-            name,
-            0,
-        )
-
-        try:
-            return float(value)
-        except Exception:
-            return 0.0
-
-    query_ms = ms_value("query_ms")
-    trigger_ms = ms_value("trigger_ms")
-    rag_ms = ms_value("rag_ms")
-    topic_ms = ms_value("topic_ms")
-    policy_ms = ms_value("policy_ms")
-    response_ms = ms_value("response_ms")
-    total_ms = ms_value("total_ms")
-
-    def seconds(ms):
-        return ms / 1000.0
-
-    return f"""
-    <div class="latency-total">
-        {seconds(total_ms):.2f}
-        <span>s</span>
-    </div>
-
-    <div class="latency-grid">
-
-        <div>
-            <span>Query</span>
-            <b>{seconds(query_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Trigger</span>
-            <b>{seconds(trigger_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>RAG</span>
-            <b>{seconds(rag_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Topic</span>
-            <b>{seconds(topic_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Policy</span>
-            <b>{seconds(policy_ms):.2f}s</b>
-        </div>
-
-        <div>
-            <span>Response</span>
-            <b>{seconds(response_ms):.2f}s</b>
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Decision
-# ============================================================
-
-def render_decision(snapshot):
-
-    if not snapshot:
-
-        return """
-        <div class="decision-surface">
-
-            <div class="decision-empty">
-
-                <div class="decision-empty-symbol">
-                    ◇
-                </div>
-
-                <div class="decision-empty-title">
-                    Waiting for interaction
-                </div>
-
-                <div class="decision-empty-desc">
-                    当前轮执行后，Query、Trigger、Evidence、
-                    Topic、Policy 和 Latency 将显示在这里。
-                </div>
-
-            </div>
-
-        </div>
-        """
-
-    query_state = (
-        snapshot.get("query_state")
-        or {}
-    )
-
-    trigger_state = (
-        snapshot.get("trigger_state")
-        or {}
-    )
-
-    policy_state = (
-        snapshot.get("policy_state")
-        or {}
-    )
-
-    evidence_state = (
-        snapshot.get("evidence_state")
-        or {}
-    )
-
-    active_cases = (
-        evidence_state.get(
-            "active_cases",
-            [],
-        )
-        or []
-    )
-
-    topic_structure = (
-        evidence_state.get(
-            "topic_structure",
-            {},
-        )
-        or {}
-    )
-
-    latency = (
-        snapshot.get("latency")
-        or {}
-    )
-
-    query_mode = query_state.get(
-        "query_mode",
-        "none",
-    )
-
-    query_text = query_state.get(
-        "query_text",
-        "",
-    )
-
-    trigger = trigger_state.get(
-        "trigger",
-        "",
-    )
-
-    evidence_mode = trigger_state.get(
-        "evidence_mode",
-        "",
-    )
-
-    policy = policy_state.get(
-        "label",
-        "",
-    )
-
-    information = policy_state.get(
-        "information"
-    )
-
-    return f"""
-    <div class="decision-surface">
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Query
-            </div>
-
-            <div class="decision-line">
-                {badge(query_mode, "blue")}
-            </div>
-
-            <div class="decision-text">
-                {escape(query_text) or "None"}
-            </div>
-
-        </div>
-
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Trigger
-            </div>
-
-            <div class="decision-row">
-                <span>Trigger</span>
-                {badge(trigger, "green")}
-            </div>
-
-            <div class="decision-row">
-                <span>Evidence Mode</span>
-                {badge(evidence_mode, "gray")}
-            </div>
-
-        </div>
-
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Evidence
-            </div>
-
-            <div class="case-list">
-                {render_cases(active_cases)}
-            </div>
-
-        </div>
-
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Topic Structure
-            </div>
-
-            {render_topic_tree(topic_structure)}
-
-        </div>
-
-
-        <div class="decision-section">
-
-            <div class="section-heading">
-                Policy
-            </div>
-
-            <div class="decision-line">
-                {badge(policy, "blue")}
-            </div>
-
-            <div class="sub-label">
-                Information
-            </div>
-
-            <pre class="json-view">{escape(json_text(information))}</pre>
-
-        </div>
-
-
-        <div class="decision-section latency-section">
-
-            <div class="section-heading">
-                Latency
-            </div>
-
-            {render_latency(latency)}
-
-        </div>
-
-    </div>
-    """
-
-
-# ============================================================
-# Trace
-# ============================================================
-
-def render_trace(trace):
-
-    if not trace:
-
-        return """
-        <div class="trace-surface">
-
-            <div class="decision-empty">
-
-                <div class="decision-empty-title">
-                    暂无运行轨迹
-                </div>
-
-                <div class="decision-empty-desc">
-                    每完成一轮交互，执行轨迹会显示在这里。
-                </div>
-
-            </div>
-
-        </div>
-        """
-
-    items = []
-
-    for index, item in enumerate(
-        reversed(trace),
-        start=1,
-    ):
-
-        turn = item.get(
-            "turn",
-            len(trace) - index + 1,
-        )
-
-        user = escape(
-            item.get(
-                "user",
-                "",
-            )
-        )
-
-        query = (
-            item.get("query_state")
-            or {}
-        )
-
-        trigger = (
-            item.get("trigger_state")
-            or {}
-        )
-
-        policy = (
-            item.get("policy_state")
-            or {}
-        )
-
-        latency = (
-            item.get("latency")
-            or {}
-        )
-
-        try:
-            total = (
-                float(
-                    latency.get(
-                        "total_ms",
-                        0,
-                    )
-                )
-                / 1000.0
-            )
-        except Exception:
-            total = 0.0
-
-        items.append(
-            f"""
-            <div class="trace-item">
-
-                <div class="trace-head">
-
-                    <b>
-                        Turn {turn}
-                    </b>
-
-                    <span>
-                        {total:.2f}s
-                    </span>
-
-                </div>
-
-                <div class="trace-user">
-                    {user}
-                </div>
-
-                <div class="trace-flow">
-
-                    {badge(
-                        query.get(
-                            "query_mode",
-                            "none",
-                        ),
-                        "blue"
-                    )}
-
-                    <span class="flow-arrow">
-                        →
-                    </span>
-
-                    {badge(
-                        trigger.get(
-                            "evidence_mode",
-                            "",
-                        ),
-                        "gray"
-                    )}
-
-                    <span class="flow-arrow">
-                        →
-                    </span>
-
-                    {badge(
-                        policy.get(
-                            "label",
-                            "",
-                        ),
-                        "green"
-                    )}
-
-                </div>
-
-            </div>
-            """
-        )
-
-    return f"""
-    <div class="trace-surface">
-        {''.join(items)}
-    </div>
-    """
-
-
-# ============================================================
-# Prefix
-# ============================================================
-
-def render_prefix_result(
-    success,
-    message,
+def chat(
+    user_input,
+    state,
 ):
 
-    cls = (
-        "prefix-success"
-        if success
-        else "prefix-error"
+    if state is None:
+        state = new_session()
+
+    user_input = str(
+        user_input or ""
+    ).strip()
+
+    if not user_input:
+
+        return (
+            "",
+            user_chat_html(state),
+            developer_chat_html(state),
+            current_decision_html(state),
+            trace_html(state),
+            session_html(state),
+            state,
+            feedback_hint_html(state),
+            "",
+            gr.update(visible=False),
+        )
+
+    history = list(
+        state["history"]
     )
 
-    return f"""
-    <div class="{cls}">
-        {escape(message)}
-    </div>
-    """
+    history.append({
+        "role": "user",
+        "content": user_input,
+    })
+
+    try:
+
+        response = state[
+            "agent"
+        ].reply(
+            history
+        )
+
+    except Exception as exc:
+
+        response = (
+            "Agent 执行失败："
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    response = str(
+        response or ""
+    ).strip()
+
+    history.append({
+        "role": "assistant",
+        "content": response,
+    })
+
+    state["history"] = history
+
+    state["turns"] += 1
+
+    snapshot = get_last_run(
+        state["agent"]
+    )
+
+    snapshot = dict(
+        snapshot
+    )
+
+    snapshot["turn"] = (
+        state["turns"]
+    )
+
+    snapshot["user"] = (
+        user_input
+    )
+
+    snapshot["response"] = (
+        response
+    )
+
+    snapshot["created_at"] = (
+        now_iso()
+    )
+
+    state["trace"].append(
+        snapshot
+    )
+
+    # --------------------------------------------------------
+    # 每轮立即保存
+    # --------------------------------------------------------
+
+    save_session(
+        state
+    )
+
+    return (
+        "",
+        user_chat_html(state),
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+        feedback_hint_html(state),
+        "",
+        gr.update(visible=False),
+    )
+
+
+# ============================================================
+# Feedback
+# ============================================================
+
+def submit_positive(
+    state,
+):
+
+    if state is None:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=False
+            ),
+
+            render_trace(
+                [],
+                {},
+            ),
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=False
+            ),
+
+            trace_html(state),
+        )
+
+    state.setdefault(
+        "feedback",
+        {},
+    )
+
+    state["feedback"][turn] = {
+        "rating": "positive",
+        "reason": None,
+        "reason_text": None,
+        "comment": "",
+        "created_at": now_iso(),
+    }
+
+    # 保存到后台日志
+    save_session(
+        state
+    )
+
+    return (
+        state,
+
+        render_feedback_result(
+            True,
+            "感谢您的反馈。",
+        ),
+
+        gr.update(
+            visible=False
+        ),
+
+        # 立即刷新开发者运行轨迹
+        trace_html(state),
+    )
+
+
+
+def show_negative_feedback(
+    state,
+):
+
+    if (
+        state is None
+        or state.get("turns", 0) <= 0
+    ):
+
+        return (
+            gr.update(
+                visible=False
+            ),
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+        )
+
+    return (
+        gr.update(
+            visible=True
+        ),
+
+        "",
+    )
+
+
+def submit_negative(
+    reason_text,
+    comment,
+    state,
+):
+
+    if state is None:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            render_trace(
+                [],
+                {},
+            ),
+        )
+
+    turn = state.get(
+        "turns",
+        0,
+    )
+
+    if turn <= 0:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "当前没有可反馈的回复。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            trace_html(state),
+        )
+
+    reason_text = str(
+        reason_text or ""
+    ).strip()
+
+    if not reason_text:
+
+        return (
+            state,
+
+            render_feedback_result(
+                False,
+                "请选择一个不满意原因。",
+            ),
+
+            gr.update(
+                visible=True
+            ),
+
+            reason_text,
+
+            comment,
+
+            trace_html(state),
+        )
+
+    reason_code = FEEDBACK_REASONS.get(
+        reason_text,
+        "other",
+    )
+
+    comment = str(
+        comment or ""
+    ).strip()
+
+    state.setdefault(
+        "feedback",
+        {},
+    )
+
+    state["feedback"][turn] = {
+        "rating": "negative",
+        "reason": reason_code,
+        "reason_text": reason_text,
+        "comment": comment,
+        "created_at": now_iso(),
+    }
+
+    # 保存到后台日志
+    save_session(
+        state
+    )
+
+    return (
+        state,
+
+        render_feedback_result(
+            True,
+            "感谢您的反馈。",
+        ),
+
+        gr.update(
+            visible=False
+        ),
+
+        None,
+
+        "",
+
+        # 立即刷新开发者运行轨迹
+        trace_html(state),
+    )
+
+
+# ============================================================
+# Reset
+# ============================================================
+
+def reset_chat():
+
+    state = new_session()
+
+    return (
+        "",
+        user_chat_html(state),
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+        "",
+        feedback_hint_html(state),
+        gr.update(
+            visible=False
+        ),
+        None,
+        "",
+    )
+
+
+# ============================================================
+# Load Prefix
+# ============================================================
+
+def load_prefix(
+    prefix_text,
+    state,
+):
+
+    if state is None:
+        state = new_session()
+
+    history = parse_prefix(
+        prefix_text
+    )
+
+    if not history:
+
+        return (
+            developer_chat_html(state),
+            current_decision_html(state),
+            trace_html(state),
+            session_html(state),
+            state,
+
+            render_prefix_result(
+                False,
+                "没有识别到有效对话。",
+            ),
+        )
+
+    state["agent"] = MemoryAgent(
+        mode="single",
+        show_state=False,
+    )
+
+    state["history"] = history
+
+    # 这里不把加载历史伪装成真实 Agent trace
+    state["trace"] = []
+
+    state["prefix_history"] = list(
+        history
+    )
+
+    # 真实运行 turn 从 0 开始重新记录
+    state["turns"] = 0
+
+    state["feedback"] = {}
+
+    save_session(
+        state
+    )
+
+    return (
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+
+        render_prefix_result(
+            True,
+            f"已加载 {len(history)} 条历史消息。",
+        ),
+    )
+
+
+# ============================================================
+# View Switching
+# ============================================================
+
+def show_user_view():
+
+    return (
+        gr.update(
+            visible=True
+        ),
+
+        gr.update(
+            visible=False
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-active"
+            ]
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-inactive"
+            ]
+        ),
+    )
+
+
+def show_developer_view():
+
+    return (
+        gr.update(
+            visible=False
+        ),
+
+        gr.update(
+            visible=True
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-inactive"
+            ]
+        ),
+
+        gr.update(
+            elem_classes=[
+                "mode-active"
+            ]
+        ),
+    )
+
+
+# ============================================================
+# UI
+# ============================================================
+
+initial_state = new_session()
+
+
+with gr.Blocks(
+    title="Huawei IT Support Agent",
+    css=CSS,
+    theme=gr.themes.Soft(),
+    fill_width=True,
+) as demo:
+
+    session_state = gr.State(
+        initial_state
+    )
+
+    # ========================================================
+    # Header
+    # ========================================================
+
+    gr.HTML(
+        render_header(),
+        container=False,
+    )
+
+    # ========================================================
+    # Mode Switch
+    # ========================================================
+
+    with gr.Row(
+        elem_classes=[
+            "mode-switch"
+        ]
+    ):
+
+        user_mode_button = gr.Button(
+            "👤 用户界面",
+            variant="secondary",
+            elem_classes=[
+                "mode-active"
+            ],
+        )
+
+        developer_mode_button = gr.Button(
+            "</> 开发者界面",
+            variant="secondary",
+            elem_classes=[
+                "mode-inactive"
+            ],
+        )
+
+    # ========================================================
+    # USER VIEW
+    # ========================================================
+
+    with gr.Column(
+        visible=True,
+        elem_classes=[
+            "user-workspace"
+        ],
+    ) as user_view:
+
+        gr.HTML(
+            """
+            <div class="workspace-heading">
+
+                <div class="column-title">
+                    IT 智能客服
+                </div>
+
+                <div class="column-subtitle">
+                    Huawei IT Support
+                </div>
+
+            </div>
+            """,
+            container=False,
+        )
+
+        user_chat = gr.HTML(
+            user_chat_html(
+                initial_state
+            ),
+            container=False,
+            elem_classes=[
+                "chat-html",
+                "user-chat-html",
+            ],
+        )
+
+        # ====================================================
+        # Feedback
+        # ====================================================
+
+        with gr.Column(
+            elem_classes=[
+                "feedback-area"
+            ],
+        ):
+
+            feedback_hint = gr.HTML(
+                feedback_hint_html(
+                    initial_state
+                ),
+                container=False,
+            )
+
+            with gr.Row(
+                elem_classes=[
+                    "feedback-buttons"
+                ]
+            ):
+
+                positive_button = gr.Button(
+                    "👍 满意",
+                    size="sm",
+                    variant="secondary",
+                    elem_classes=[
+                        "feedback-button"
+                    ],
+                )
+
+                negative_button = gr.Button(
+                    "👎 不满意",
+                    size="sm",
+                    variant="secondary",
+                    elem_classes=[
+                        "feedback-button"
+                    ],
+                )
+
+            feedback_result = gr.HTML(
+                "",
+                container=False,
+            )
+
+            with gr.Column(
+                visible=False,
+                elem_classes=[
+                    "feedback-detail"
+                ],
+            ) as negative_feedback_panel:
+
+                feedback_reason = gr.Radio(
+                    choices=list(
+                        FEEDBACK_REASONS.keys()
+                    ),
+                    label="请选择不满意的原因",
+                    elem_classes=[
+                        "feedback-reason"
+                    ],
+                )
+
+                feedback_comment = gr.Textbox(
+                    label="补充说明（可选）",
+                    placeholder=(
+                        "如果方便，可以简单说明具体问题..."
+                    ),
+                    lines=2,
+                    max_lines=3,
+                    elem_classes=[
+                        "feedback-comment"
+                    ],
+                )
+
+                feedback_submit = gr.Button(
+                    "提交反馈",
+                    variant="primary",
+                    size="sm",
+                    elem_classes=[
+                        "feedback-submit"
+                    ],
+                )
+
+        # ====================================================
+        # Input
+        # ====================================================
+
+        with gr.Row(
+            elem_classes=[
+                "chat-input-row"
+            ]
+        ):
+
+            user_input = gr.Textbox(
+                placeholder=(
+                    "请输入您的 IT 问题..."
+                ),
+                show_label=False,
+                lines=2,
+                max_lines=4,
+                elem_classes=[
+                    "chat-input"
+                ],
+                scale=12,
+            )
+
+            user_send = gr.Button(
+                "发送",
+                variant="primary",
+                elem_classes=[
+                    "send-button"
+                ],
+                scale=1,
+                min_width=110,
+            )
+
+    # ========================================================
+    # DEVELOPER VIEW
+    # ========================================================
+
+    with gr.Row(
+        visible=False,
+        elem_classes=[
+            "developer-workspace"
+        ],
+        equal_height=True,
+    ) as developer_view:
+
+        # ====================================================
+        # LEFT
+        # ====================================================
+
+        with gr.Column(
+            scale=52,
+            min_width=0,
+            elem_classes=[
+                "chat-column"
+            ],
+        ):
+
+            with gr.Row(
+                elem_classes=[
+                    "panel-heading-row"
+                ]
+            ):
+
+                gr.HTML(
+                    """
+                    <div>
+
+                        <div class="column-title">
+                            Conversation
+                        </div>
+
+                        <div class="column-subtitle">
+                            Current dialogue
+                        </div>
+
+                    </div>
+                    """,
+                    container=False,
+                )
+
+                developer_session = gr.HTML(
+                    session_html(
+                        initial_state
+                    ),
+                    container=False,
+                    elem_classes=[
+                        "session-html"
+                    ],
+                )
+
+            with gr.Row(
+                elem_classes=[
+                    "chat-toolbar"
+                ]
+            ):
+
+                new_chat_button = gr.Button(
+                    "新建会话",
+                    size="sm",
+                    elem_classes=[
+                        "new-chat-button"
+                    ],
+                )
+
+            developer_chat = gr.HTML(
+                developer_chat_html(
+                    initial_state
+                ),
+                container=False,
+                elem_classes=[
+                    "chat-html",
+                    "developer-chat-html",
+                ],
+            )
+
+            with gr.Row(
+                elem_classes=[
+                    "chat-input-row"
+                ]
+            ):
+
+                developer_input = gr.Textbox(
+                    placeholder=(
+                        "请输入 IT 问题..."
+                    ),
+                    show_label=False,
+                    lines=2,
+                    max_lines=4,
+                    elem_classes=[
+                        "chat-input"
+                    ],
+                    scale=12,
+                )
+
+                developer_send = gr.Button(
+                    "发送",
+                    variant="primary",
+                    elem_classes=[
+                        "send-button"
+                    ],
+                    scale=1,
+                    min_width=105,
+                )
+
+            with gr.Accordion(
+                "加载已有对话",
+                open=False,
+                elem_classes=[
+                    "history-loader"
+                ],
+            ):
+
+                prefix_text = gr.Textbox(
+                    lines=6,
+                    show_label=False,
+                    placeholder=(
+                        "用户: 我的 VPN 无法登录\n"
+                        "客服: 请问具体有什么提示？\n"
+                        "用户: 显示账号无权限"
+                    ),
+                )
+
+                load_button = gr.Button(
+                    "加载历史",
+                    size="sm",
+                )
+
+                prefix_result = gr.HTML(
+                    "",
+                    container=False,
+                    elem_classes=[
+                        "prefix-area"
+                    ],
+                )
+
+        # ====================================================
+        # RIGHT
+        # ====================================================
+
+        with gr.Column(
+            scale=48,
+            min_width=0,
+            elem_classes=[
+                "decision-column"
+            ],
+        ):
+
+            gr.HTML(
+                """
+                <div class="workspace-heading">
+
+                    <div class="column-title">
+                        Agent Decision
+                    </div>
+
+                    <div class="column-subtitle">
+                        Internal execution state
+                    </div>
+
+                </div>
+                """,
+                container=False,
+            )
+
+            with gr.Tabs(
+                elem_classes=[
+                    "decision-tabs"
+                ]
+            ):
+
+                with gr.Tab(
+                    "当前决策"
+                ):
+
+                    decision_panel = gr.HTML(
+                        current_decision_html(
+                            initial_state
+                        ),
+                        container=False,
+                        elem_classes=[
+                            "decision-html"
+                        ],
+                    )
+
+                with gr.Tab(
+                    "运行轨迹"
+                ):
+
+                    trace_panel = gr.HTML(
+                        trace_html(
+                            initial_state
+                        ),
+                        container=False,
+                        elem_classes=[
+                            "trace-html"
+                        ],
+                    )
+
+    # ========================================================
+    # Events
+    # ========================================================
+
+    chat_outputs = [
+        user_input,
+        user_chat,
+        developer_chat,
+        decision_panel,
+        trace_panel,
+        developer_session,
+        session_state,
+        feedback_hint,
+        feedback_result,
+        negative_feedback_panel,
+    ]
+
+    user_send.click(
+        fn=chat,
+        inputs=[
+            user_input,
+            session_state,
+        ],
+        outputs=chat_outputs,
+        api_name="chat",
+    )
+
+    user_input.submit(
+        fn=chat,
+        inputs=[
+            user_input,
+            session_state,
+        ],
+        outputs=chat_outputs,
+    )
+
+    # --------------------------------------------------------
+    # Developer Chat
+    # --------------------------------------------------------
+
+    developer_chat_outputs = [
+        developer_input,
+        user_chat,
+        developer_chat,
+        decision_panel,
+        trace_panel,
+        developer_session,
+        session_state,
+        feedback_hint,
+        feedback_result,
+        negative_feedback_panel,
+    ]
+
+    developer_send.click(
+        fn=chat,
+        inputs=[
+            developer_input,
+            session_state,
+        ],
+        outputs=developer_chat_outputs,
+    )
+
+    developer_input.submit(
+        fn=chat,
+        inputs=[
+            developer_input,
+            session_state,
+        ],
+        outputs=developer_chat_outputs,
+    )
+
+    # --------------------------------------------------------
+    # Feedback
+    # --------------------------------------------------------
+
+    positive_button.click(
+        fn=submit_positive,
+        inputs=[
+            session_state
+        ],
+        outputs=[
+            session_state,
+            feedback_result,
+            negative_feedback_panel,
+            trace_panel,
+        ],
+    )
+
+
+    negative_button.click(
+        fn=show_negative_feedback,
+        inputs=[
+            session_state
+        ],
+        outputs=[
+            negative_feedback_panel,
+            feedback_result,
+        ],
+    )
+
+
+    feedback_submit.click(
+        fn=submit_negative,
+        inputs=[
+            feedback_reason,
+            feedback_comment,
+            session_state,
+        ],
+        outputs=[
+            session_state,
+            feedback_result,
+            negative_feedback_panel,
+            feedback_reason,
+            feedback_comment,
+            trace_panel,
+        ],
+    )
+
+    # --------------------------------------------------------
+    # Mode
+    # --------------------------------------------------------
+
+    user_mode_button.click(
+        fn=show_user_view,
+        outputs=[
+            user_view,
+            developer_view,
+            user_mode_button,
+            developer_mode_button,
+        ],
+    )
+
+    developer_mode_button.click(
+        fn=show_developer_view,
+        outputs=[
+            user_view,
+            developer_view,
+            user_mode_button,
+            developer_mode_button,
+        ],
+    )
+
+    # --------------------------------------------------------
+    # Reset
+    # --------------------------------------------------------
+
+    new_chat_button.click(
+        fn=reset_chat,
+        outputs=[
+            developer_input,
+            user_chat,
+            developer_chat,
+            decision_panel,
+            trace_panel,
+            developer_session,
+            session_state,
+            prefix_result,
+            feedback_hint,
+            negative_feedback_panel,
+            feedback_reason,
+            feedback_comment,
+        ],
+    )
+
+    # --------------------------------------------------------
+    # Prefix
+    # --------------------------------------------------------
+
+    load_button.click(
+        fn=load_prefix,
+        inputs=[
+            prefix_text,
+            session_state,
+        ],
+        outputs=[
+            developer_chat,
+            decision_panel,
+            trace_panel,
+            developer_session,
+            session_state,
+            prefix_result,
+        ],
+    )
+
+
+# ============================================================
+# Launch
+# ============================================================
+
+if __name__ == "__main__":
+
+    demo.queue().launch(
+        server_name="0.0.0.0",
+        server_port=7866,
+        show_error=True,
+    )
 
 
 
@@ -3479,847 +4654,289 @@ button {
 
 }
 
+
+/* =========================================================
+   USER FEEDBACK
+========================================================= */
+
+.feedback-area {
+    width: 100% !important;
+
+    box-sizing: border-box;
+
+    margin-top: 8px !important;
+
+    padding: 10px 12px !important;
+
+    background: #f8fafc;
+
+    border: 1px solid var(--soft-line);
+
+    border-radius: 10px;
+}
+
+
+.feedback-hint {
+    width: 100%;
+
+    display: flex;
+
+    align-items: center;
+    justify-content: space-between;
+
+    gap: 12px;
+
+    box-sizing: border-box;
+
+    color: var(--text2);
+
+    font-size: 15px;
+
+    line-height: 1.5;
+
+    font-weight: 600;
+}
+
+
+.feedback-hint-empty {
+    color: var(--muted);
+
+    font-weight: 500;
+}
+
+
+.feedback-turn {
+    flex: 0 0 auto;
+
+    color: var(--muted);
+
+    font-size: 13px;
+
+    font-weight: 600;
+}
+
+
+.feedback-buttons {
+    width: 100% !important;
+
+    gap: 8px !important;
+
+    margin-top: 7px !important;
+}
+
+
+.feedback-button {
+    flex: 0 0 auto !important;
+}
+
+
+.feedback-button button {
+    min-height: 36px !important;
+
+    padding: 6px 14px !important;
+
+    border-radius: 9px !important;
+
+    font-size: 14px !important;
+
+    font-weight: 650 !important;
+
+    background: white !important;
+
+    border: 1px solid var(--line) !important;
+
+    color: var(--text2) !important;
+}
+
+
+.feedback-button button:hover {
+    border-color: #93c5fd !important;
+
+    background: var(--blue-soft) !important;
+}
+
+
+.feedback-detail {
+    width: 100% !important;
+
+    box-sizing: border-box;
+
+    margin-top: 9px !important;
+
+    padding-top: 9px !important;
+
+    border-top: 1px solid var(--soft-line);
+}
+
+
+.feedback-reason label {
+    font-size: 14px !important;
+
+    line-height: 1.5 !important;
+}
+
+
+.feedback-comment textarea {
+    min-height: 62px !important;
+
+    max-height: 100px !important;
+
+    padding: 10px 12px !important;
+
+    font-size: 14px !important;
+
+    line-height: 1.5 !important;
+
+    border-radius: 9px !important;
+}
+
+
+.feedback-submit button {
+    min-height: 38px !important;
+
+    padding: 6px 15px !important;
+
+    border-radius: 9px !important;
+
+    font-size: 14px !important;
+
+    font-weight: 700 !important;
+}
+
+
+.feedback-success,
+.feedback-error {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 7px;
+
+    padding: 8px 10px;
+
+    border-radius: 8px;
+
+    font-size: 14px;
+
+    line-height: 1.5;
+}
+
+
+.feedback-success {
+    color: #027a48;
+
+    background: #effdf3;
+
+    border: 1px solid #abefc6;
+}
+
+
+.feedback-error {
+    color: #be123c;
+
+    background: #fff1f3;
+
+    border: 1px solid #fecdd6;
+}
+
+/* =========================================================
+   DEVELOPER TRACE FEEDBACK
+========================================================= */
+
+.trace-feedback {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 11px;
+
+    padding-top: 9px;
+
+    border-top: 1px solid var(--soft-line);
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 9px;
+
+    color: var(--muted);
+
+    font-size: 14px;
+
+    line-height: 1.5;
+}
+
+
+.trace-feedback-main {
+    width: 100%;
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 9px;
+}
+
+
+.trace-feedback-label {
+    flex: 0 0 auto;
+
+    color: var(--muted);
+
+    font-size: 13px;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-positive {
+    color: #15803d;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-negative {
+    display: block;
+
+    color: #b42318;
+
+    font-weight: 650;
+}
+
+
+.trace-feedback-empty {
+    color: var(--muted);
+
+    font-weight: 400;
+}
+
+
+.trace-feedback-comment {
+    width: 100%;
+
+    box-sizing: border-box;
+
+    margin-top: 7px;
+
+    padding: 8px 10px;
+
+    color: var(--text2);
+
+    background: #f8fafc;
+
+    border-radius: 7px;
+
+    font-size: 13px;
+
+    line-height: 1.55;
+
+    font-weight: 400;
+
+    white-space: pre-wrap;
+
+    overflow-wrap: anywhere;
+}
+
 """
-
-
-
-
-import json
-import time
-from pathlib import Path
-
-from Agent.utils.scu_rag import batch_zefeng_rag
-from Agent.utils.qwen_api_multi import single_inference, parallel_inference
-
-
-# ============================================================
-# Utils
-# ============================================================
-
-def parse_json(text):
-    if isinstance(text, dict):
-        return text
-    if not isinstance(text, str):
-        return {}
-
-    text = text.strip()
-    if not text:
-        return {}
-
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-
-    if "```json" in text:
-        try:
-            text = text.split("```json", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
-
-    if "```" in text:
-        try:
-            text = text.split("```", 1)[1].split("```", 1)[0].strip()
-            return json.loads(text)
-        except Exception:
-            return {}
-
-    return {}
-
-
-def parse_llm_output(output):
-    parsed = parse_json(output)
-    if not parsed:
-        return {}
-    if "response" not in parsed:
-        return parsed
-    return parse_json(parsed.get("response", ""))
-
-
-def prompt_read(path):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
-
-def build_messages(system_prompt, data):
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
-    ]
-
-
-def history_to_text(history):
-    lines = []
-    for msg in history:
-        if msg.get("role") == "user":
-            lines.append(f"用户: {msg.get('content', '')}")
-        elif msg.get("role") == "assistant":
-            lines.append(f"客服: {msg.get('content', '')}")
-    return "\n".join(lines)
-
-
-def get_case_id(case):
-    if not isinstance(case, dict):
-        return ""
-    return str(case.get("case_id") or case.get("id") or case.get("caseId") or "").strip()
-
-
-def case_map_from_cases(cases):
-    return {get_case_id(case): case for case in cases or [] if get_case_id(case)}
-
-
-def get_policy_case_ids(policy_state):
-    information = policy_state.get("information")
-    if not isinstance(information, dict):
-        return []
-
-    value = information.get("case_id")
-    if value is None:
-        value = information.get("case_ids")
-
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-
-    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
-
-
-def get_selected_evidence(policy_state, active_cases):
-    if policy_state.get("label") not in {"CaseRecommendation", "ExplainedResponse"}:
-        return None
-
-    case_ids = get_policy_case_ids(policy_state)
-    if not case_ids:
-        return None
-
-    case_map = case_map_from_cases(active_cases)
-    selected = [case_map[cid] for cid in case_ids if cid in case_map]
-
-    if not selected:
-        return None
-    if len(selected) == 1:
-        return selected[0]
-    return selected
-
-
-# ============================================================
-# Memory
-# ============================================================
-
-def init_memory():
-    return {
-        "issue_state": {
-            "current_issue": "",
-            "query_history": [],
-        },
-        "evidence_state": {
-            "active_cases": [],
-            "topic_structure": {},
-        },
-        "interaction_state": {
-            "stage": "Start",
-            "last_policy": None,
-            "policy_history": [],
-        },
-        "dialogue_state": {
-            "recent_history": [],
-        },
-    }
-
-
-# ============================================================
-# Topic Structure
-# ============================================================
-
-def build_topic_split_input(query, cases, parent_path, depth):
-    return {
-        "query": query,
-        "parent_path": parent_path,
-        "depth": depth,
-        "cases": cases,
-    }
-
-
-def make_leaf(case_id, topic=None):
-    return {
-        "topic": topic or case_id,
-        "case_ids": [case_id],
-        "leaf": True,
-        "case_id": case_id,
-        "children": [],
-    }
-
-
-def normalize_split(split_result, expected_case_ids):
-    if not isinstance(split_result, dict):
-        return None, "output is not a dict"
-
-    split = split_result.get("split")
-    if not isinstance(split, bool):
-        return None, "missing or invalid split"
-
-    if not split:
-        return {
-            "split": False,
-            "dimension": "",
-            "children": [],
-        }, ""
-
-    dimension = str(split_result.get("dimension", "")).strip()
-    assignments = split_result.get("assignments", [])
-
-    if not dimension:
-        return None, "missing dimension"
-
-    if not isinstance(assignments, list):
-        return None, "assignments must be a list"
-
-    expected_set = set(expected_case_ids)
-    assignment_map = {}
-
-    for item in assignments:
-        if not isinstance(item, dict):
-            return None, "assignment is not a dict"
-
-        case_id = str(item.get("case_id", "")).strip()
-        topic = str(item.get("topic", "")).strip()
-
-        if not case_id or not topic:
-            return None, "assignment missing case_id or topic"
-
-        if case_id not in expected_set:
-            return None, f"unknown case_id: {case_id}"
-
-        if case_id in assignment_map:
-            return None, f"duplicated case_id: {case_id}"
-
-        assignment_map[case_id] = topic
-
-    missing = [
-        case_id
-        for case_id in expected_case_ids
-        if case_id not in assignment_map
-    ]
-
-    if missing:
-        return None, f"missing case_ids: {missing}"
-
-    groups = {}
-
-    for case_id in expected_case_ids:
-        topic = assignment_map[case_id]
-        groups.setdefault(topic, []).append(case_id)
-
-    if len(groups) < 2:
-        return None, "fewer than 2 valid topic groups"
-
-    children = [
-        {
-            "topic": topic,
-            "case_ids": case_ids,
-        }
-        for topic, case_ids in groups.items()
-    ]
-
-    return {
-        "split": True,
-        "dimension": dimension,
-        "children": children,
-    }, ""
-
-
-def stop_topic_refinement(node, split_status):
-    node["leaf"] = True
-    node["dimension"] = ""
-    node["children"] = []
-    node["split_status"] = split_status
-
-
-def normalize_case_ids(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
-
-
-def format_topic_tree(tree):
-    if not tree:
-        return "None"
-
-    lines = []
-
-    def node_text(node):
-        topic = str(node.get("topic", "")).strip()
-        dimension = str(node.get("dimension", "")).strip()
-        case_ids = normalize_case_ids(node.get("case_ids"))
-
-        if node.get("leaf"):
-            if case_ids:
-                ids = ", ".join(case_ids)
-                return f"{topic}  [{ids}]" if topic and topic not in case_ids else f"[{ids}]"
-            return topic or "Unknown"
-
-        if dimension:
-            return f"{topic}  <{dimension}>"
-
-        return topic or "Unknown"
-
-    def walk(node, prefix="", is_last=True, root=False):
-        if root:
-            lines.append(node_text(node))
-        else:
-            lines.append(prefix + ("└─ " if is_last else "├─ ") + node_text(node))
-
-        children = node.get("children", [])
-        if not children:
-            return
-
-        child_prefix = prefix if root else prefix + ("   " if is_last else "│  ")
-
-        for i, child in enumerate(children):
-            walk(child, child_prefix, i == len(children) - 1, False)
-
-    walk(tree, root=True)
-    return "\n".join(lines)
-
-
-# ============================================================
-# Memory Agent
-# ============================================================
-
-class MemoryAgent:
-    """
-    Stateful customer-service agent.
-
-    One instance corresponds to one dialogue.
-    Call reset() before starting a new dialogue if reusing it.
-    """
-
-    def __init__(
-        self,
-        prompt_dir="Agent/promptsv2_3",
-        mode="single",
-        max_topic_depth=8,
-        show_state=True,
-    ):
-        prompt_dir = Path(prompt_dir)
-
-        self.query_prompt = prompt_read(prompt_dir / "query.prompt")
-        self.trigger_prompt = prompt_read(prompt_dir / "trigger.prompt")
-        self.topic_prompt = prompt_read(prompt_dir / "topic.prompt")
-        self.policy_prompt = prompt_read(prompt_dir / "policy.prompt")
-        self.response_prompt = prompt_read(prompt_dir / "response.prompt")
-
-        if mode not in {"single", "parallel"}:
-            raise ValueError(f"Unsupported mode: {mode}")
-
-        self.mode = mode
-        self.max_topic_depth = max_topic_depth
-        self.show_state = show_state
-
-        self.memory = init_memory()
-
-        # 对外暴露当前轮状态，供 Project / Web UI 使用。
-        # 不参与 Agent 内部决策。
-        self.last_turn_state = {}
-
-    # ========================================================
-    # LLM
-    # ========================================================
-
-    def call_llm(self, prompt, data):
-        messages = build_messages(prompt, data)
-
-        if self.mode == "single":
-            output = single_inference(messages)
-        else:
-            output = parallel_inference([messages])[0]
-
-        parsed = parse_llm_output(output)
-
-        return parsed
-
-    def call_llm_batch(self, messages):
-        if not messages:
-            return []
-
-        if self.mode == "single":
-            outputs = [single_inference(message) for message in messages]
-        else:
-            outputs = parallel_inference(messages)
-
-        return [parse_llm_output(output) for output in outputs]
-
-    # ========================================================
-    # Memory Update
-    # ========================================================
-
-    def update_issue(self, query_state):
-        mode = str(query_state.get("query_mode", "none")).strip()
-        query = str(query_state.get("query_text", "")).strip()
-
-        if mode in {"rewrite", "refine"} and query:
-            self.memory["issue_state"]["current_issue"] = query
-            self.memory["issue_state"]["query_history"].append(query)
-
-    def update_evidence(self, trigger_state, evidence, topic_structure=None):
-        if trigger_state.get("evidence_mode") != "retrieve_new_evidence":
-            return
-
-        self.memory["evidence_state"]["active_cases"] = evidence
-        self.memory["evidence_state"]["topic_structure"] = topic_structure or {}
-
-    def update_interaction(self, policy_state):
-        label = str(policy_state.get("label", "")).strip()
-        information = policy_state.get("information")
-
-        policy = {
-            "label": label,
-            "information": information,
-        }
-
-        interaction = self.memory["interaction_state"]
-        interaction["last_policy"] = policy
-        interaction["policy_history"].append(policy)
-
-        if label in {"AskMissingSlot", "AskClarification"}:
-            interaction["stage"] = "Clarification"
-        elif label in {"ExplainedResponse", "CaseRecommendation"}:
-            interaction["stage"] = "Resolution"
-        elif label == "Handoff":
-            interaction["stage"] = "End"
-
-    def update_dialogue(self, user, response):
-        history = self.memory["dialogue_state"]["recent_history"]
-
-        history.append({
-            "user": user,
-            "assistant": response,
-        })
-
-        self.memory["dialogue_state"]["recent_history"] = history[-5:]
-
-    # ========================================================
-    # Topic Structure Generation
-    # ========================================================
-
-    def generate_topic_structure(self, query, cases):
-        case_map = case_map_from_cases(cases)
-        case_ids = list(case_map)
-
-        root = {
-            "query": query,
-            "topic": query,
-            "case_ids": case_ids,
-            "leaf": len(case_ids) <= 1,
-            "children": [],
-        }
-
-        if not case_ids:
-            return root
-
-        if len(case_ids) == 1:
-            root["case_id"] = case_ids[0]
-            root["split_status"] = "single_case"
-            return root
-
-        frontier = [{
-            "node": root,
-            "case_ids": case_ids,
-            "depth": 0,
-            "parent_path": [],
-        }]
-
-        round_id = 0
-
-        while frontier:
-            print(f"[TopicStructure] Round {round_id}: {len(frontier)} nodes")
-
-            active_frontier = []
-
-            for task in frontier:
-                if task["depth"] >= self.max_topic_depth:
-                    print(f"[TopicStructure Warning] max_depth reached: {task['case_ids']}")
-                    stop_topic_refinement(task["node"], "max_depth")
-                else:
-                    active_frontier.append(task)
-
-            if not active_frontier:
-                break
-
-            messages = []
-
-            for task in active_frontier:
-                node_cases = [case_map[case_id] for case_id in task["case_ids"]]
-
-                split_input = build_topic_split_input(
-                    query=query,
-                    cases=node_cases,
-                    parent_path=task["parent_path"],
-                    depth=task["depth"],
-                )
-
-                messages.append(build_messages(self.topic_prompt, split_input))
-
-            outputs = self.call_llm_batch(messages)
-
-            valid_results = {}
-
-            for idx, (task, output) in enumerate(zip(active_frontier, outputs)):
-                valid_split, error = normalize_split(output, task["case_ids"])
-
-                if valid_split:
-                    valid_results[idx] = valid_split
-                else:
-                    print(f"[TopicStructure Invalid] {error}")
-                    print("output:", output, flush=True)
-
-            next_frontier = []
-
-            for idx, task in enumerate(active_frontier):
-                node = task["node"]
-                valid_split = valid_results.get(idx)
-
-                if not valid_split:
-                    print(
-                        "[TopicStructure Warning] "
-                        f"invalid output, stop refinement: {task['case_ids']}"
-                    )
-                    stop_topic_refinement(node, "invalid_output")
-                    continue
-
-                if valid_split["split"] is False:
-                    print(
-                        "[TopicStructure] "
-                        f"no meaningful split: {task['case_ids']}"
-                    )
-                    stop_topic_refinement(node, "no_meaningful_split")
-                    continue
-
-                node["leaf"] = False
-                node["dimension"] = valid_split["dimension"]
-                node["children"] = []
-                node["split_status"] = "valid"
-
-                for child_info in valid_split["children"]:
-                    child_case_ids = child_info["case_ids"]
-                    child_topic = child_info["topic"]
-
-                    child_node = {
-                        "topic": child_topic,
-                        "case_ids": child_case_ids,
-                        "leaf": len(child_case_ids) == 1,
-                        "children": [],
-                    }
-
-                    node["children"].append(child_node)
-
-                    if len(child_case_ids) == 1:
-                        child_node["case_id"] = child_case_ids[0]
-                        child_node["split_status"] = "single_case"
-                        continue
-
-                    next_frontier.append({
-                        "node": child_node,
-                        "case_ids": child_case_ids,
-                        "depth": task["depth"] + 1,
-                        "parent_path": task["parent_path"] + [child_topic],
-                    })
-
-            frontier = next_frontier
-            round_id += 1
-
-        return root
-
-    # ========================================================
-    # State Display
-    # ========================================================
-
-    def print_state(self, query_state, trigger_state, policy_state):
-        if not self.show_state:
-            return
-
-        query_mode = query_state.get("query_mode", "")
-        query_text = query_state.get("query_text", "")
-        trigger = trigger_state.get("trigger", "")
-        evidence_mode = trigger_state.get("evidence_mode", "")
-
-        active_cases = self.memory["evidence_state"]["active_cases"]
-        case_ids = [get_case_id(case) for case in active_cases if get_case_id(case)]
-
-        policy = policy_state.get("label", "")
-        information = policy_state.get("information")
-        topic_tree = format_topic_tree(self.memory["evidence_state"]["topic_structure"])
-
-        print("\n╔══════════════ AGENT STATE ══════════════╗")
-        print(f" Query    : {query_mode} | {query_text}")
-        print(f" Trigger  : {trigger}")
-        print(f" Evidence : {evidence_mode}")
-        print(f" Cases    : {', '.join(case_ids) if case_ids else 'None'}")
-
-        print("\n Topic Tree")
-        for line in topic_tree.splitlines():
-            print(f" {line}")
-
-        print(f"\n Policy   : {policy}")
-        print(f" Info     : {information if information is not None else 'None'}")
-        print("╚══════════════════════════════════════════╝")
-
-    # ========================================================
-    # Reply
-    # ========================================================
-
-    def reply(self, dialogue_history):
-        """
-        dialogue_history:
-        [
-            {"role": "user", "content": "..."},
-            {"role": "assistant", "content": "..."},
-            ...
-            {"role": "user", "content": "..."},
-        ]
-
-        Returns:
-            str: customer-service response
-        """
-
-        if not dialogue_history:
-            raise ValueError("dialogue_history is empty")
-
-        last_msg = dialogue_history[-1]
-
-        if last_msg.get("role") != "user":
-            raise ValueError("The last message in dialogue_history must be from user.")
-
-        user = str(last_msg.get("content", "")).strip()
-
-        if not user:
-            raise ValueError("Current user message is empty")
-
-        # 每轮开始时重置对外状态。
-        self.last_turn_state = {}
-
-        latency = {
-            "query_ms": 0,
-            "trigger_ms": 0,
-            "rag_ms": 0,
-            "topic_ms": 0,
-            "policy_ms": 0,
-            "response_ms": 0,
-            "total_ms": 0,
-        }
-
-        total_start = time.perf_counter()
-
-        # ----------------------------------------------------
-        # 1. Query
-        # ----------------------------------------------------
-
-        start = time.perf_counter()
-
-        query_state = self.call_llm(
-            self.query_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "dialogue_state": self.memory["dialogue_state"],
-                "current": {"u": user},
-            },
-        )
-
-        latency["query_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
-
-        self.update_issue(query_state)
-
-        # ----------------------------------------------------
-        # 2. Trigger
-        # ----------------------------------------------------
-
-        start = time.perf_counter()
-
-        trigger_state = self.call_llm(
-            self.trigger_prompt,
-            {
-                "query": {
-                    "query_mode": query_state.get("query_mode", "none"),
-                    "query_text": query_state.get("query_text", ""),
-                },
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-            },
-        )
-
-        latency["trigger_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
-
-        # ----------------------------------------------------
-        # 3. RAG + Topic
-        # ----------------------------------------------------
-
-        evidence_mode = trigger_state.get("evidence_mode", "")
-
-        if evidence_mode == "retrieve_new_evidence":
-            query = str(query_state.get("query_text", "")).strip()
-
-            if not query:
-                query = self.memory["issue_state"]["current_issue"].strip()
-
-            if not query:
-                raise ValueError("RAG query is empty")
-
-            # ---------------- RAG ----------------
-
-            start = time.perf_counter()
-
-            evidence = batch_zefeng_rag(
-                [history_to_text(dialogue_history)],
-                [query],
-            )[0]
-
-            latency["rag_ms"] = round(
-                (time.perf_counter() - start) * 1000
-            )
-
-            # ---------------- Topic ----------------
-
-            start = time.perf_counter()
-
-            topic_structure = self.generate_topic_structure(
-                query=query,
-                cases=evidence,
-            )
-
-            latency["topic_ms"] = round(
-                (time.perf_counter() - start) * 1000
-            )
-
-        else:
-            evidence = self.memory["evidence_state"]["active_cases"]
-            topic_structure = self.memory["evidence_state"]["topic_structure"]
-
-        self.update_evidence(trigger_state, evidence, topic_structure)
-
-        # ----------------------------------------------------
-        # 4. Policy
-        # ----------------------------------------------------
-
-        if evidence_mode == "no_evidence_needed":
-            policy_evidence = {
-                "active_cases": [],
-                "topic_structure": {},
-            }
-        else:
-            policy_evidence = {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-                "topic_structure": self.memory["evidence_state"]["topic_structure"],
-            }
-
-        start = time.perf_counter()
-
-        policy_state = self.call_llm(
-            self.policy_prompt,
-            {
-                "issue_state": self.memory["issue_state"],
-                "evidence_state": policy_evidence,
-                "interaction_state": self.memory["interaction_state"],
-                "dialogue_state": self.memory["dialogue_state"],
-                "current": {"u": user},
-            },
-        )
-
-        latency["policy_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
-
-        self.update_interaction(policy_state)
-
-        # ----------------------------------------------------
-        # 5. Response
-        # ----------------------------------------------------
-
-        selected_evidence = get_selected_evidence(
-            policy_state,
-            self.memory["evidence_state"]["active_cases"],
-        )
-
-        response_dialogue = {
-            "recent_history": self.memory["dialogue_state"]["recent_history"],
-            "current": {"u": user},
-        }
-
-        response_policy = {
-            "label": policy_state.get("label", ""),
-            "information": policy_state.get("information"),
-        }
-
-        start = time.perf_counter()
-
-        response_state = self.call_llm(
-            self.response_prompt,
-            {
-                "dialogue_state": response_dialogue,
-                "policy": response_policy,
-                "evidence": selected_evidence,
-            },
-        )
-
-        latency["response_ms"] = round(
-            (time.perf_counter() - start) * 1000
-        )
-
-        response = (
-            response_state.get("response")
-            or response_state.get("text")
-            or response_state.get("content")
-            or ""
-        )
-
-        response = str(response).strip()
-
-        self.update_dialogue(user, response)
-
-        # ----------------------------------------------------
-        # 6. Latency + External Turn State
-        # ----------------------------------------------------
-
-        latency["total_ms"] = round(
-            (time.perf_counter() - total_start) * 1000
-        )
-
-        self.last_turn_state = {
-            "query": query_state,
-            "trigger": trigger_state,
-            "evidence": {
-                "active_cases": self.memory["evidence_state"]["active_cases"],
-                "topic_structure": self.memory["evidence_state"]["topic_structure"],
-            },
-            "policy": policy_state,
-            "response": response,
-            "latency": latency,
-        }
-
-        # ----------------------------------------------------
-        # Display
-        # ----------------------------------------------------
-
-        self.print_state(
-            query_state=query_state,
-            trigger_state=trigger_state,
-            policy_state=policy_state,
-        )
-
-        return response
-
-    def reset(self):
-        self.memory = init_memory()
-        self.last_turn_state = {}
