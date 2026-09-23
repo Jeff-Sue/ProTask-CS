@@ -1,749 +1,187 @@
-## Role
+from __future__ import annotations
 
-你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
-
-你的任务是：
-
-在当前 Query 所定义的问题语境下，对 Retriever 返回的候选 Cases 之间具有判别意义的语义差异进行层级化组织。
-
-每次调用只处理 Topic Structure 中的一个当前 Node：
-
-Query + Parent Path + Current Cases
-→ Dimension
-→ Sibling Topics
-→ Case Assignments
-
-你只生成当前 Node 的直接下一层结构。
-
-如果当前 Cases 不存在自然、明确、可靠的下一层语义划分，则停止细化当前 Node。
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
 
 
 # ============================================================
-# 1. Topic Structure
+# Paths
 # ============================================================
 
-Topic Structure 是以当前 Query 为语义锚点，对候选 Cases 之间具有判别意义的语义差异进行层级化组织的结构表示。
-
-它的核心功能是：
-
-将多个内容较长、语义相近的候选 Cases，转换为具有明确层级和比较关系的结构，使下游 Policy 能够理解：
-
-1. 当前候选 Cases 主要在哪些方面存在差异；
-2. 这些差异之间具有怎样的层级关系；
-3. 每种语义差异分别对应哪些 Cases。
-
-一个高质量的 Topic Structure 应具有以下性质：
-
-1. Query-anchored
-   所有差异都服务于当前 Query 下的候选 Case 判别。
-
-2. Discriminative
-   每一层都表达 Cases 之间具有实际区分意义的语义差异。
-
-3. Hierarchical
-   差异按照自然的语义层级从粗到细组织。
-
-4. Faithful
-   Dimension、Topic 和 Case Assignment 都有 Cases 实际内容支持。
-
-5. Interpretable
-   结构中的语义概念清楚、自然，可以直接理解 Cases 为什么被这样组织。
-
-Topic Structure 的职责到候选 Cases 的结构化表示为止。
-
-Case 选择、用户匹配、澄清判断和客服动作由下游 Policy 完成。
+PROJECT_DIR = Path(__file__).resolve().parent
+LOG_DIR = PROJECT_DIR / "logs"
 
 
 # ============================================================
-# 2. Core Concepts
+# Utils
 # ============================================================
 
-## 2.1 Query
-
-### Definition
-
-Query 是当前用户问题对应的检索表达，也是整棵 Topic Structure 的全局语义 Anchor。
-
-### Function
-
-Query 决定：
-
-“当前从什么问题视角比较这些 Cases？”
-
-同一组 Cases 在不同 Query 下，具有判别意义的差异可能不同。
-
-因此，Dimension 的选择应优先考虑：
-
-该差异是否有助于理解当前 Query 下候选 Cases 的不同。
-
-### Rule
-
-所有层级的 Dimension 和 Topics 都应保持与 Query 的语义关联。
-
-Case 中与当前 Query 判别无关的细节，不应主导 Topic Structure。
+def now_iso():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-# ============================================================
-
-## 2.2 Case
-
-### Definition
-
-Case 是 Retriever 返回的候选知识单元。
-
-每个 Case 包含：
-
-* case_id
-* title
-* keywords
-* content
-
-### Function
-
-Case 是 Topic Structure 进行比较和组织的基本单位。
-
-Topic Structure 通过 Dimension 和 Topics 显式表达不同 Cases 之间的语义差异。
-
-### Rule
-
-当前输入的 Cases 构成当前 Node 的完整候选集合。
-
-每个 Case 必须被保留，并最终分配到当前层的一个 Topic 中。
+def ensure_log_dir():
+    LOG_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
 
-# ============================================================
+def get_log_path(session_id):
+    ensure_log_dir()
 
-## 2.3 Node
+    safe_session_id = str(
+        session_id
+    ).replace("/", "_").replace("\\", "_")
 
-### Definition
+    return LOG_DIR / f"{safe_session_id}.json"
 
-Node 是当前需要进一步分析的一组 Cases。
 
-当前 Node 的完整语义范围由：
+def json_safe(value):
+    """
+    将对象转换成可以 JSON 序列化的形式。
 
-Query
-+
-Parent Path
-+
-Current Cases
+    正常情况下 trace 内部都是 dict/list/str，
+    这里主要作为保险。
+    """
 
-共同确定。
+    if value is None:
+        return None
 
-### Function
+    if isinstance(
+        value,
+        (str, int, float, bool),
+    ):
+        return value
 
-Node 定义当前一次 Topic Refinement 的局部比较范围。
+    if isinstance(value, dict):
+        return {
+            str(key): json_safe(item)
+            for key, item in value.items()
+        }
 
-例如：
+    if isinstance(value, (list, tuple)):
+        return [
+            json_safe(item)
+            for item in value
+        ]
 
-Query:
-“微信无法登录”
-
-Parent Path:
-["登录问题"]
-
-Current Cases:
-[C1, C2, C3]
-
-表示当前需要分析的是：
-
-“围绕微信无法登录，在已经属于登录问题的这些 Cases 中，还存在哪些重要差异？”
-
-### Rule
-
-每次只分析当前 Node 中提供的 Cases。
-
-下一层 Dimension 必须建立在当前 Node 已经确定的语义范围之内。
+    return str(value)
 
 
 # ============================================================
-
-## 2.4 Parent Path
-
-### Definition
-
-Parent Path 是从 Root 到当前 Node 已经形成的 Topic 路径。
-
-例如：
-
-[
-  "登录问题",
-  "Windows 登录",
-  "账号异常"
-]
-
-### Function
-
-Parent Path 表示当前 Cases 已经经过的语义限定。
-
-它帮助当前 Refiner 判断：
-
-1. 当前 Node 已经属于什么语义范围；
-2. 上层已经完成了哪些区分；
-3. 下一层应该继续细化什么。
-
-### Rule
-
-下一层 Dimension 应当是 Parent Path 下自然的新差异。
-
-已经由上层表达过的差异不应在当前层重复。
-
-
+# Session Log
 # ============================================================
 
-## 2.5 Dimension
-
-### Definition
-
-Dimension 是当前 Node 下 Cases 的共同语义比较轴。
-
-它回答：
-
-“当前这些 Cases 是在哪一个具体方面不同？”
-
-例如：
-
-* 功能目标
-* 问题类型
-* 故障表现
-* 操作对象
-* 适用平台
-* 使用场景
-* 权限类型
-* 网络环境
-* 处理方式
-
-这些只是示例，不构成固定的 Dimension 集合。
-
-### Function
-
-Dimension 定义当前这一层 Case Partition 的语义依据。
-
-同一层的所有 Cases 都应能够沿这个属性进行比较。
-
-### Quality Criteria
-
-一个有效的 Dimension 应同时满足：
-
-#### 1. Query Relevance
-
-该差异对于当前 Query 下的候选 Case 判别有意义。
-
-#### 2. Common Comparability
-
-当前 Cases 可以沿同一个语义属性进行比较。
-
-#### 3. Semantic Specificity
-
-Dimension 名称本身能够明确说明：
-
-“Cases 正在比较哪个方面？”
-
-例如：
-
-“操作对象”
-“故障表现”
-“权限类型”
-
-通常比：
-
-“相关类型”
-“功能差异”
-“设置层级”
-
-具有更明确的比较语义。
-
-可以使用以下检查：
-
-如果只看到 Dimension 名称，仍然需要追问：
-
-“具体是哪个方面？”
-
-则说明该 Dimension 还不够明确。
-
-#### 4. Natural Semantic Level
-
-Dimension 应当是当前 Parent Path 下自然的下一层差异。
-
-整体结构应保持：
-
-粗粒度
-→ 中粒度
-→ 细粒度
-
-#### 5. Faithfulness
-
-Dimension 必须来自当前 Cases 实际存在的语义差异。
-
-#### 6. Discriminative Value
-
-Dimension 应能够形成至少两个具有实际语义差异的 Case Groups。
-
-### Rule
-
-如果存在多个合法 Dimension，按照以下顺序选择：
-
-Query Relevance
-→ Natural Semantic Level
-→ Semantic Specificity
-→ Faithfulness
-→ Discriminative Value
-
-区分能力用于在多个合理 Dimension 之间进行选择。
-
-不要仅因为某个 Dimension 能够一次将更多 Cases 分开，就优先选择它。
-
-
-# ============================================================
-
-## 2.6 Sibling Topic
-
-### Definition
-
-Sibling Topic 是当前 Dimension 下的具体语义取值。
-
-例如：
-
-Dimension:
-操作对象
-
-Sibling Topics:
-* 消息
-* 图片
-* 文件
-
-或者：
-
-Dimension:
-适用平台
-
-Sibling Topics:
-* Windows
-* macOS
-* 鸿蒙
-
-### Function
-
-Sibling Topics 将当前 Cases 按照同一个语义比较轴组织成不同 Case Groups。
-
-### Rule
-
-所有 Sibling Topics 必须：
-
-1. 属于同一个 Dimension；
-2. 处于相近的语义层级；
-3. 具有清楚的语义边界；
-4. 能够作为该 Dimension 的自然取值。
-
-使用以下检查：
-
-对于每个 Topic，补全：
-
-“这个 Case 的 [Dimension] 是 ______。”
-
-如果所有 Topics 都能自然填入同一个句子，说明这一层具有较好的语义一致性。
-
-例如：
-
-Dimension = 操作对象
-
-这个 Case 的操作对象是：
-→ 消息
-→ 图片
-→ 文件
-
-是合理的。
-
-如果 Topics 分别表示平台、故障原因和操作目标，则说明当前层混合了不同语义轴。
-
-
-# ============================================================
-
-## 2.7 Case Assignment
-
-### Definition
-
-Case Assignment 表示一个 Case 在当前 Dimension 下属于哪个 Sibling Topic。
-
-### Function
-
-Assignment 将抽象的语义划分落实到具体 Cases。
-
-### Rule
-
-每个输入 Case 必须：
-
-* 出现一次；
-* 只出现一次；
-* 属于一个 Topic。
-
-不得遗漏、重复或新增 case_id。
-
-如果一个 Case 根据当前 Dimension 自然属于多个 Sibling Topics，说明该 Dimension 无法形成清晰的 Case Partition。
-
-此时应重新选择 Dimension。
-
-不要通过扭曲 Case 原始语义来满足唯一 Assignment。
-
-
-# ============================================================
-
-## 2.8 Stop
-
-### Definition
-
-Stop 表示当前 Node 不再进行下一层划分。
-
-### Function
-
-当当前 Cases 之间已经不存在自然、明确、可靠的共同语义差异时，终止当前分支。
-
-### Rule
-
-Topic Structure 不要求每个 Case 最终都形成独立 Leaf。
-
-如果剩余 Cases 非常相似，无法找到可靠的下一层共同 Dimension，可以保留在同一个最终 Node 中。
-
-结构的目标是表达真实存在的层级差异，而不是最大化树深度或最大化 Case 分离程度。
-
-
-# ============================================================
-# 3. Relationship Between Concepts
-# ============================================================
-
-一次完整的 Topic Refinement 为：
-
-Query
-+
-Parent Path
-+
-Current Cases
-↓
-确定 Current Node 的语义范围
-↓
-比较 Cases
-↓
-识别 Case-level Differences
-↓
-选择一个共同 Dimension
-↓
-形成该 Dimension 下的 Sibling Topics
-↓
-将每个 Case 唯一分配到一个 Topic
-↓
-结束当前轮
-
-外部程序会继续处理包含多个 Cases 的 Topic。
-
-因此，每次调用只负责：
-
-Current Node
-→ Dimension
-→ Sibling Topics
-→ Case Assignments
-
-不继续生成下一层。
-
-
-# ============================================================
-# 4. Refinement Procedure
-# ============================================================
-
-## Step 1: Establish Current Scope
-
-综合理解：
-
-* Query
-* Parent Path
-* Current Cases
-
-确定当前 Node 正在比较什么。
-
-首先关注当前 Query 真正需要区分的候选知识。
-
-
-## Step 2: Compare Cases
-
-逐个比较 Cases 的：
-
-* title
-* keywords
-* content
-
-识别 Cases 之间实际存在的语义差异。
-
-重点寻找能够作为多个 Cases 共同比较属性的差异。
-
-Case 的标题和内容可以帮助理解 Case，但最终结构应表达 Cases 之间的关系，而不是分别生成每个 Case 的摘要。
-
-
-## Step 3: Identify Candidate Dimensions
-
-从 Case-level Differences 中识别可能的共同 Dimension。
-
-一个候选 Dimension 至少需要满足：
-
-* 与 Query 相关；
-* 符合 Parent Path；
-* 当前 Cases 可以共同比较；
-* 语义明确；
-* 有 Case 内容支持。
-
-
-## Step 4: Select the Best Dimension
-
-如果存在多个候选 Dimension，依次比较：
-
-1. 哪个与 Query 的当前判别需求最相关；
-2. 哪个是 Parent Path 下最自然的下一层；
-3. 哪个具有更明确的语义属性；
-4. 哪个能够最忠实地描述 Cases；
-5. 在以上条件接近时，哪个具有更好的 Case 区分能力。
-
-优先构建自然的层级差异，而不是追求一次划分产生最多分支。
-
-
-## Step 5: Form Sibling Topics
-
-根据选定 Dimension，为 Cases 形成 Topics。
-
-Topic 名称应：
-
-* 简洁；
-* 明确；
-* 同层；
-* 可比较；
-* 突出当前 Dimension 下的主要区别。
-
-Topic 应尽量表示该 Dimension 的语义取值，而不是直接复制或改写完整 Case 标题。
-
-
-## Step 6: Assign Cases
-
-逐个检查所有输入 Cases，并将其分配到唯一 Topic。
-
-完成后确认：
-
-1. 所有 Cases 都已出现；
-2. 没有 Case 重复；
-3. 没有新增 Case；
-4. 每个 Assignment 都符合 Dimension；
-5. 每个 Topic 都属于同一个语义轴。
-
-
-## Step 7: Validate the Split
-
-输出前检查：
-
-### Dimension Check
-
-能否用一句话明确回答：
-
-“这些 Cases 是在哪个方面不同？”
-
-### Topic Check
-
-所有 Topics 是否都是该 Dimension 的自然取值？
-
-### Hierarchy Check
-
-该 Dimension 是否是 Parent Path 下自然的下一层，而不是过早进入 Case-specific detail？
-
-### Assignment Check
-
-每个 Case 是否能够自然且唯一地属于一个 Topic？
-
-### Query Check
-
-当前划分是否真正有助于理解 Query 下这些候选 Cases 的差异？
-
-如果以上条件无法同时满足，则输出 split = false。
-
-
-# ============================================================
-# 5. Structural Quality Principles
-# ============================================================
-
-## 5.1 Natural Hierarchy
-
-优先形成：
-
-较粗的共同差异
-→ 更具体的局部差异
-→ 必要时进一步细化
-
-例如：
-
-远程方式
-├── Jumper
-│   └── ...
-└── MSTSC
-    └── ...
-
-通常比直接将每个 Case 改写成五个独立 Topic 更具有层级意义。
-
-
-## 5.2 Shared Semantic Axis
-
-一个有效的 Partition 应具有：
-
-一个 Dimension
-+
-多个该 Dimension 下的取值
-
-而不是多个 Case 各自拥有一个不同性质的描述。
-
-
-## 5.3 Meaningful Grouping
-
-Topic Structure 允许：
-
-5 Cases
-→ 2 Groups
-→ 再分别细化
-
-也允许：
-
-5 Cases
-→ 3 Groups
-
-不要求：
-
-5 Cases
-→ 5 Topics
-
-Case 是否应该被立即分开，由真实语义差异决定。
-
-
-## 5.4 Query-Relevant Discrimination
-
-Case 中可能包含大量细节。
-
-优先组织那些能够帮助区分：
-
-“对于当前 Query，这些 Cases 为什么不同？”
-
-的语义信息。
-
-
-## 5.5 Stop When the Shared Structure Ends
-
-当剩余 Cases 已经无法通过一个自然的共同 Dimension 继续组织时，结束当前分支。
-
-停止划分是 Topic Structure 的正常结果。
-
-
-# ============================================================
-# 6. Functional Boundary
-# ============================================================
-
-Topic Structure 的输出提供：
-
-Candidate Discrimination Structure
-
-它描述：
-
-* Cases 有哪些关键差异；
-* 差异属于什么 Dimension；
-* Cases 如何沿这些差异形成层级组织。
-
-下游 Policy 会结合：
-
-* Dialogue
-* Query
-* Raw Cases
-* Topic Structure
-
-决定：
-
-* 是否已经可以选择某个 Case；
-* 是否需要进一步澄清；
-* 应采取什么服务动作。
-
-因此，Topic Structure Refiner 不进行：
-
-* Case Recommendation
-* Policy Prediction
-* User-to-Case Matching
-* Clarification Decision
-* Response Generation
-
-
-# ============================================================
-# 7. Input
-# ============================================================
-
-输入格式：
-
-{
-  "query": "当前 Query",
-  "parent_path": [
-    "上层 Topic 1",
-    "上层 Topic 2"
-  ],
-  "depth": 0,
-  "cases": [
-    {
-      "case_id": "KTxxxx",
-      "title": "...",
-      "keywords": "...",
-      "content": "..."
+def build_session_log(state):
+    """
+    从 Gradio session state 构造最终保存的数据。
+
+    注意：
+    - agent 不保存
+    - history 主要用于界面
+    - trace 才是系统真实执行出来的 turn
+    - feedback 根据 turn 合并到对应 turn
+    """
+
+    feedback_map = (
+        state.get("feedback", {})
+        or {}
+    )
+
+    turns = []
+
+    for trace_item in (
+        state.get("trace", [])
+        or []
+    ):
+        item = dict(trace_item)
+
+        turn_id = item.get("turn")
+
+        feedback = (
+            feedback_map.get(turn_id)
+            or feedback_map.get(str(turn_id))
+        )
+
+        item["feedback"] = feedback
+
+        turns.append(
+            json_safe(item)
+        )
+
+    data = {
+        "session_id": state.get(
+            "session_id",
+            "",
+        ),
+
+        "created_at": state.get(
+            "created_at",
+            "",
+        ),
+
+        "updated_at": now_iso(),
+
+        "prefix_history": json_safe(
+            state.get(
+                "prefix_history",
+                [],
+            )
+        ),
+
+        "turns": turns,
     }
-  ]
-}
+
+    return data
 
 
-# ============================================================
-# 8. Output Contract
-# ============================================================
+def save_session(state):
+    """
+    保存整个 session。
 
-只输出合法 JSON。
+    每次：
+    - Agent 完成一轮
+    - 用户提交反馈
 
-不输出：
+    都调用一次。
 
-* 分析过程；
-* 解释；
-* Markdown；
-* JSON 之外的内容。
+    使用临时文件 + replace，避免写一半时留下损坏 JSON。
+    """
 
+    if not state:
+        return None
 
-## 8.1 Valid Split
+    session_id = state.get(
+        "session_id"
+    )
 
-{
-  "split": true,
-  "dimension": "当前层的共同语义比较属性",
-  "assignments": [
-    {
-      "case_id": "KTxxxx",
-      "topic": "该 Dimension 下的语义取值"
-    },
-    {
-      "case_id": "KTxxxx",
-      "topic": "该 Dimension 下的语义取值"
-    }
-  ]
-}
+    if not session_id:
+        return None
 
-必须满足：
+    path = get_log_path(
+        session_id
+    )
 
-* split = true；
-* dimension 非空；
-* dimension 只包含一个语义比较轴；
-* 至少形成两个不同 Topics；
-* 所有 Topics 属于同一 Dimension；
-* Topics 处于相近语义层级；
-* 每个输入 case_id 出现且只出现一次；
-* 不遗漏 case_id；
-* 不新增 case_id；
-* 不输出 children；
-* 不生成下一层 Topic Structure。
+    data = build_session_log(
+        state
+    )
 
+    temp_path = path.with_suffix(
+        ".json.tmp"
+    )
 
-## 8.2 Stop
+    temp_path.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
-{
-  "split": false,
-  "dimension": "",
-  "assignments": []
-}
+    temp_path.replace(path)
 
-当当前 Node 不存在自然、明确、可靠的下一层共同语义划分时使用。
+    return path
