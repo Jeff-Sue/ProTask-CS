@@ -1,845 +1,402 @@
-      "selection_error": [
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220637958",
-          "turn_id": 1,
-          "user": "好的。\n想要更新谷歌浏览器这个要怎么操作呀。",
-          "golden_response": "[案例链接: KT00241855]。\n您好，感谢您的等待，您反馈的问题可参考以下案例操作，若有问题请反馈给我（工号h60099387），谢谢！",
-          "golden_cases": [
-            "KT00241855"
-          ],
-          "predicted_cases": [
-            "KT00412269"
-          ],
-          "retrieved_cases": [
-            "KT00029634",
-            "KT00412269",
-            "KT00126060",
-            "KT00241855",
-            "KT00288698"
-          ],
-          "golden_ranks": {
-            "KT00241855": 4
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "谷歌浏览器更新方法",
-            "reason": "用户当前意图已从新电脑登录微信切换为谷歌浏览器的更新操作，需重新构造 Query。"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前 Query 不需要案例知识；现有案例与谷歌浏览器更新方法无直接关联，无法覆盖当前具体问题。"
-          },
-          "topic_structure": {
-            "query": "谷歌浏览器更新方法",
-            "topic": "谷歌浏览器更新方法",
-            "case_ids": [
-              "KT00029634",
-              "KT00412269",
-              "KT00126060",
-              "KT00241855",
-              "KT00288698"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "安装与卸载",
-                "case_ids": [
-                  "KT00029634"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00029634"
-              },
-              {
-                "topic": "升级与安装",
-                "case_ids": [
-                  "KT00412269"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00412269"
-              },
-              {
-                "topic": "下载最新版本",
-                "case_ids": [
-                  "KT00126060"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00126060"
-              },
-              {
-                "topic": "下载并使用最新版解决兼容性问题",
-                "case_ids": [
-                  "KT00241855"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00241855"
-              },
-              {
-                "topic": "安装失败及组策略问题",
-                "case_ids": [
-                  "KT00288698"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00288698"
-              }
-            ],
-            "dimension": "操作类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00412269"
-            },
-            "reason": "用户询问谷歌浏览器更新方法，案例 KT00412269 明确描述了升级和安装谷歌浏览器的步骤，与当前问题整体匹配。"
-          },
-          "response": "您可以参考案例 [KT00412269]，通过 iDesk 软件搜索 Google Chrome 或谷歌关键词下载安装最新版本。如果无法使用该方法，也可以直接点击链接下载安装包进行升级：https://onebox.huawei.com/p/a8528f3307df58b445aca08f8a4ff5ee。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220639125",
-          "turn_id": 0,
-          "user": "你好，咨询下Windows 10系统（Windows 10 Pro/Enterprise）将于2025年10月14日EOS过期。\n10月14日之后，Win10是彻底不能用了,h还是可以继续延期几天？",
-          "golden_response": "您好，Windows 10操作系统下线公告微软官方公告从2025年10月14日Windows 10操作系统将EOS，后续微软不再提供安全更新与技术支持，Windows 10安全风险将持续升高。现发布《Windows 10操作系统下线公告》，全面启动Windows 10升级替换下线工作，存量Windows 10用户请参考以下指引执行升级操作：[案例链接: KT00133848] 10操作系统，并对存量Windows10系统进行切换升级，原有Windows 10操作系统镜像下线。\n下线后，1、从2025年10月14日起，为减少安全风险，将陆续分批对存量Windows 10操作系统采取安全加固隔离措施（实施安全加固隔离措施后将无法使用文件共享、远程桌面、访问互联网），为尽可能降低对Windows 10用户的办公影响，请尽快升级切换；2、从2026年10月14日起（即：Windows 10 EOS一年后），Windows 10将全面禁止接入公司大网（该Deadline时间点可能随Windows 10安全态势的恶化情况，经决策后提前）。",
-          "golden_cases": [
-            "KT00133848"
-          ],
-          "predicted_cases": [
-            "KT00398481"
-          ],
-          "retrieved_cases": [
-            "KT00133848",
-            "KT00398481",
-            "KT00386222",
-            "KT00396920",
-            "KT00258651"
-          ],
-          "golden_ranks": {
-            "KT00133848": 1
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "Windows 10 Pro/Enterprise EOS后是否还能继续使用",
-            "reason": "用户提出了一个新的IT问题，询问Windows 10系统在EOS后的可用性"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前没有可复用案例"
-          },
-          "topic_structure": {
-            "query": "Windows 10 Pro/Enterprise EOS后是否还能继续使用",
-            "topic": "Windows 10 Pro/Enterprise EOS后是否还能继续使用",
-            "case_ids": [
-              "KT00133848",
-              "KT00398481",
-              "KT00386222",
-              "KT00396920",
-              "KT00258651"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "Windows 10 Pro/Enterprise 升级到 Windows 11 的详细操作指南",
-                "case_ids": [
-                  "KT00133848"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00133848"
-              },
-              {
-                "topic": "Windows 10 End of Life 安全策略与限制说明",
-                "case_ids": [
-                  "KT00398481"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00398481"
-              },
-              {
-                "topic": "Win10升级Win11指导及FAQ（上海海思）",
-                "case_ids": [
-                  "KT00386222"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00386222"
-              },
-              {
-                "topic": "Win10系统下线公告与政策说明",
-                "case_ids": [
-                  "KT00396920"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00396920"
-              },
-              {
-                "topic": "Windows 10/11 升级方法与常见问题处理",
-                "case_ids": [
-                  "KT00258651"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00258651"
-              }
-            ],
-            "dimension": "解决方案类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00398481"
-            },
-            "reason": "用户询问Windows 10 Pro/Enterprise EOS后是否还能继续使用，案例KT00398481明确说明了Windows 10在EOS后的安全限制和访问策略，可以直接作为推荐案例。"
-          },
-          "response": "您好，关于Windows 10系统（包括Pro/Enterprise版本）将于2025年10月14日结束支持（EOS）的问题，根据微软官方公告和公司相关要求，2025年10月14日后，公司将逐步对现有Windows 10系统实施安全加固和隔离措施，届时文件共享、远程桌面和互联网访问等功能将无法使用。建议您尽快升级到新的操作系统以减少影响。\n\n此外，从2026年10月14日起（即Windows 10支持结束一年后），Windows 10将被完全禁止接入公司主网络（具体时间可能因安全风险变化而提前）。更多详细信息可以参考《IT设备管理流程》。如需进一步了解，可查看相关案例 [KT00398481]。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220639336",
-          "turn_id": 1,
-          "user": "无法使用登录凭证，域不可用。",
-          "golden_response": "我查下。\n[案例链接: KT00000842]。",
-          "golden_cases": [
-            "KT00000842"
-          ],
-          "predicted_cases": [
-            "KT00002815"
-          ],
-          "retrieved_cases": [
-            "KT00007377",
-            "KT00002815",
-            "KT00000842",
-            "KT00005470",
-            "KT00384194"
-          ],
-          "golden_ranks": {
-            "KT00000842": 3
-          },
-          "query": {
-            "query_mode": "refine",
-            "query_text": "域账号无法登录便携机，提示无法使用登录凭证，域不可用",
-            "reason": "在原有问题基础上补充了具体的报错信息'无法使用登录凭证，域不可用'，用于更精确检索相关解决方案。"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "现有案例与当前 Query 不匹配；当前 Query 涉及域账号无法登录便携机并提示“无法使用登录凭证，域不可用”，而现有案例主要涉及登录失败、信任关系失败或加入域失败等不同问题，无法覆盖当前具体问题。"
-          },
-          "topic_structure": {
-            "query": "域账号无法登录便携机，提示无法使用登录凭证，域不可用",
-            "topic": "域账号无法登录便携机，提示无法使用登录凭证，域不可用",
-            "case_ids": [
-              "KT00007377",
-              "KT00002815",
-              "KT00000842",
-              "KT00005470",
-              "KT00384194"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "信任关系失败",
-                "case_ids": [
-                  "KT00007377"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00007377"
-              },
-              {
-                "topic": "加入域失败",
-                "case_ids": [
-                  "KT00002815"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00002815"
-              },
-              {
-                "topic": "无法登录Windows操作系统",
-                "case_ids": [
-                  "KT00000842"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00000842"
-              },
-              {
-                "topic": "加域后登录方式",
-                "case_ids": [
-                  "KT00005470"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00005470"
-              },
-              {
-                "topic": "手动加域操作",
-                "case_ids": [
-                  "KT00384194"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00384194"
-              }
-            ],
-            "dimension": "问题类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00002815"
-            },
-            "reason": "用户反馈域账号无法登录便携机，提示“无法使用登录凭证，域不可用”，这与案例KT00002815中描述的“电脑可能已脱域”问题高度匹配。该案例提供了检查是否脱域的方法及重新加域的解决方案，能够直接指导用户进行初步排查和修复。"
-          },
-          "response": "您可以尝试检查电脑是否已脱域，具体方法是在命令行中输入“nltest /sc_verify”，如果返回结果为“error”则表明电脑已脱域。建议您重新加域，可以参考相关操作指南进行处理。如果操作过程中遇到困难，也可以联系现场工程师协助。对应案例详情可参考 [案例链接: KT00002815]。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220639419",
-          "turn_id": 0,
-          "user": "你好，怎么查自己部门的资产管理员啊。",
-          "golden_response": "[案例链接: KT00205143]。\n您参考案例，点击链接，查看右上角资产管理员信息即可。\n您好，请问还有其它可以帮到您的吗？",
-          "golden_cases": [
-            "KT00205143"
-          ],
-          "predicted_cases": [
-            "KT00089795"
-          ],
-          "retrieved_cases": [
-            "KT00089795",
-            "KT00205143",
-            "KT00263225",
-            "KT00186888",
-            "KT00258190"
-          ],
-          "golden_ranks": {
-            "KT00205143": 2
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "查询部门资产管理员",
-            "reason": "用户提出了一个新的问题，需要重新构造 Query。"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前没有可复用案例"
-          },
-          "topic_structure": {
-            "query": "查询部门资产管理员",
-            "topic": "查询部门资产管理员",
-            "case_ids": [
-              "KT00089795",
-              "KT00205143",
-              "KT00263225",
-              "KT00186888",
-              "KT00258190"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "通过AMT首页或资产编号查询",
-                "case_ids": [
-                  "KT00089795"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00089795"
-              },
-              {
-                "topic": "通过AMT系统右上角查看专属管理员",
-                "case_ids": [
-                  "KT00205143"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00205143"
-              },
-              {
-                "topic": "按部门维度查询代表处资产管理员",
-                "case_ids": [
-                  "KT00263225"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00263225"
-              },
-              {
-                "topic": "通过权限范围查询其他部门资产管理员",
-                "case_ids": [
-                  "KT00186888"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00186888"
-              },
-              {
-                "topic": "显示过多管理员的处理说明",
-                "case_ids": [
-                  "KT00258190"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00258190"
-              }
-            ],
-            "dimension": "查询方式",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00089795"
-            },
-            "reason": "用户问题与案例KT00089795的主要内容整体匹配，提供了多种查询部门资产管理员的方法。"
-          },
-          "response": "您好，您可以参考案例 KT00089795 的方法查询部门资产管理员。具体操作包括：进入 AMT 首页查看右上角信息，或通过资产管理员查询链接输入部门名称进行查找。如果结果为空，可以尝试输入上级部门进行查询。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220639459",
-          "turn_id": 0,
-          "user": "微信之前可以登录，今天无法登录了，是权限到期了吗？",
-          "golden_response": "稍等，我给您查询一下呢？\n您好，这边给查询您的安全上网服务IM权限已经没有了。\n您可以参考这个指导申请：[案例链接: KT00143475]。",
-          "golden_cases": [
-            "KT00143475"
-          ],
-          "predicted_cases": [
-            "KT00001167"
-          ],
-          "retrieved_cases": [
-            "KT00001167",
-            "KT00143475",
-            "KT00359367",
-            "KT00164833",
-            "KT00166765"
-          ],
-          "golden_ranks": {
-            "KT00143475": 2
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "微信登录失败，怀疑权限到期",
-            "reason": "用户提出了一个新的 IT 问题，关于微信无法登录并怀疑权限到期"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前没有可复用案例"
-          },
-          "topic_structure": {
-            "query": "微信登录失败，怀疑权限到期",
-            "topic": "微信登录失败，怀疑权限到期",
-            "case_ids": [
-              "KT00001167",
-              "KT00143475",
-              "KT00359367",
-              "KT00164833",
-              "KT00166765"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "微信客户端登录失败（代理配置或权限问题）",
-                "case_ids": [
-                  "KT00001167"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00001167"
-              },
-              {
-                "topic": "申请Proxy-即时通讯权限",
-                "case_ids": [
-                  "KT00143475"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00143475"
-              },
-              {
-                "topic": "账号过期导致系统登录失败",
-                "case_ids": [
-                  "KT00359367"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00359367"
-              },
-              {
-                "topic": "iCare账号权限正常但无法登录portal",
-                "case_ids": [
-                  "KT00164833"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00164833"
-              },
-              {
-                "topic": "iCare账号权限未到期但无法登录portal",
-                "case_ids": [
-                  "KT00166765"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00166765"
-              }
-            ],
-            "dimension": "问题类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00001167"
-            },
-            "reason": "用户描述微信登录失败，怀疑权限到期，与案例 KT00001167 中的“微信客户端登录失败（代理配置或权限问题）”高度匹配。"
-          },
-          "response": "您好，关于微信无法登录的问题，可能是权限或代理配置相关。您可以参考案例 KT00001167 的解决方案进行处理：\n\n1. 确认账号是否拥有“外网基础权限”及“外部IM 权限PM-extra-IM”，如没有请申请对应权限；\n2. 权限生效后，配置微信客户端代理（地址：proxynj.huawei.com 或 proxycn2.huawei.com，端口：8080），并使用域账号和密码登录。\n\n更多详细步骤可以查看案例内容。如果问题仍未解决，请进一步反馈具体情况。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220639985",
-          "turn_id": 0,
-          "user": "升级win11后计算器无法打开。",
-          "golden_response": "[案例链接: KT00296401] Windows10/11系统打开内置应用提示损坏的映像。\n根据案例进行一下处理就可以了。",
-          "golden_cases": [
-            "KT00296401"
-          ],
-          "predicted_cases": [
-            "KT00364052"
-          ],
-          "retrieved_cases": [
-            "KT00000700",
-            "KT00363881",
-            "KT00406950",
-            "KT00364052",
-            "KT00296401"
-          ],
-          "golden_ranks": {
-            "KT00296401": 5
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "升级 Windows 11 后计算器无法打开",
-            "reason": "用户提出了一个新的 IT 问题，需要重新构造 Query"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前没有可复用案例"
-          },
-          "topic_structure": {
-            "query": "升级 Windows 11 后计算器无法打开",
-            "topic": "升级 Windows 11 后计算器无法打开",
-            "case_ids": [
-              "KT00000700",
-              "KT00363881",
-              "KT00406950",
-              "KT00364052",
-              "KT00296401"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "内置应用无法打开（UAC设置或系统文件异常）",
-                "case_ids": [
-                  "KT00000700"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00000700"
-              },
-              {
-                "topic": "内置应用异常报错及安装（重新注册/卸载重装）",
-                "case_ids": [
-                  "KT00363881"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00363881"
-              },
-              {
-                "topic": "内置应用提示未指定在Windows上运行或包含错误",
-                "case_ids": [
-                  "KT00406950"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00406950"
-              },
-              {
-                "topic": "计算器打开异常（离线包安装）",
-                "case_ids": [
-                  "KT00364052"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00364052"
-              },
-              {
-                "topic": "内置应用提示损坏的映像或点击无反应",
-                "case_ids": [
-                  "KT00296401"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00296401"
-              }
-            ],
-            "dimension": "问题表现类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00364052"
-            },
-            "reason": "用户问题与案例KT00364052的主要问题（计算器打开异常）整体匹配，可以直接推荐该案例。"
-          },
-          "response": "您可以尝试通过卸载重装计算器离线包来解决这个问题。具体操作步骤可以参考案例 [KT00364052]，里面有详细的操作指引。如果问题仍未解决，建议联系12345客服联盟处理。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220640132",
-          "turn_id": 1,
-          "user": "需要什么角色？",
-          "golden_response": "[案例链接: KT00393992]。\n参考这个案例。\n需要对角色进行配置。",
-          "golden_cases": [
-            "KT00393992"
-          ],
-          "predicted_cases": [
-            "KT00313995"
-          ],
-          "retrieved_cases": [
-            "KT00301278",
-            "KT00313995",
-            "KT00214691",
-            "KT00393992",
-            "KT00286201"
-          ],
-          "golden_ranks": {
-            "KT00393992": 4
-          },
-          "query": {
-            "query_mode": "refine",
-            "query_text": "测试环境 HIS API 网关无法修改和创建新 API 所需角色权限",
-            "reason": "用户在原有问题基础上补充了关于所需角色的细化信息，属于对原问题的局部澄清和限定。"
-          },
-          "trigger": {
-            "trigger": false,
-            "evidence_mode": "reuse_existing_evidence",
-            "reason": "现有案例已充分覆盖当前 Query 的具体问题，包括权限配置、变更模式切换及角色管理等关键信息。"
-          },
-          "topic_structure": {
-            "query": "测试环境 HIS API 网关无法修改和创建新 API 的权限问题",
-            "topic": "测试环境 HIS API 网关无法修改和创建新 API 的权限问题",
-            "case_ids": [
-              "KT00301278",
-              "KT00313995",
-              "KT00214691",
-              "KT00393992",
-              "KT00286201"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "未切换变更模式或权限未同步",
-                "case_ids": [
-                  "KT00301278"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00301278"
-              },
-              {
-                "topic": "未切换变更模式或角色权限不足",
-                "case_ids": [
-                  "KT00313995"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00313995"
-              },
-              {
-                "topic": "IAM权限未申请或网关角色未配置",
-                "case_ids": [
-                  "KT00214691"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00214691"
-              },
-              {
-                "topic": "网关页面角色权限未手动添加",
-                "case_ids": [
-                  "KT00393992"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00393992"
-              },
-              {
-                "topic": "测试环境应用责任人校验失败",
-                "case_ids": [
-                  "KT00286201"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00286201"
-              }
-            ],
-            "dimension": "权限问题的根源类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "ExplainedResponse",
-            "information": {
-              "case_id": "KT00313995"
-            },
-            "reason": "用户询问需要什么角色，而 Case KT00313995 明确指出需要应用 manager 或 owner 角色才能编辑和修改 API，与当前问题直接相关。"
-          },
-          "response": "您需要拥有应用的 Manager 或 Owner 角色，才能在 API 网关中编辑、修改或删除接口。具体可以参考案例 KT00313995 的说明。"
-        },
-        {
-          "error_type": "selection_error",
-          "dialog_id": "220640150",
-          "turn_id": 0,
-          "user": "您好，能帮忙清理一下C盘嘛？",
-          "golden_response": "您好可以参考这个案例操作看下呢 [案例链接: KT00000632]。",
-          "golden_cases": [
-            "KT00000632"
-          ],
-          "predicted_cases": [
-            "KT00214737"
-          ],
-          "retrieved_cases": [
-            "KT00000632",
-            "KT00136967",
-            "KT00186797",
-            "KT00013762",
-            "KT00214737"
-          ],
-          "golden_ranks": {
-            "KT00000632": 1
-          },
-          "query": {
-            "query_mode": "rewrite",
-            "query_text": "C盘清理方法",
-            "reason": "用户提出了一个新的IT问题，请求帮助清理C盘。"
-          },
-          "trigger": {
-            "trigger": true,
-            "evidence_mode": "retrieve_new_evidence",
-            "reason": "当前没有可复用案例"
-          },
-          "topic_structure": {
-            "query": "C盘清理方法",
-            "topic": "C盘清理方法",
-            "case_ids": [
-              "KT00000632",
-              "KT00136967",
-              "KT00186797",
-              "KT00013762",
-              "KT00214737"
-            ],
-            "leaf": false,
-            "children": [
-              {
-                "topic": "手动清理方法",
-                "case_ids": [
-                  "KT00000632",
-                  "KT00136967"
-                ],
-                "leaf": false,
-                "children": [
-                  {
-                    "topic": "系统临时文件及虚拟内存相关清理",
-                    "case_ids": [
-                      "KT00000632"
-                    ],
-                    "leaf": true,
-                    "children": [],
-                    "case_id": "KT00000632"
-                  },
-                  {
-                    "topic": "WinSxs目录及大文件扫描工具清理",
-                    "case_ids": [
-                      "KT00136967"
-                    ],
-                    "leaf": true,
-                    "children": [],
-                    "case_id": "KT00136967"
-                  }
-                ],
-                "dimension": "清理对象",
-                "split_status": "valid"
-              },
-              {
-                "topic": "工具自动清理方法",
-                "case_ids": [
-                  "KT00186797",
-                  "KT00214737"
-                ],
-                "leaf": false,
-                "children": [
-                  {
-                    "topic": "使用 CleanSystemDiskTool 工具",
-                    "case_ids": [
-                      "KT00186797"
-                    ],
-                    "leaf": true,
-                    "children": [],
-                    "case_id": "KT00186797"
-                  },
-                  {
-                    "topic": "使用 DMate 工具",
-                    "case_ids": [
-                      "KT00214737"
-                    ],
-                    "leaf": true,
-                    "children": [],
-                    "case_id": "KT00214737"
-                  }
-                ],
-                "dimension": "使用的清理工具",
-                "split_status": "valid"
-              },
-              {
-                "topic": "扩容与系统优化建议",
-                "case_ids": [
-                  "KT00013762"
-                ],
-                "leaf": true,
-                "children": [],
-                "case_id": "KT00013762"
-              }
-            ],
-            "dimension": "清理方法类型",
-            "split_status": "valid"
-          },
-          "policy": {
-            "label": "CaseRecommendation",
-            "information": {
-              "case_id": "KT00214737"
-            },
-            "reason": "用户请求C盘清理方法，案例KT00214737提供了包含Win11的优化清理操作指导，并支持工具自动清理方式，是最直接匹配的整体解决方案。"
-          },
-          "response": "您好，可以使用DMate工具来清理C盘空间。具体操作如下：\n\n1. 通过iDesk软件市场搜索并下载安装DMate。\n2. 打开DMate，点击“设备状态”-“优化清理”。\n3. 可选择一键释放全部空间，或逐项清理临时文件、迁移个人文件、清理回收站等。\n\n详细步骤可参考案例 [KT00214737]《C盘优化清理操作指导（包含win11）》。"
-        }
-      ],
-      "unknown_error": []
+## Role
+
+你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
+
+你的任务是：在已有 Topic Structure 的当前节点下，根据当前 Query 和 Cases，继续向下生成一层 Topic 划分。
+
+你每次只生成当前节点的直接下一层结构，不生成完整 Topic Tree。
+
+⸻
+
+## Objective
+
+根据 query、parent_path 和当前 cases，识别这些 Cases 在当前语义范围内最主要、最自然的下一层差异，并形成一层清晰的 Case Partition。
+
+Topic Structure 用于表示：
+
+不同 Cases 围绕当前 Query 存在哪些层级语义差异。
+
+它组织的是 Cases 之间的差异，而不是单个 Case 内部的知识结构。
+
+一个有效的下一层结构应当能够清楚回答：
+
+“当前这些 Cases 是在哪一个具体方面存在差异？”
+
+⸻
+
+## Input
+
+输入包含以下字段：
+
+### 1. query
+
+当前用户问题对应的检索 Query。
+
+query 是整个 Topic Structure 的全局语义 Anchor。
+
+### 2. parent_path
+
+已有 Topic Structure 中，从上层到当前节点的完整 Topic Path。
+
+例如：
+
+["登录场景", "Windows 登录", "密码问题"]
+
+最后一个 Topic 表示当前需要继续细化的节点。
+
+第一层划分时，parent_path 可以为空。
+
+query 和 parent_path 共同限定当前层的语义范围。
+
+### 3. depth
+
+当前 Topic Structure 的递归深度。
+
+### 4. cases
+
+当前节点下需要进一步区分的 Cases。
+
+每个 Case 包含：
+
+* case_id
+* title
+* keywords
+* content
+
+生成 Topic 划分时综合使用 Case 中提供的信息。
+
+⸻
+
+## Decision Space
+
+每次只判断当前节点是否存在一个合理的下一层 Case Partition。
+
+如果存在，则生成：
+
+Parent → Dimension → Sibling Topics → Case Assignments
+
+其中：
+
+### Dimension
+
+Dimension 表示当前 Cases 之间一个共同的、可比较的语义属性。
+
+它回答：
+
+“这些 Cases 是在哪个具体方面不同？”
+
+例如：
+
+* 功能目标
+* 问题类型
+* 适用平台
+* 操作对象
+* 使用场景
+* 处理方式
+* 故障表现
+
+这些只是示例，不构成固定的 Dimension 集合。
+
+### Sibling Topics
+
+Sibling Topics 是同一个 Dimension 下不同的语义取值。
+
+例如：
+
+Dimension = 操作对象
+
+可以形成：
+
+* 消息
+* 图片
+* 文件
+
+Dimension = 适用平台
+
+可以形成：
+
+* Windows
+* macOS
+* 鸿蒙
+
+所有 Sibling Topics 必须能够自然地回答同一个 Dimension 所提出的问题。
+
+### Case Assignments
+
+根据 Sibling Topics，为每个 Case 指定其唯一所属的 Topic。
+
+如果当前 Cases 之间不存在可靠、自然的下一层划分，则输出：
+
+split = false
+
+⸻
+
+## Decision Process
+
+### Step 1: Anchor
+
+首先根据 query 和 parent_path 确定当前节点的语义范围。
+
+当前划分必须：
+
+* 围绕 Query 的核心问题；
+* 是当前 Topic Path 的自然下一层细化；
+* 只处理当前 Cases 之间尚未区分的差异；
+* 不重复上层已经完成的划分。
+
+不要因为某个 Case 包含大量细节，就被与当前语义范围无关的信息带离当前 Topic。
+
+⸻
+
+### Step 2: Compare Cases
+
+逐个比较当前 Cases，识别真正存在于 Cases 之间的语义差异。
+
+重点判断：
+
+“Case A、Case B、Case C 解决的问题究竟在哪些方面不同？”
+
+而不是：
+
+“每个 Case 分别包含哪些内容？”
+
+候选差异必须能够作为多个 Cases 之间的共同比较属性。
+
+如果一个所谓的差异只是在描述某一个 Case 的内部内容，则不适合作为 Dimension。
+
+⸻
+
+### Step 3: Select the Dimension
+
+从 Case-level Differences 中选择当前层最自然的一个 Dimension。
+
+一个好的 Dimension 必须同时满足：
+
+#### 1. Query / Path Alignment
+
+Dimension 与当前 Query 和 parent_path 直接相关。
+
+它应当是当前节点继续向下时自然出现的语义差异，而不是被 Case 中次要细节带出的属性。
+
+#### 2. Natural Semantic Progression
+
+Dimension 应处于当前节点自然的下一层。
+
+整体结构应保持：
+
+粗粒度 → 中粒度 → 细粒度
+
+不要跳过明显的高层差异，直接使用过细的 Case 细节进行划分。
+
+#### 3. Semantic Specificity
+
+Dimension 必须明确指出：
+
+“Cases 是在哪一个具体语义属性上进行比较。”
+
+仅看到 Dimension 名称，就应该能够理解当前 Cases 的比较依据，而不需要依赖 Sibling Topics 才能猜测它的含义。
+
+优先使用自然、明确的语义属性名称，例如：
+
+* 功能目标
+* 适用平台
+* 问题类型
+* 操作对象
+* 使用场景
+* 处理方式
+
+避免使用语义边界模糊、需要进一步解释才能理解比较依据的名称，例如：
+
+* 功能差异
+* 相关类型
+* 使用方式
+* 设置层级
+* 场景差异
+* 其他差异
+
+除非这些名称在当前语境中本身已经具有明确、具体的含义。
+
+如果看到 Dimension 后仍然需要追问：
+
+“具体是哪个方面？”
+
+说明这个 Dimension 太模糊，应继续寻找更明确的语义属性。
+
+#### 4. Faithful Case Partition
+
+Dimension 必须来自 Cases 实际表达的差异，并能够形成可靠的 Case Groups。
+
+不能为了形成分类而：
+
+* 添加 Cases 中不存在的条件；
+* 推断未明确表达的适用范围；
+* 人为制造相反属性；
+* 强行制造不存在的差异。
+
+#### 5. Diversity
+
+只有在前面的条件都满足且多个 Dimension 同样合理时，才优先选择能够更有效地区分当前 Cases 的 Dimension。
+
+Diversity 不能优先于语义自然性和准确性。
+
+⸻
+
+### Step 4: Form Sibling Topics
+
+确定 Dimension 后，根据该 Dimension 为当前 Cases 形成 Sibling Topics。
+
+所有 Sibling Topics 必须：
+
+* 属于同一个 Dimension；
+* 处于相近的抽象层级；
+* 语义边界清楚；
+* 能够作为该 Dimension 的自然取值。
+
+可以进行一个简单检查：
+
+Dimension = X
+
+Topic A / Topic B / Topic C 是否都是在回答：
+
+“这个 Case 的 X 是什么？”
+
+如果不是，则说明 Dimension 或 Sibling Topics 不一致，需要重新选择。
+
+不要在同一层混合不同性质的分类依据。
+
+⸻
+
+### Step 5: Assign Cases
+
+按照输入 Cases 逐个进行 Assignment。
+
+每个 Case 必须且只能属于一个 Sibling Topic。
+
+不得：
+
+* 遗漏 Case；
+* 重复 Case；
+* 新增 Case；
+* 将同一个 Case 同时分配到多个 Topic。
+
+如果选定的 Dimension 会使某个 Case 自然属于多个 Sibling Topics，说明该 Dimension 不适合作为 Case Partition。
+
+此时应重新选择其他 Dimension。
+
+如果不存在更合适的 Dimension，则输出 split = false。
+
+完成当前层划分后停止，不继续向下生成结构。
+
+⸻
+
+## Core Constraints
+
+### 1. Case-level Difference
+
+Topic Structure 描述的是 Cases 之间的差异。
+
+不要把单个 Case 内部包含的：
+
+* 多个步骤
+* 多个设置项
+* 多个操作位置
+* 多个结果
+* 多个功能描述
+
+直接展开成 Sibling Topics。
+
+### 2. Single Semantic Axis
+
+每层只能使用一个 Dimension。
+
+Sibling Topics 必须全部是该 Dimension 下的并列语义取值。
+
+### 3. Complete and Exclusive Assignment
+
+每个输入 Case 必须出现且只能出现一次。
+
+### 4. Faithfulness
+
+所有 Dimension、Topic 和 Assignment 必须有当前 Cases 的实际内容支持。
+
+### 5. Stop When Necessary
+
+Topic Structure 不要求为了形成更深的树而持续划分。
+
+如果当前 Cases 已经不存在一个自然、明确、可靠的共同比较维度，应输出 split = false。
+
+一个不自然的划分比停止划分更差。
+
+### 6. Functional Boundary
+
+Topic Structure 只表示：
+
+Cases 之间有哪些层级语义差异。
+
+它不判断：
+
+* 用户属于哪个 Sibling Topic；
+* 用户需要确认什么；
+* 应该询问用户什么；
+* 哪个 Case 应该被推荐；
+* Evidence 是否充分；
+* 下一步采取什么 Policy；
+* 应该如何回复用户。
+
+这些判断由其他模块完成。
+
+### 7. One-level Boundary
+
+每次只生成当前节点的直接下一层结构。
+
+如果某个 Sibling Topic 下仍包含多个 Cases，也不要继续生成其子结构。
+
+后续递归由外部程序完成。
+
+⸻
+
+## Output Contract
+
+只输出合法 JSON，不输出任何额外内容。
+
+### 存在合理划分时
+
+{
+  "split": true,
+  "dimension": "当前层用于区分 Cases 的明确语义维度",
+  "assignments": [
+    {
+      "case_id": "KTxxxx",
+      "topic": "该 Case 所属的 Sibling Topic"
+    },
+    {
+      "case_id": "KTxxxx",
+      "topic": "该 Case 所属的 Sibling Topic"
     }
-  },
+  ]
+}
+
+必须满足：
+
+* split = true；
+* dimension 只表示一个明确的语义属性；
+* 相同 topic 表示 Cases 属于同一个 Case Group；
+* 不同 topic 表示同一 Dimension 下不同的 Sibling Topics；
+* 最终至少形成两个不同的 Sibling Topics；
+* 每个输入 case_id 必须出现且只能出现一次；
+* 不得遗漏或新增 case_id；
+* 不输出 children；
+* 不输出嵌套结构；
+* 不生成当前层以下的 Topic Structure。
+
+### 当前不存在合理划分时
+
+{
+  "split": false,
+  "dimension": "",
+  "assignments": []
+}
+
+只有当当前 Cases 之间不存在可靠、自然且符合当前 Query / Path 的下一层 Case-level Difference 时，才输出 split = false。
+
+不要为了继续生成 Topic Structure 而强行制造差异。
