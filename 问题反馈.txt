@@ -1,1050 +1,851 @@
-CSS = r"""
-:root {
-    --bg: #f5f7fb;
-    --panel: #ffffff;
-    --line: #e4e9f0;
-    --soft-line: #edf1f5;
+from __future__ import annotations
 
-    --text: #101828;
-    --text2: #344054;
-    --muted: #667085;
+import sys
+import uuid
+from pathlib import Path
 
-    --blue: #2563eb;
-    --blue-soft: #eff6ff;
+import gradio as gr
 
-    --green: #16a34a;
-    --green-soft: #effdf3;
 
-    --gray-soft: #f2f4f7;
+# ============================================================
+# Project Path
+# ============================================================
 
-    --shadow: 0 6px 22px rgba(15, 23, 42, 0.055);
-}
+PROJECT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = PROJECT_DIR.parent
 
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-/* =========================================================
-   GLOBAL
-========================================================= */
 
-html,
-body {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: 100% !important;
-    min-height: 100% !important;
+from Agent.agentv2_3 import MemoryAgent
+from project.styles import CSS
+from project.ui import (
+    render_header,
+    render_session,
+    render_chat,
+    render_decision,
+    render_trace,
+    render_prefix_result,
+)
 
-    background: var(--bg) !important;
 
-    font-size: 18px !important;
-}
+# ============================================================
+# Session
+# ============================================================
 
+def new_session():
+    return {
+        "session_id": "web_" + uuid.uuid4().hex[:10],
 
-.gradio-container {
-    width: 100% !important;
-    max-width: none !important;
+        "agent": MemoryAgent(
+            mode="single",
+            show_state=False,
+        ),
 
-    margin: 0 !important;
-
-    padding:
-        18px
-        clamp(22px, 2.3vw, 44px)
-        24px
-        clamp(22px, 2.3vw, 44px)
-        !important;
-}
-
-
-/* 尽量去掉 Gradio 默认的额外边框 */
-
-.gradio-container .block {
-    box-shadow: none;
-}
-
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-.hero,
-.app-header {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background:
-        linear-gradient(
-            135deg,
-            #ffffff,
-            #f8faff
-        );
-
-    border: 1px solid var(--line);
-
-    border-radius: 18px;
-
-    padding: 18px 24px;
-
-    margin-bottom: 16px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: space-between;
-
-    box-shadow: var(--shadow);
-}
-
-
-.header-eyebrow,
-.hero-tag {
-    color: var(--blue);
-
-    font-size: 14px;
-
-    font-weight: 750;
-
-    margin-bottom: 5px;
-}
-
-
-.header-title,
-.hero-title {
-    font-size: 32px;
-
-    line-height: 1.2;
-
-    font-weight: 800;
-
-    color: var(--text);
-}
-
-
-.header-desc,
-.hero-desc {
-    margin-top: 6px;
-
-    color: var(--muted);
-
-    font-size: 15px;
-
-    line-height: 1.5;
-}
-
-
-.online-status,
-.hero-status {
-    display: flex;
-
-    align-items: center;
-
-    gap: 7px;
-
-    font-size: 15px;
-
-    color: var(--text2);
-
-    white-space: nowrap;
-}
-
-
-.status-dot {
-    width: 9px;
-    height: 9px;
-
-    display: inline-block;
-
-    border-radius: 50%;
-
-    background: #22c55e;
-
-    margin-right: 5px;
-}
-
-
-/* =========================================================
-   COLUMN HEADINGS
-========================================================= */
-
-.column-title,
-.panel-title {
-    font-size: 21px;
-
-    line-height: 1.3;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 3px;
-}
-
-
-.column-subtitle {
-    font-size: 14px;
-
-    color: var(--muted);
-
-    margin-bottom: 9px;
-}
-
-
-/* =========================================================
-   MAIN PANELS
-========================================================= */
-
-.chat-panel,
-.state-panel,
-.history-panel {
-    width: 100%;
-
-    box-sizing: border-box;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 16px;
-
-    box-shadow: var(--shadow);
-}
-
-
-/*
-   关键：
-   不再写死 650 / 700 px。
-   根据屏幕高度自动计算。
-*/
-
-.chat-panel {
-    height: clamp(
-        440px,
-        calc(100vh - 330px),
-        650px
-    );
-
-    overflow-y: auto;
-
-    padding: 18px 20px;
-}
-
-
-.state-panel,
-.history-panel {
-    height: clamp(
-        440px,
-        calc(100vh - 270px),
-        700px
-    );
-
-    overflow-y: auto;
-
-    padding: 16px;
-}
-
-
-/* =========================================================
-   EMPTY CHAT
-========================================================= */
-
-.empty-chat {
-    min-height: 400px;
-    height: 100%;
-
-    display: flex;
-
-    flex-direction: column;
-
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.empty-icon {
-    width: 58px;
-    height: 58px;
-
-    border-radius: 17px;
-
-    background: var(--blue-soft);
-
-    color: var(--blue);
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    font-size: 27px;
-
-    margin-bottom: 15px;
-}
-
-
-.empty-title {
-    font-size: 22px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 8px;
-}
-
-
-.empty-desc {
-    max-width: 520px;
-
-    line-height: 1.65;
-
-    font-size: 15px;
-}
-
-
-/* =========================================================
-   CHAT
-========================================================= */
-
-.chat-scroll {
-    display: flex;
-
-    flex-direction: column;
-
-    gap: 15px;
-}
-
-
-.message-row {
-    display: flex;
-
-    gap: 10px;
-
-    align-items: flex-start;
-}
-
-
-.user-row {
-    justify-content: flex-end;
-}
-
-
-.avatar {
-    width: 38px;
-    height: 38px;
-
-    flex-shrink: 0;
-
-    border-radius: 50%;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    font-size: 13px;
-
-    font-weight: 800;
-}
-
-
-.user-avatar {
-    background: #dbeafe;
-
-    color: #1d4ed8;
-}
-
-
-.agent-avatar {
-    background: #e9edf3;
-
-    color: #344054;
-}
-
-
-/*
-   原来 76% 太宽。
-   现在限制气泡宽度，让“框”和文字比例更正常。
-*/
-
-.message-bubble {
-    width: fit-content;
-
-    max-width: min(68%, 720px);
-
-    padding: 11px 15px;
-
-    border-radius: 16px;
-
-    font-size: 18px;
-
-    line-height: 1.65;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-
-.user-message {
-    background: var(--blue);
-
-    color: white;
-
-    border-bottom-right-radius: 5px;
-}
-
-
-.agent-message {
-    background: #f8fafc;
-
-    color: var(--text);
-
-    border: 1px solid var(--soft-line);
-
-    border-bottom-left-radius: 5px;
-}
-
-
-.message-role {
-    font-size: 13px;
-
-    font-weight: 750;
-
-    opacity: .72;
-
-    margin-bottom: 3px;
-}
-
-
-/* =========================================================
-   INPUT
-========================================================= */
-
-/*
-   输入框不要再占太多纵向空间。
-*/
-
-.chat-input textarea,
-textarea {
-    font-size: 18px !important;
-
-    line-height: 1.55 !important;
-}
-
-
-.chat-input textarea {
-    min-height: 54px !important;
-
-    max-height: 110px !important;
-
-    padding: 12px 14px !important;
-}
-
-
-.chat-input {
-    margin-top: 8px !important;
-}
-
-
-/* Button */
-
-button {
-    font-size: 15px !important;
-
-    font-weight: 700 !important;
-}
-
-
-button.primary {
-    min-height: 48px !important;
-}
-
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-.session-bar,
-.session-inline {
-    display: flex;
-
-    align-items: center;
-
-    gap: 18px;
-
-    background: white;
-
-    border: 1px solid var(--line);
-
-    border-radius: 12px;
-
-    padding: 10px 14px;
-
-    margin-bottom: 10px;
-
-    font-size: 14px;
-
-    color: var(--muted);
-}
-
-
-.session-bar b,
-.session-inline b {
-    color: var(--text2);
-
-    margin-left: 4px;
-}
-
-
-/* =========================================================
-   DECISION SECTIONS
-========================================================= */
-
-.state-section {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 14px;
-
-    padding: 14px 15px;
-
-    margin-bottom: 11px;
-
-    background: #fff;
-}
-
-
-.section-heading,
-.section-title {
-    font-size: 17px;
-
-    font-weight: 800;
-
-    color: var(--text);
-
-    margin-bottom: 11px;
-}
-
-
-.decision-row,
-.kv-row {
-    display: flex;
-
-    justify-content: space-between;
-
-    align-items: center;
-
-    gap: 16px;
-
-    margin: 7px 0;
-
-    font-size: 15px;
-
-    color: var(--muted);
-}
-
-
-.decision-text,
-.state-text {
-    background: #f8fafc;
-
-    padding: 10px 12px;
-
-    border-radius: 9px;
-
-    margin-top: 8px;
-
-    font-size: 15px;
-
-    line-height: 1.55;
-
-    color: var(--text2);
-}
-
-
-.sub-label,
-.state-label {
-    font-size: 13px;
-
-    color: var(--muted);
-
-    margin-top: 10px;
-
-    margin-bottom: 5px;
-
-    font-weight: 650;
-}
-
-
-/* =========================================================
-   BADGES
-========================================================= */
-
-.badge {
-    display: inline-flex;
-
-    align-items: center;
-
-    padding: 4px 9px;
-
-    border-radius: 999px;
-
-    font-size: 13px;
-
-    line-height: 1.3;
-
-    font-weight: 750;
-}
-
-
-.badge-blue {
-    background: var(--blue-soft);
-
-    color: #1d4ed8;
-}
-
-
-.badge-green {
-    background: var(--green-soft);
-
-    color: #15803d;
-}
-
-
-.badge-gray,
-.badge-default {
-    background: var(--gray-soft);
-
-    color: #475467;
-}
-
-
-/* =========================================================
-   CASE
-========================================================= */
-
-.case-item {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 10px;
-
-    padding: 9px 11px;
-
-    margin-bottom: 7px;
-
-    background: #fafbfc;
-}
-
-
-.case-id {
-    color: var(--blue);
-
-    font-size: 13px;
-
-    font-weight: 750;
-}
-
-
-.case-title {
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-
-    margin-top: 3px;
-}
-
-
-.empty-small {
-    padding: 10px 11px;
-
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    color: var(--muted);
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   TOPIC TREE
-========================================================= */
-
-.topic-tree {
-    padding: 4px 0;
-}
-
-
-.tree-node {
-    position: relative;
-
-    padding: 6px 7px;
-
-    font-size: 14px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-}
-
-
-.tree-dot {
-    display: inline-block;
-
-    width: 7px;
-    height: 7px;
-
-    background: #94a3b8;
-
-    border-radius: 50%;
-
-    margin-right: 7px;
-}
-
-
-.tree-topic {
-    font-weight: 650;
-}
-
-
-.tree-dimension {
-    margin-left: 7px;
-
-    color: var(--blue);
-
-    font-size: 12px;
-
-    background: var(--blue-soft);
-
-    padding: 2px 6px;
-
-    border-radius: 5px;
-}
-
-
-.tree-case {
-    margin-left: 7px;
-
-    color: var(--muted);
-
-    font-size: 12px;
-}
-
-
-.tree-leaf .tree-dot {
-    background: #22c55e;
-}
-
-
-/* =========================================================
-   JSON / DETAIL
-========================================================= */
-
-.json-small,
-.json-view {
-    background: #f8fafc;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 13px;
-
-    line-height: 1.55;
-
-    white-space: pre-wrap;
-
-    overflow-wrap: anywhere;
-}
-
-
-/* =========================================================
-   LATENCY
-========================================================= */
-
-.latency-total {
-    font-size: 31px;
-
-    line-height: 1.2;
-
-    font-weight: 800;
-
-    color: var(--blue);
-
-    margin-bottom: 11px;
-}
-
-
-.latency-grid {
-    display: grid;
-
-    grid-template-columns:
-        repeat(2, minmax(0, 1fr));
-
-    gap: 7px;
-}
-
-
-.latency-grid > div {
-    background: #f8fafc;
-
-    border-radius: 9px;
-
-    padding: 9px 10px;
-
-    display: flex;
-
-    justify-content: space-between;
-
-    gap: 10px;
-
-    font-size: 13px;
-}
-
-
-.latency-grid span {
-    color: var(--muted);
-}
-
-
-.latency-grid b {
-    color: var(--text2);
-}
-
-
-/* =========================================================
-   TRACE
-========================================================= */
-
-.history-item,
-.trace-item {
-    border: 1px solid var(--soft-line);
-
-    border-radius: 12px;
-
-    padding: 12px 13px;
-
-    margin-bottom: 9px;
-
-    background: white;
-}
-
-
-.history-head,
-.trace-head {
-    display: flex;
-
-    justify-content: space-between;
-
-    gap: 10px;
-
-    font-size: 13px;
-
-    color: var(--muted);
-}
-
-
-.history-head b,
-.trace-head b {
-    color: var(--text);
-}
-
-
-.history-user,
-.trace-user {
-    font-size: 15px;
-
-    line-height: 1.5;
-
-    color: var(--text2);
-
-    margin: 8px 0;
-}
-
-
-.history-flow,
-.trace-flow {
-    display: flex;
-
-    align-items: center;
-
-    gap: 5px;
-
-    flex-wrap: wrap;
-}
-
-
-/* =========================================================
-   EMPTY STATE
-========================================================= */
-
-.state-empty {
-    min-height: 350px;
-
-    display: flex;
-
-    align-items: center;
-    justify-content: center;
-
-    flex-direction: column;
-
-    text-align: center;
-
-    color: var(--muted);
-}
-
-
-.state-empty-title {
-    color: var(--text);
-
-    font-size: 18px;
-
-    font-weight: 800;
-
-    margin-bottom: 7px;
-}
-
-
-.state-empty-desc {
-    font-size: 14px;
-
-    line-height: 1.6;
-}
-
-
-/* =========================================================
-   ERROR
-========================================================= */
-
-.error-card {
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 13px;
-
-    border-radius: 11px;
-
-    font-size: 14px;
-}
-
-
-.error-title {
-    font-weight: 800;
-
-    margin-bottom: 5px;
-}
-
-
-.prefix-success {
-    background: #effdf3;
-
-    border: 1px solid #abefc6;
-
-    color: #027a48;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 14px;
-}
-
-
-.prefix-error {
-    background: #fff1f3;
-
-    border: 1px solid #fecdd6;
-
-    color: #be123c;
-
-    padding: 10px;
-
-    border-radius: 9px;
-
-    font-size: 14px;
-}
-
-
-/* =========================================================
-   GRADIO CLEANUP
-========================================================= */
-
-footer {
-    display: none !important;
-}
-
-
-/*
-   避免一些 Gradio container 自己制造巨大 padding
-*/
-
-.gradio-container > .main {
-    width: 100% !important;
-
-    max-width: none !important;
-}
-
-
-/* Tabs */
-
-.tabs {
-    font-size: 15px !important;
-}
-
-
-/* =========================================================
-   RESPONSIVE
-========================================================= */
-
-@media (max-width: 1100px) {
-
-    .gradio-container {
-        padding: 14px 18px 20px 18px !important;
+        "history": [],
+        "trace": [],
+        "turns": 0,
+        "mode": "user",
     }
 
-    .hero,
-    .app-header {
-        flex-direction: column;
 
-        align-items: flex-start;
+# ============================================================
+# Agent Snapshot
+# ============================================================
 
-        gap: 10px;
+def get_last_run(agent):
+    """
+    MemoryAgent.reply() 当前实际暴露的是：
+
+    agent.last_turn_state = {
+        "query": ...,
+        "trigger": ...,
+        "evidence": ...,
+        "policy": ...,
+        "response": ...,
+        "latency": ...
     }
 
-    .header-title,
-    .hero-title {
-        font-size: 28px;
+    UI 内部统一转换成：
+        query_state
+        trigger_state
+        evidence_state
+        policy_state
+        response
+        latency
+    """
+
+    turn_state = getattr(
+        agent,
+        "last_turn_state",
+        None,
+    )
+
+    if turn_state:
+        return {
+            "query_state": turn_state.get(
+                "query",
+                {},
+            ) or {},
+
+            "trigger_state": turn_state.get(
+                "trigger",
+                {},
+            ) or {},
+
+            "evidence_state": turn_state.get(
+                "evidence",
+                {},
+            ) or {},
+
+            "policy_state": turn_state.get(
+                "policy",
+                {},
+            ) or {},
+
+            "response": turn_state.get(
+                "response",
+                "",
+            ),
+
+            "latency": turn_state.get(
+                "latency",
+                {},
+            ) or {},
+        }
+
+    # fallback
+    memory = getattr(
+        agent,
+        "memory",
+        {},
+    ) or {}
+
+    return {
+        "query_state": {},
+        "trigger_state": {},
+
+        "evidence_state": memory.get(
+            "evidence_state",
+            {},
+        ) or {},
+
+        "policy_state": (
+            memory
+            .get("interaction_state", {})
+            .get("last_policy", {})
+            or {}
+        ),
+
+        "response": "",
+        "latency": {},
     }
 
-    .message-bubble {
-        max-width: 82%;
-    }
 
-}
+# ============================================================
+# History Parser
+# ============================================================
+
+def parse_prefix(text):
+    history = []
+
+    if not text:
+        return history
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("用户:"):
+            content = line.split(
+                "用户:",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "user",
+                "content": content,
+            })
+
+        elif line.startswith("用户："):
+            content = line.split(
+                "用户：",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "user",
+                "content": content,
+            })
+
+        elif line.startswith("客服:"):
+            content = line.split(
+                "客服:",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "assistant",
+                "content": content,
+            })
+
+        elif line.startswith("客服："):
+            content = line.split(
+                "客服：",
+                1,
+            )[1].strip()
+
+            history.append({
+                "role": "assistant",
+                "content": content,
+            })
+
+    return history
 
 
-@media (max-width: 700px) {
+# ============================================================
+# Render Helpers
+# ============================================================
 
-    .gradio-container {
-        padding: 10px !important;
-    }
+def session_html(state):
+    return render_session(
+        state["session_id"],
+        state["turns"],
+    )
 
-    .message-bubble {
-        max-width: 88%;
 
-        font-size: 17px;
-    }
+def developer_chat_html(state):
+    return render_chat(
+        state["history"],
+        user_mode=False,
+    )
 
-    .latency-grid {
-        grid-template-columns: 1fr;
-    }
 
-}
-"""
+def user_chat_html(state):
+    return render_chat(
+        state["history"],
+        user_mode=True,
+    )
+
+
+def current_decision_html(state):
+    if not state["trace"]:
+        return render_decision(None)
+
+    return render_decision(
+        state["trace"][-1]
+    )
+
+
+def trace_html(state):
+    return render_trace(
+        state["trace"]
+    )
+
+
+# ============================================================
+# Chat
+# ============================================================
+
+def chat(user_input, state):
+
+    if state is None:
+        state = new_session()
+
+    user_input = str(
+        user_input or ""
+    ).strip()
+
+    if not user_input:
+        return (
+            "",
+            user_chat_html(state),
+            developer_chat_html(state),
+            current_decision_html(state),
+            trace_html(state),
+            session_html(state),
+            state,
+        )
+
+    history = list(
+        state["history"]
+    )
+
+    history.append({
+        "role": "user",
+        "content": user_input,
+    })
+
+    try:
+        response = state["agent"].reply(
+            history
+        )
+
+    except Exception as exc:
+        response = (
+            "Agent 执行失败："
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    response = str(
+        response or ""
+    ).strip()
+
+    history.append({
+        "role": "assistant",
+        "content": response,
+    })
+
+    state["history"] = history
+    state["turns"] += 1
+
+    snapshot = get_last_run(
+        state["agent"]
+    )
+
+    snapshot = dict(snapshot)
+
+    snapshot["turn"] = state["turns"]
+    snapshot["user"] = user_input
+    snapshot["response"] = response
+
+    state["trace"].append(
+        snapshot
+    )
+
+    return (
+        "",
+        user_chat_html(state),
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+    )
+
+
+# ============================================================
+# Reset
+# ============================================================
+
+def reset_chat():
+
+    state = new_session()
+
+    return (
+        "",
+        user_chat_html(state),
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+        "",
+    )
+
+
+# ============================================================
+# Load Prefix
+# ============================================================
+
+def load_prefix(prefix_text, state):
+
+    if state is None:
+        state = new_session()
+
+    history = parse_prefix(
+        prefix_text
+    )
+
+    if not history:
+        return (
+            developer_chat_html(state),
+            current_decision_html(state),
+            trace_html(state),
+            session_html(state),
+            state,
+            render_prefix_result(
+                False,
+                "没有识别到有效对话。",
+            ),
+        )
+
+    state["agent"] = MemoryAgent(
+        mode="single",
+        show_state=False,
+    )
+
+    state["history"] = history
+    state["trace"] = []
+
+    state["turns"] = sum(
+        1
+        for item in history
+        if item.get("role") == "user"
+    )
+
+    return (
+        developer_chat_html(state),
+        current_decision_html(state),
+        trace_html(state),
+        session_html(state),
+        state,
+        render_prefix_result(
+            True,
+            f"已加载 {len(history)} 条历史消息。",
+        ),
+    )
+
+
+# ============================================================
+# View Switching
+# ============================================================
+
+def show_user_view():
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+
+        gr.update(
+            elem_classes=["mode-active"]
+        ),
+
+        gr.update(
+            elem_classes=["mode-inactive"]
+        ),
+    )
+
+
+def show_developer_view():
+    return (
+        gr.update(visible=False),
+        gr.update(visible=True),
+
+        gr.update(
+            elem_classes=["mode-inactive"]
+        ),
+
+        gr.update(
+            elem_classes=["mode-active"]
+        ),
+    )
+
+
+# ============================================================
+# UI
+# ============================================================
+
+initial_state = new_session()
+
+
+with gr.Blocks(
+    title="Huawei IT Support Agent",
+    css=CSS,
+    theme=gr.themes.Soft(),
+    fill_width=True,
+) as demo:
+
+    session_state = gr.State(
+        initial_state
+    )
+
+    # ========================================================
+    # Header
+    # ========================================================
+
+    gr.HTML(
+        render_header(),
+        container=False,
+    )
+
+    # ========================================================
+    # Mode Switch
+    # ========================================================
+
+    with gr.Row(
+        elem_classes=["mode-switch"]
+    ):
+
+        user_mode_button = gr.Button(
+            "👤 用户界面",
+            variant="secondary",
+            elem_classes=["mode-active"],
+        )
+
+        developer_mode_button = gr.Button(
+            "</> 开发者界面",
+            variant="secondary",
+            elem_classes=["mode-inactive"],
+        )
+
+    # ========================================================
+    # USER VIEW
+    # ========================================================
+
+    with gr.Column(
+        visible=True,
+        elem_classes=["user-workspace"],
+    ) as user_view:
+
+        gr.HTML(
+            """
+            <div class="workspace-heading">
+                <div class="column-title">
+                    IT 智能客服
+                </div>
+
+                <div class="column-subtitle">
+                    Huawei IT Support
+                </div>
+            </div>
+            """,
+            container=False,
+        )
+
+        user_chat = gr.HTML(
+            user_chat_html(
+                initial_state
+            ),
+            container=False,
+            elem_classes=[
+                "chat-html",
+                "user-chat-html",
+            ],
+        )
+
+        with gr.Row(
+            elem_classes=["chat-input-row"]
+        ):
+
+            user_input = gr.Textbox(
+                placeholder="请输入您的 IT 问题...",
+                show_label=False,
+                lines=2,
+                max_lines=4,
+                elem_classes=["chat-input"],
+                scale=12,
+            )
+
+            user_send = gr.Button(
+                "发送",
+                variant="primary",
+                elem_classes=["send-button"],
+                scale=1,
+                min_width=110,
+            )
+
+    # ========================================================
+    # DEVELOPER VIEW
+    # ========================================================
+
+    with gr.Row(
+        visible=False,
+        elem_classes=["developer-workspace"],
+        equal_height=True,
+    ) as developer_view:
+
+        # ====================================================
+        # LEFT
+        # ====================================================
+
+        with gr.Column(
+            scale=56,
+            min_width=0,
+            elem_classes=["chat-column"],
+        ):
+
+            # -----------------------------------------------
+            # Conversation Header
+            # -----------------------------------------------
+
+            with gr.Row(
+                elem_classes=["panel-heading-row"]
+            ):
+
+                gr.HTML(
+                    """
+                    <div>
+                        <div class="column-title">
+                            Conversation
+                        </div>
+
+                        <div class="column-subtitle">
+                            Current dialogue
+                        </div>
+                    </div>
+                    """,
+                    container=False,
+                )
+
+                developer_session = gr.HTML(
+                    session_html(
+                        initial_state
+                    ),
+                    container=False,
+                    elem_classes=["session-html"],
+                )
+
+            # -----------------------------------------------
+            # Toolbar
+            # -----------------------------------------------
+
+            with gr.Row(
+                elem_classes=["chat-toolbar"]
+            ):
+
+                new_chat_button = gr.Button(
+                    "新建会话",
+                    size="sm",
+                    elem_classes=["new-chat-button"],
+                )
+
+            # -----------------------------------------------
+            # Conversation
+            # -----------------------------------------------
+
+            developer_chat = gr.HTML(
+                developer_chat_html(
+                    initial_state
+                ),
+                container=False,
+                elem_classes=[
+                    "chat-html",
+                    "developer-chat-html",
+                ],
+            )
+
+            # -----------------------------------------------
+            # Input
+            # -----------------------------------------------
+
+            with gr.Row(
+                elem_classes=["chat-input-row"]
+            ):
+
+                developer_input = gr.Textbox(
+                    placeholder="请输入 IT 问题...",
+                    show_label=False,
+                    lines=2,
+                    max_lines=4,
+                    elem_classes=["chat-input"],
+                    scale=12,
+                )
+
+                developer_send = gr.Button(
+                    "发送",
+                    variant="primary",
+                    elem_classes=["send-button"],
+                    scale=1,
+                    min_width=105,
+                )
+
+            # -----------------------------------------------
+            # History
+            # -----------------------------------------------
+
+            with gr.Accordion(
+                "加载已有对话",
+                open=False,
+                elem_classes=["history-loader"],
+            ):
+
+                prefix_text = gr.Textbox(
+                    lines=6,
+                    show_label=False,
+                    placeholder=(
+                        "用户: 我的 VPN 无法登录\n"
+                        "客服: 请问具体有什么提示？\n"
+                        "用户: 显示账号无权限"
+                    ),
+                )
+
+                load_button = gr.Button(
+                    "加载历史",
+                    size="sm",
+                )
+
+                prefix_result = gr.HTML(
+                    "",
+                    container=False,
+                    elem_classes=["prefix-area"],
+                )
+
+        # ====================================================
+        # RIGHT
+        # ====================================================
+
+        with gr.Column(
+            scale=44,
+            min_width=0,
+            elem_classes=["decision-column"],
+        ):
+
+            gr.HTML(
+                """
+                <div class="workspace-heading">
+                    <div class="column-title">
+                        Agent Decision
+                    </div>
+
+                    <div class="column-subtitle">
+                        Internal execution state
+                    </div>
+                </div>
+                """,
+                container=False,
+            )
+
+            with gr.Tabs(
+                elem_classes=["decision-tabs"]
+            ):
+
+                with gr.Tab(
+                    "当前决策"
+                ):
+
+                    decision_panel = gr.HTML(
+                        current_decision_html(
+                            initial_state
+                        ),
+                        container=False,
+                        elem_classes=["decision-html"],
+                    )
+
+                with gr.Tab(
+                    "运行轨迹"
+                ):
+
+                    trace_panel = gr.HTML(
+                        trace_html(
+                            initial_state
+                        ),
+                        container=False,
+                        elem_classes=["trace-html"],
+                    )
+
+    # ========================================================
+    # Events
+    # ========================================================
+
+    chat_outputs = [
+        user_input,
+        user_chat,
+        developer_chat,
+        decision_panel,
+        trace_panel,
+        developer_session,
+        session_state,
+    ]
+
+    user_send.click(
+        fn=chat,
+        inputs=[
+            user_input,
+            session_state,
+        ],
+        outputs=chat_outputs,
+        api_name="chat",
+    )
+
+    user_input.submit(
+        fn=chat,
+        inputs=[
+            user_input,
+            session_state,
+        ],
+        outputs=chat_outputs,
+    )
+
+    developer_chat_outputs = [
+        developer_input,
+        user_chat,
+        developer_chat,
+        decision_panel,
+        trace_panel,
+        developer_session,
+        session_state,
+    ]
+
+    developer_send.click(
+        fn=chat,
+        inputs=[
+            developer_input,
+            session_state,
+        ],
+        outputs=developer_chat_outputs,
+    )
+
+    developer_input.submit(
+        fn=chat,
+        inputs=[
+            developer_input,
+            session_state,
+        ],
+        outputs=developer_chat_outputs,
+    )
+
+    user_mode_button.click(
+        fn=show_user_view,
+        outputs=[
+            user_view,
+            developer_view,
+            user_mode_button,
+            developer_mode_button,
+        ],
+    )
+
+    developer_mode_button.click(
+        fn=show_developer_view,
+        outputs=[
+            user_view,
+            developer_view,
+            user_mode_button,
+            developer_mode_button,
+        ],
+    )
+
+    new_chat_button.click(
+        fn=reset_chat,
+        outputs=[
+            developer_input,
+            user_chat,
+            developer_chat,
+            decision_panel,
+            trace_panel,
+            developer_session,
+            session_state,
+            prefix_result,
+        ],
+    )
+
+    load_button.click(
+        fn=load_prefix,
+        inputs=[
+            prefix_text,
+            session_state,
+        ],
+        outputs=[
+            developer_chat,
+            decision_panel,
+            trace_panel,
+            developer_session,
+            session_state,
+            prefix_result,
+        ],
+    )
+
+
+# ============================================================
+# Launch
+# ============================================================
+
+if __name__ == "__main__":
+
+    demo.queue().launch(
+        server_name="0.0.0.0",
+        server_port=7866,
+        show_error=True,
+    )
