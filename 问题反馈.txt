@@ -9,7 +9,10 @@ from pathlib import Path
 # Config
 # ============================================================
 
-KNOWLEDGE_POLICY = {"ExplainedResponse", "CaseRecommendation"}
+KNOWLEDGE_POLICY = {
+    "ExplainedResponse",
+    "CaseRecommendation",
+}
 
 
 # ============================================================
@@ -30,14 +33,18 @@ def save_json(path, data):
             data,
             f,
             ensure_ascii=False,
-            indent=2
+            indent=2,
         )
 
 
 def extract_case_ids(text):
     if not text:
         return []
-    return re.findall(r"KT\d+", text)
+
+    return re.findall(
+        r"KT\d+",
+        text,
+    )
 
 
 def normalize_case_ids(value):
@@ -74,11 +81,10 @@ def get_policy_information(policy):
 
     information = policy.get("information")
 
-    return (
-        information
-        if isinstance(information, dict)
-        else {}
-    )
+    if isinstance(information, dict):
+        return information
+
+    return {}
 
 
 def get_pred_cases(policy):
@@ -94,23 +100,33 @@ def get_pred_cases(policy):
 
 
 def get_retrieved_case_ids(turn):
-    return [
-        str(case.get("case_id", "")).strip()
-        for case in turn.get("evidence", [])
-        if (
-            isinstance(case, dict)
-            and str(case.get("case_id", "")).strip()
-        )
-    ]
+    result = []
+
+    for case in turn.get("evidence", []):
+
+        if not isinstance(case, dict):
+            continue
+
+        case_id = str(
+            case.get("case_id", "")
+        ).strip()
+
+        if case_id:
+            result.append(case_id)
+
+    return result
 
 
-def get_case_rank(case_id, retrieved):
-    """
-    1-based rank.
-    None means the case is not retrieved.
-    """
+def get_case_rank(
+    case_id,
+    retrieved_cases,
+):
     try:
-        return retrieved.index(case_id) + 1
+        return (
+            retrieved_cases.index(case_id)
+            + 1
+        )
+
     except ValueError:
         return None
 
@@ -124,103 +140,110 @@ def rate(values):
 
 
 def counter_to_dict(counter):
-    """
-    按错误次数从高到低保存。
-    """
     return {
         key: value
-        for key, value in counter.most_common()
+        for key, value
+        in counter.most_common()
     }
 
+
+# ============================================================
+# Error Record
+# ============================================================
 
 def make_turn_record(
     dialog_id,
     turn,
-    golden_cases=None,
-    pred_cases=None,
-    retrieved_cases=None,
+    error_type=None,
 ):
-    """
-    保存一个足够完整的错误样本。
 
-    这里故意保留：
-    - user
-    - golden response
-    - query
-    - trigger
-    - retrieval
-    - topic structure
-    - policy
-    - response
-
-    方便之后不重新打开原始结果文件，
-    直接从 details.json 分析错误。
-    """
-
-    if golden_cases is None:
-        golden_cases = extract_case_ids(
-            turn.get("golden_response", "")
+    golden_cases = extract_case_ids(
+        turn.get(
+            "golden_response",
+            ""
         )
+    )
 
-    if pred_cases is None:
-        pred_cases = get_pred_cases(
-            turn.get("policy", {})
-        )
+    policy = turn.get(
+        "policy",
+        {}
+    )
 
-    if retrieved_cases is None:
-        retrieved_cases = get_retrieved_case_ids(turn)
+    pred_cases = get_pred_cases(
+        policy
+    )
+
+    retrieved_cases = (
+        get_retrieved_case_ids(turn)
+    )
 
     golden_ranks = {
-        case_id: get_case_rank(
-            case_id,
-            retrieved_cases
-        )
-        for case_id in golden_cases
+        case_id:
+            get_case_rank(
+                case_id,
+                retrieved_cases,
+            )
+        for case_id
+        in golden_cases
     }
 
     return {
-        "dialog_id": dialog_id,
-        "turn_id": turn.get("turn_id"),
+        "error_type":
+            error_type,
 
-        "user": turn.get("user", ""),
+        "dialog_id":
+            dialog_id,
 
-        "golden_response": turn.get(
-            "golden_response",
-            ""
-        ),
+        "turn_id":
+            turn.get("turn_id"),
 
-        "golden_cases": golden_cases,
+        "user":
+            turn.get("user", ""),
 
-        "predicted_cases": pred_cases,
+        "golden_response":
+            turn.get(
+                "golden_response",
+                ""
+            ),
 
-        "retrieved_cases": retrieved_cases,
+        "golden_cases":
+            golden_cases,
 
-        "golden_ranks": golden_ranks,
+        "predicted_cases":
+            pred_cases,
 
-        "query": turn.get(
-            "query",
-            {}
-        ),
+        "retrieved_cases":
+            retrieved_cases,
 
-        "trigger": turn.get(
-            "trigger",
-            {}
-        ),
+        "golden_ranks":
+            golden_ranks,
 
-        "topic_structure": turn.get(
-            "topic_structure",
-            {}
-        ),
+        "query":
+            turn.get(
+                "query",
+                {}
+            ),
 
-        "policy": turn.get(
-            "policy",
-            {}
-        ),
+        "trigger":
+            turn.get(
+                "trigger",
+                {}
+            ),
 
-        "response": turn.get(
-            "response",
-            {}
-        ),
+        "topic_structure":
+            turn.get(
+                "topic_structure",
+                {}
+            ),
+
+        "policy":
+            policy,
+
+        "response":
+            turn.get(
+                "response",
+                {}
+            ),
     }
 
 
@@ -228,10 +251,18 @@ def make_turn_record(
 # Case Turn Evaluation
 # ============================================================
 
-def evaluate_case_turn(data, details=None):
+def evaluate_case_turn(
+    data,
+    details=None,
+):
+
+    # --------------------------------------------------------
+    # Counts
+    # --------------------------------------------------------
+
     total_case_turn = 0
 
-    trigger_hit = 0
+    evidence_available = 0
 
     top5_hit = 0
     top3_hit = 0
@@ -239,6 +270,12 @@ def evaluate_case_turn(data, details=None):
 
     policy_hit = 0
     selection_hit = 0
+
+    final_correct = 0
+
+    # --------------------------------------------------------
+    # Loop
+    # --------------------------------------------------------
 
     for dialog_id, dialog in data.items():
 
@@ -251,191 +288,265 @@ def evaluate_case_turn(data, details=None):
                 )
             )
 
-            # ------------------------------------------------
-            # 只统计 Golden Response 中包含案例的轮次
-            # ------------------------------------------------
+            # =================================================
+            # 只看 Golden 需要推荐 Case 的轮次
+            # =================================================
 
             if not golden_cases:
                 continue
 
             total_case_turn += 1
 
-            # 保持原评估逻辑：
-            # 如果 Golden Response 中有多个 Case，
-            # 使用第一个。
+            # 保持原逻辑：
+            # 多个 Golden Case 时以第一个为准
             golden_case = golden_cases[0]
+
+            # -------------------------------------------------
+            # Policy
+            # -------------------------------------------------
 
             policy = turn.get(
                 "policy",
                 {}
             )
 
-            pred_cases = get_pred_cases(
-                policy
+            policy_label = (
+                get_policy_label(policy)
             )
 
-            retrieved = get_retrieved_case_ids(
-                turn
+            pred_cases = (
+                get_pred_cases(policy)
             )
-
-            # =================================================
-            # Trigger
-            # =================================================
-
-            trigger = (
-                turn
-                .get("trigger", {})
-                .get("trigger", False)
-            )
-
-            if not trigger:
-
-                if details is not None:
-
-                    details[
-                        "case_turn_errors"
-                    ][
-                        "trigger_miss"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            golden_cases,
-                            pred_cases,
-                            retrieved,
-                        )
-                    )
-
-                    details[
-                        "case_frequency"
-                    ][
-                        "trigger_miss"
-                    ][golden_case] += 1
-
-                continue
-
-            trigger_hit += 1
-
-            # =================================================
-            # Retrieval
-            # =================================================
-
-            hit5 = golden_case in retrieved[:5]
-            hit3 = golden_case in retrieved[:3]
-            hit1 = golden_case in retrieved[:1]
-
-            top5_hit += hit5
-            top3_hit += hit3
-            top1_hit += hit1
 
             # -------------------------------------------------
-            # Top-5 Retrieval Miss
+            # Evidence
             # -------------------------------------------------
 
-            if not hit5:
-
-                if details is not None:
-
-                    details[
-                        "case_turn_errors"
-                    ][
-                        "retrieval_top5_miss"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            golden_cases,
-                            pred_cases,
-                            retrieved,
-                        )
-                    )
-
-                    details[
-                        "case_frequency"
-                    ][
-                        "retrieval_top5_miss"
-                    ][golden_case] += 1
-
-                continue
-
-            # =================================================
-            # Policy
-            # =================================================
-
-            policy_label = get_policy_label(
-                policy
+            retrieved_cases = (
+                get_retrieved_case_ids(turn)
             )
 
-            if policy_label not in KNOWLEDGE_POLICY:
+            has_evidence = bool(
+                retrieved_cases
+            )
+
+            # =================================================
+            # 0. FIRST:
+            # Final correctness
+            # =================================================
+
+            is_final_correct = (
+                policy_label
+                in KNOWLEDGE_POLICY
+                and
+                golden_case
+                in pred_cases
+            )
+
+            if is_final_correct:
+
+                final_correct += 1
 
                 if details is not None:
 
                     details[
-                        "case_turn_errors"
+                        "case_turn_analysis"
                     ][
-                        "policy_error"
+                        "correct"
                     ].append(
                         make_turn_record(
                             dialog_id,
                             turn,
-                            golden_cases,
-                            pred_cases,
-                            retrieved,
+                            error_type=None,
                         )
                     )
 
-                    details[
-                        "case_frequency"
-                    ][
-                        "policy_error"
-                    ][golden_case] += 1
+            # =================================================
+            # 1. Evidence Availability
+            # =================================================
 
+            if has_evidence:
+
+                evidence_available += 1
+
+            # =================================================
+            # 2. Retrieval Metrics
+            #
+            # 只有 Evidence 非空才计算 conditional recall
+            # =================================================
+
+            hit5 = False
+            hit3 = False
+            hit1 = False
+
+            if has_evidence:
+
+                hit5 = (
+                    golden_case
+                    in retrieved_cases[:5]
+                )
+
+                hit3 = (
+                    golden_case
+                    in retrieved_cases[:3]
+                )
+
+                hit1 = (
+                    golden_case
+                    in retrieved_cases[:1]
+                )
+
+                top5_hit += int(hit5)
+                top3_hit += int(hit3)
+                top1_hit += int(hit1)
+
+            # =================================================
+            # 3. Policy Metric
+            #
+            # Golden 已进入 Top-5 后：
+            # Policy 是否进入知识型动作
+            # =================================================
+
+            if hit5:
+
+                if (
+                    policy_label
+                    in KNOWLEDGE_POLICY
+                ):
+                    policy_hit += 1
+
+            # =================================================
+            # 4. Selection Metric
+            #
+            # Golden 已进入 Top-5
+            # 且 Policy 是知识型：
+            # 是否选择正确 Case
+            # =================================================
+
+            if (
+                hit5
+                and
+                policy_label
+                in KNOWLEDGE_POLICY
+            ):
+
+                if golden_case in pred_cases:
+                    selection_hit += 1
+
+            # =================================================
+            # 如果最终正确：
+            # 不再做错误归因
+            # =================================================
+
+            if is_final_correct:
                 continue
 
-            policy_hit += 1
-
             # =================================================
-            # Selection
+            # ERROR ATTRIBUTION
+            #
+            # 最终错误后才从上到下归因
             # =================================================
 
-            if golden_case in pred_cases:
+            error_type = None
 
-                selection_hit += 1
+            # -------------------------------------------------
+            # Error 1:
+            # Evidence Missing
+            # -------------------------------------------------
+
+            if not has_evidence:
+
+                error_type = (
+                    "evidence_missing"
+                )
+
+            # -------------------------------------------------
+            # Error 2:
+            # Golden 不在 Top-5
+            # -------------------------------------------------
+
+            elif not hit5:
+
+                error_type = (
+                    "retrieval_error"
+                )
+
+            # -------------------------------------------------
+            # Error 3:
+            # Evidence 正确，但 Policy 错
+            # -------------------------------------------------
+
+            elif (
+                policy_label
+                not in KNOWLEDGE_POLICY
+            ):
+
+                error_type = (
+                    "policy_error"
+                )
+
+            # -------------------------------------------------
+            # Error 4:
+            # Policy 正确，但 Case 选择错误
+            # -------------------------------------------------
+
+            elif golden_case not in pred_cases:
+
+                error_type = (
+                    "selection_error"
+                )
+
+            # -------------------------------------------------
+            # Fallback
+            # -------------------------------------------------
 
             else:
 
-                if details is not None:
+                error_type = (
+                    "unknown_error"
+                )
 
-                    details[
-                        "case_turn_errors"
-                    ][
-                        "selection_error"
-                    ].append(
-                        make_turn_record(
-                            dialog_id,
-                            turn,
-                            golden_cases,
-                            pred_cases,
-                            retrieved,
-                        )
-                    )
+            # =================================================
+            # Save Error
+            # =================================================
 
-                    details[
-                        "case_frequency"
-                    ][
-                        "selection_error"
-                    ][golden_case] += 1
+            if details is not None:
 
-                    # -----------------------------------------
-                    # Golden -> Predicted confusion
-                    # -----------------------------------------
+                record = make_turn_record(
+                    dialog_id,
+                    turn,
+                    error_type=error_type,
+                )
+
+                details[
+                    "case_turn_analysis"
+                ][
+                    "errors"
+                ][
+                    error_type
+                ].append(
+                    record
+                )
+
+                details[
+                    "case_frequency"
+                ][
+                    error_type
+                ][golden_case] += 1
+
+                # ---------------------------------------------
+                # Selection confusion
+                # ---------------------------------------------
+
+                if error_type == "selection_error":
 
                     if pred_cases:
 
                         for pred_case in pred_cases:
 
                             key = (
-                                f"{golden_case} -> "
+                                f"{golden_case}"
+                                f" -> "
                                 f"{pred_case}"
                             )
 
@@ -446,60 +557,88 @@ def evaluate_case_turn(data, details=None):
                     else:
 
                         key = (
-                            f"{golden_case} -> "
-                            f"NO_CASE"
+                            f"{golden_case}"
+                            f" -> NO_CASE"
                         )
 
                         details[
                             "case_confusion"
                         ][key] += 1
 
+    # ========================================================
+    # Result
+    # ========================================================
+
     return {
         "案例轮数量":
             total_case_turn,
 
-        "知识链路触发率":
-            trigger_hit / total_case_turn
-            if total_case_turn
-            else 0,
+        "候选证据可用率":
+            (
+                evidence_available
+                / total_case_turn
+                if total_case_turn
+                else 0
+            ),
 
         "Top-5有效案例召回率":
-            top5_hit / trigger_hit
-            if trigger_hit
-            else 0,
+            (
+                top5_hit
+                / evidence_available
+                if evidence_available
+                else 0
+            ),
 
         "Top-3有效案例召回率":
-            top3_hit / trigger_hit
-            if trigger_hit
-            else 0,
+            (
+                top3_hit
+                / evidence_available
+                if evidence_available
+                else 0
+            ),
 
         "Top-1有效案例召回率":
-            top1_hit / trigger_hit
-            if trigger_hit
-            else 0,
+            (
+                top1_hit
+                / evidence_available
+                if evidence_available
+                else 0
+            ),
 
         "知识型策略命中率":
-            policy_hit / top5_hit
-            if top5_hit
-            else 0,
+            (
+                policy_hit
+                / top5_hit
+                if top5_hit
+                else 0
+            ),
 
         "案例选择准确率":
-            selection_hit / policy_hit
-            if policy_hit
-            else 0,
+            (
+                selection_hit
+                / policy_hit
+                if policy_hit
+                else 0
+            ),
 
         "最终案例推荐准确率":
-            selection_hit / total_case_turn
-            if total_case_turn
-            else 0,
+            (
+                final_correct
+                / total_case_turn
+                if total_case_turn
+                else 0
+            ),
     }
 
 
 # ============================================================
-# All Turn Timing
+# Timing Evaluation
 # ============================================================
 
-def evaluate_timing(data, details=None):
+def evaluate_timing(
+    data,
+    details=None,
+):
 
     pred = []
     gold = []
@@ -524,8 +663,8 @@ def evaluate_timing(data, details=None):
                 {}
             )
 
-            policy_label = get_policy_label(
-                policy
+            policy_label = (
+                get_policy_label(policy)
             )
 
             predicted = (
@@ -542,11 +681,14 @@ def evaluate_timing(data, details=None):
             )
 
             # =================================================
-            # False Positive
-            # 不应该推荐，但推荐了
+            # FP
             # =================================================
 
-            if predicted and not golden_case:
+            if (
+                predicted
+                and
+                not golden_case
+            ):
 
                 if details is not None:
 
@@ -558,15 +700,21 @@ def evaluate_timing(data, details=None):
                         make_turn_record(
                             dialog_id,
                             turn,
+                            error_type=(
+                                "timing_false_positive"
+                            ),
                         )
                     )
 
             # =================================================
-            # False Negative
-            # 应该推荐，但没有推荐
+            # FN
             # =================================================
 
-            if not predicted and golden_case:
+            if (
+                not predicted
+                and
+                golden_case
+            ):
 
                 if details is not None:
 
@@ -578,31 +726,32 @@ def evaluate_timing(data, details=None):
                         make_turn_record(
                             dialog_id,
                             turn,
+                            error_type=(
+                                "timing_false_negative"
+                            ),
                         )
                     )
 
+    # --------------------------------------------------------
+    # Metrics
+    # --------------------------------------------------------
+
     tp = sum(
         p and g
-        for p, g in zip(
-            pred,
-            gold
-        )
+        for p, g
+        in zip(pred, gold)
     )
 
     fp = sum(
         p and not g
-        for p, g in zip(
-            pred,
-            gold
-        )
+        for p, g
+        in zip(pred, gold)
     )
 
     fn = sum(
         not p and g
-        for p, g in zip(
-            pred,
-            gold
-        )
+        for p, g
+        in zip(pred, gold)
     )
 
     precision = (
@@ -635,14 +784,18 @@ def evaluate_timing(data, details=None):
             f1,
 
         "过早推荐率":
-            fp / (tp + fp)
-            if tp + fp
-            else 0,
+            (
+                fp / (tp + fp)
+                if tp + fp
+                else 0
+            ),
 
         "漏推荐率":
-            fn / (tp + fn)
-            if tp + fn
-            else 0,
+            (
+                fn / (tp + fn)
+                if tp + fn
+                else 0
+            ),
     }
 
 
@@ -650,15 +803,15 @@ def evaluate_timing(data, details=None):
 # Dialogue Level
 # ============================================================
 
-def evaluate_dialogue(data, details=None):
+def evaluate_dialogue(
+    data,
+    details=None,
+):
 
     success = []
 
     golden_first = []
     pred_first = []
-
-    # 额外诊断信息，不改变原指标
-    turn_differences = []
 
     for dialog_id, dialog in data.items():
 
@@ -668,14 +821,11 @@ def evaluate_dialogue(data, details=None):
         g_turn = None
         p_turn = None
 
-        golden_turn_records = []
-        predicted_turn_records = []
-
         for turn in dialog["turns"]:
 
-            # =================================================
-            # Golden Cases
-            # =================================================
+            # -------------------------------------------------
+            # Golden
+            # -------------------------------------------------
 
             g_cases = extract_case_ids(
                 turn.get(
@@ -684,73 +834,46 @@ def evaluate_dialogue(data, details=None):
                 )
             )
 
-            for case_id in g_cases:
-                golden_cases.add(
-                    case_id
-                )
-
-            if g_cases:
-
-                golden_turn_records.append({
-                    "turn_id":
-                        turn.get("turn_id"),
-
-                    "case_ids":
-                        g_cases,
-
-                    "golden_response":
-                        turn.get(
-                            "golden_response",
-                            ""
-                        ),
-                })
+            golden_cases.update(
+                g_cases
+            )
 
             if (
                 g_cases
-                and g_turn is None
+                and
+                g_turn is None
             ):
-                g_turn = turn["turn_id"]
-
-            # =================================================
-            # Predicted Cases
-            # =================================================
-
-            policy = turn.get(
-                "policy",
-                {}
-            )
-
-            p_cases = get_pred_cases(
-                policy
-            )
-
-            for case_id in p_cases:
-                predicted_cases.add(
-                    case_id
+                g_turn = turn.get(
+                    "turn_id"
                 )
 
-            if p_cases:
+            # -------------------------------------------------
+            # Prediction
+            # -------------------------------------------------
 
-                predicted_turn_records.append({
-                    "turn_id":
-                        turn.get("turn_id"),
+            p_cases = get_pred_cases(
+                turn.get(
+                    "policy",
+                    {}
+                )
+            )
 
-                    "case_ids":
-                        p_cases,
-
-                    "policy":
-                        policy,
-                })
+            predicted_cases.update(
+                p_cases
+            )
 
             if (
                 p_cases
-                and p_turn is None
+                and
+                p_turn is None
             ):
-                p_turn = turn["turn_id"]
+                p_turn = turn.get(
+                    "turn_id"
+                )
 
-        # =====================================================
-        # Original Success Definition
-        # =====================================================
+        # -----------------------------------------------------
+        # Dialogue Success
+        # -----------------------------------------------------
 
         dialog_success = bool(
             golden_cases
@@ -771,57 +894,61 @@ def evaluate_dialogue(data, details=None):
                 p_turn
             )
 
-        # =====================================================
-        # Timing Difference
-        # =====================================================
-
-        turn_difference = None
-        timing_type = None
-
-        if (
-            g_turn is not None
-            and p_turn is not None
-        ):
-
-            turn_difference = (
-                p_turn - g_turn
-            )
-
-            turn_differences.append(
-                turn_difference
-            )
-
-            if turn_difference < 0:
-                timing_type = "early"
-
-            elif turn_difference > 0:
-                timing_type = "late"
-
-            else:
-                timing_type = "same_turn"
-
-        elif (
-            g_turn is not None
-            and p_turn is None
-        ):
-            timing_type = "never_recommend"
-
-        elif (
-            g_turn is None
-            and p_turn is not None
-        ):
-            timing_type = "unnecessary_recommend"
-
-        else:
-            timing_type = "no_case_required"
-
-        # =====================================================
-        # Dialogue Details
-        # =====================================================
+        # -----------------------------------------------------
+        # Detail
+        # -----------------------------------------------------
 
         if details is not None:
 
-            dialog_record = {
+            turn_difference = None
+            timing_type = None
+
+            if (
+                g_turn is not None
+                and
+                p_turn is not None
+            ):
+
+                turn_difference = (
+                    p_turn - g_turn
+                )
+
+                if turn_difference < 0:
+                    timing_type = "early"
+
+                elif turn_difference > 0:
+                    timing_type = "late"
+
+                else:
+                    timing_type = "same_turn"
+
+            elif (
+                g_turn is not None
+                and
+                p_turn is None
+            ):
+
+                timing_type = (
+                    "never_recommend"
+                )
+
+            elif (
+                g_turn is None
+                and
+                p_turn is not None
+            ):
+
+                timing_type = (
+                    "unnecessary_recommend"
+                )
+
+            else:
+
+                timing_type = (
+                    "no_case_required"
+                )
+
+            record = {
                 "dialog_id":
                     dialog_id,
 
@@ -829,10 +956,14 @@ def evaluate_dialogue(data, details=None):
                     dialog_success,
 
                 "golden_cases":
-                    sorted(golden_cases),
+                    sorted(
+                        golden_cases
+                    ),
 
                 "predicted_cases":
-                    sorted(predicted_cases),
+                    sorted(
+                        predicted_cases
+                    ),
 
                 "golden_first_turn":
                     g_turn,
@@ -845,12 +976,6 @@ def evaluate_dialogue(data, details=None):
 
                 "timing_type":
                     timing_type,
-
-                "golden_turns":
-                    golden_turn_records,
-
-                "predicted_turns":
-                    predicted_turn_records,
             }
 
             details[
@@ -858,36 +983,52 @@ def evaluate_dialogue(data, details=None):
             ][
                 "all_dialogues"
             ].append(
-                dialog_record
+                record
             )
-
-            # ---------------------------------------------
-            # Dialogue Failure
-            # ---------------------------------------------
 
             if not dialog_success:
 
-                # 对失败原因做简单分类
-                if not golden_cases:
-                    failure_type = (
-                        "no_golden_case"
-                    )
+                failure_record = dict(
+                    record
+                )
 
-                elif not predicted_cases:
+                if (
+                    golden_cases
+                    and
+                    not predicted_cases
+                ):
+
                     failure_type = (
                         "never_recommend"
                     )
 
-                else:
+                elif (
+                    golden_cases
+                    and
+                    predicted_cases
+                ):
+
                     failure_type = (
                         "wrong_case"
                     )
 
-                dialog_record = dict(
-                    dialog_record
-                )
+                elif (
+                    not golden_cases
+                    and
+                    predicted_cases
+                ):
 
-                dialog_record[
+                    failure_type = (
+                        "unnecessary_recommend"
+                    )
+
+                else:
+
+                    failure_type = (
+                        "no_case_required"
+                    )
+
+                failure_record[
                     "failure_type"
                 ] = failure_type
 
@@ -896,7 +1037,7 @@ def evaluate_dialogue(data, details=None):
                 ][
                     "failures"
                 ].append(
-                    dialog_record
+                    failure_record
                 )
 
     return {
@@ -923,60 +1064,27 @@ def build_detail_summary(
     details,
 ):
 
-    total_dialogues = len(data)
-
-    total_turns = sum(
-        len(dialog.get("turns", []))
-        for dialog in data.values()
-    )
-
-    trigger_miss = len(
+    error_groups = (
         details[
-            "case_turn_errors"
+            "case_turn_analysis"
         ][
-            "trigger_miss"
+            "errors"
         ]
     )
 
-    retrieval_miss = len(
-        details[
-            "case_turn_errors"
-        ][
-            "retrieval_top5_miss"
-        ]
-    )
+    error_counts = {
+        key: len(value)
+        for key, value
+        in error_groups.items()
+    }
 
-    policy_error = len(
-        details[
-            "case_turn_errors"
-        ][
-            "policy_error"
-        ]
-    )
-
-    selection_error = len(
-        details[
-            "case_turn_errors"
-        ][
-            "selection_error"
-        ]
-    )
-
-    fp = len(
-        details[
+    timing_counts = {
+        key: len(value)
+        for key, value
+        in details[
             "timing_errors"
-        ][
-            "false_positive"
-        ]
-    )
-
-    fn = len(
-        details[
-            "timing_errors"
-        ][
-            "false_negative"
-        ]
-    )
+        ].items()
+    }
 
     dialogue_failures = len(
         details[
@@ -986,25 +1094,22 @@ def build_detail_summary(
         ]
     )
 
-    # Timing distribution
-    timing_distribution = Counter()
-
-    for item in details[
-        "dialogue_analysis"
-    ][
-        "all_dialogues"
-    ]:
-        timing_distribution[
-            item["timing_type"]
-        ] += 1
-
     return {
         "dataset": {
             "dialogues":
-                total_dialogues,
+                len(data),
 
             "turns":
-                total_turns,
+                sum(
+                    len(
+                        dialog.get(
+                            "turns",
+                            []
+                        )
+                    )
+                    for dialog
+                    in data.values()
+                ),
         },
 
         "metrics": {
@@ -1018,33 +1123,14 @@ def build_detail_summary(
                 dialogue_result,
         },
 
-        "error_counts": {
-            "trigger_miss":
-                trigger_miss,
+        "case_turn_error_counts":
+            error_counts,
 
-            "retrieval_top5_miss":
-                retrieval_miss,
+        "timing_error_counts":
+            timing_counts,
 
-            "policy_error":
-                policy_error,
-
-            "selection_error":
-                selection_error,
-
-            "timing_false_positive":
-                fp,
-
-            "timing_false_negative":
-                fn,
-
-            "dialogue_failure":
-                dialogue_failures,
-        },
-
-        "dialogue_timing_distribution":
-            dict(
-                timing_distribution
-            ),
+        "dialogue_failure_count":
+            dialogue_failures,
     }
 
 
@@ -1054,18 +1140,21 @@ def build_detail_summary(
 
 def finalize_details(details):
 
-    # Counter 无法直接按我们想要的形式输出，
-    # 在保存前转换为普通 dict。
-
     details["case_frequency"] = {
-        name: counter_to_dict(counter)
+        name:
+            counter_to_dict(counter)
+
         for name, counter
-        in details["case_frequency"].items()
+        in details[
+            "case_frequency"
+        ].items()
     }
 
     details["case_confusion"] = (
         counter_to_dict(
-            details["case_confusion"]
+            details[
+                "case_confusion"
+            ]
         )
     )
 
@@ -1076,7 +1165,10 @@ def finalize_details(details):
 # Print
 # ============================================================
 
-def print_result(title, result):
+def print_result(
+    title,
+    result,
+):
 
     print(
         f"\n========== {title} =========="
@@ -1085,11 +1177,13 @@ def print_result(title, result):
     for key, value in result.items():
 
         if isinstance(value, float):
+
             print(
                 f"{key}: {value:.4f}"
             )
 
         else:
+
             print(
                 f"{key}: {value}"
             )
@@ -1105,41 +1199,42 @@ def main():
 
     parser.add_argument(
         "--input",
-        required=True
+        required=True,
     )
 
     parser.add_argument(
         "--details_output",
         default=None,
-        help=(
-            "详细错误分析 JSON 输出路径。"
-            "如果不指定，则自动保存到 "
-            "<input>_details.json"
-        )
     )
 
     args = parser.parse_args()
 
-    # --------------------------------------------------------
+    # ========================================================
     # Load
-    # --------------------------------------------------------
+    # ========================================================
 
     data = load_json(
         args.input
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Detail Collector
-    # --------------------------------------------------------
+    # ========================================================
 
     details = {
         "summary": {},
 
-        "case_turn_errors": {
-            "trigger_miss": [],
-            "retrieval_top5_miss": [],
-            "policy_error": [],
-            "selection_error": [],
+        "case_turn_analysis": {
+
+            "correct": [],
+
+            "errors": {
+                "evidence_missing": [],
+                "retrieval_error": [],
+                "policy_error": [],
+                "selection_error": [],
+                "unknown_error": [],
+            },
         },
 
         "timing_errors": {
@@ -1153,56 +1248,67 @@ def main():
         },
 
         "case_frequency": {
-            "trigger_miss": Counter(),
-            "retrieval_top5_miss": Counter(),
-            "policy_error": Counter(),
-            "selection_error": Counter(),
+            "evidence_missing":
+                Counter(),
+
+            "retrieval_error":
+                Counter(),
+
+            "policy_error":
+                Counter(),
+
+            "selection_error":
+                Counter(),
+
+            "unknown_error":
+                Counter(),
         },
 
-        "case_confusion": Counter(),
+        "case_confusion":
+            Counter(),
     }
 
-    # --------------------------------------------------------
-    # Evaluation
-    # --------------------------------------------------------
+    # ========================================================
+    # Evaluate
+    # ========================================================
 
     case_result = evaluate_case_turn(
         data,
-        details
+        details,
     )
 
     timing_result = evaluate_timing(
         data,
-        details
+        details,
     )
 
     dialogue_result = evaluate_dialogue(
         data,
-        details
+        details,
     )
 
-    # --------------------------------------------------------
-    # 保持原来的终端输出
-    # --------------------------------------------------------
+    # ========================================================
+    # Terminal Output
+    # ========================================================
 
     print_result(
         "案例轮指标",
-        case_result
+        case_result,
     )
 
     print_result(
         "所有轮推荐时机",
-        timing_result
+        timing_result,
     )
 
     print_result(
         "对话级指标",
-        dialogue_result
+        dialogue_result,
     )
 
-    # --------------------------------------------------------
-    # Build Detail Summary
-    # --------------------------------------------------------
+    # ========================================================
+    # Detail Summary
+    # ========================================================
 
     details["summary"] = (
         build_detail_summary(
@@ -1218,9 +1324,9 @@ def main():
         details
     )
 
-    # --------------------------------------------------------
-    # Output Path
-    # --------------------------------------------------------
+    # ========================================================
+    # Output
+    # ========================================================
 
     if args.details_output:
 
@@ -1236,23 +1342,20 @@ def main():
 
         details_path = (
             input_path.parent
-            / (
+            /
+            (
                 input_path.stem
                 + "_details.json"
             )
         )
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
-
     save_json(
         details_path,
-        details
+        details,
     )
 
     print(
-        f"\n详细错误分析已保存到: "
+        "\n详细错误分析已保存到: "
         f"{details_path}"
     )
 
