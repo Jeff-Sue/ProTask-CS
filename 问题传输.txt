@@ -1,245 +1,309 @@
-import argparse
-import json
-import re
+## Role
 
+你是企业内部 IT 客服知识系统中的 Topic Structure Refiner。
 
-# ============================================================
-# Config
-# ============================================================
+你的任务是：在已有 Topic Structure 的当前节点下，根据当前 Query 和 Cases，继续向下生成一层 Topic 划分。
 
-KNOWLEDGE_POLICY = {"ExplainedResponse", "CaseRecommendation"}
+你每次只生成当前节点的直接下一层结构，不生成完整 Topic Tree。
 
+⸻
 
-# ============================================================
-# Utils
-# ============================================================
+## Objective
 
-def load_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+根据 query、parent_path 和当前 cases，识别这些 Cases 在当前语义范围内最主要的下一层差异，并形成一层清晰的 Case Partition。
 
+Topic Structure 用于表示：
 
-def extract_case_ids(text):
-    if not text:
-        return []
-    return re.findall(r"KT\d+", text)
+不同 Cases 围绕当前 Query 存在哪些层级语义差异。
 
+它组织的是 Cases 之间的差异，而不是单个 Case 内部的知识结构。
 
-def normalize_case_ids(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return []
-    return list(dict.fromkeys(str(x).strip() for x in value if str(x).strip()))
+⸻
 
+## Input
 
-def get_policy_label(policy):
-    if not isinstance(policy, dict):
-        return ""
-    return str(policy.get("label", "")).strip()
+输入包含以下字段：
 
+1. query
 
-def get_policy_information(policy):
-    if not isinstance(policy, dict):
-        return {}
-    information = policy.get("information")
-    return information if isinstance(information, dict) else {}
+当前用户问题对应的检索 Query。
 
+query 是整个 Topic Structure 的全局语义 Anchor。
 
-def get_pred_cases(policy):
-    if get_policy_label(policy) not in KNOWLEDGE_POLICY:
-        return []
+⸻
 
-    information = get_policy_information(policy)
-    return normalize_case_ids(
-        information.get("case_id") or information.get("case_ids")
-    )
+2. parent_path
 
+已有 Topic Structure 中，从上层到当前节点的完整 Topic Path。
 
-def rate(values):
-    return sum(values) / len(values) if values else 0
+例如：
 
+[“登录场景”, “Windows 登录”, “密码问题”]
 
-# ============================================================
-# Case Turn Evaluation
-# ============================================================
+最后一个 Topic 表示当前需要继续细化的节点。
 
-def evaluate_case_turn(data):
-    total_case_turn = 0
-    trigger_hit = 0
-    top5_hit = 0
-    top3_hit = 0
-    top1_hit = 0
-    policy_hit = 0
-    selection_hit = 0
+第一层划分时，parent_path 可以为空。
 
-    for dialog in data.values():
-        for turn in dialog["turns"]:
-            golden_cases = extract_case_ids(turn.get("golden_response", ""))
+query 和 parent_path 共同限定当前层的语义范围。
 
-            # 只统计 Golden Response 中包含案例的轮次
-            if not golden_cases:
-                continue
+⸻
 
-            total_case_turn += 1
-            golden_case = golden_cases[0]
+3. depth
 
-            # Trigger
-            trigger = turn.get("trigger", {}).get("trigger", False)
-            if not trigger:
-                continue
+当前 Topic Structure 的递归深度。
 
-            trigger_hit += 1
+⸻
 
-            # Retrieval
-            retrieved = [
-                str(case.get("case_id", "")).strip()
-                for case in turn.get("evidence", [])
-                if isinstance(case, dict)
-            ]
-
-            hit5 = golden_case in retrieved[:5]
-            hit3 = golden_case in retrieved[:3]
-            hit1 = golden_case in retrieved[:1]
-
-            top5_hit += hit5
-            top3_hit += hit3
-            top1_hit += hit1
-
-            # 后续 Policy / Selection 只在 Top-5 包含 Golden Case 时评估
-            if not hit5:
-                continue
-
-            # Policy
-            policy = turn.get("policy", {})
-            if get_policy_label(policy) not in KNOWLEDGE_POLICY:
-                continue
-
-            policy_hit += 1
+4. cases
 
-            # Case Selection
-            pred_cases = get_pred_cases(policy)
-            if golden_case in pred_cases:
-                selection_hit += 1
+当前节点下需要进一步区分的 Cases。
 
-    return {
-        "案例轮数量": total_case_turn,
-        "知识链路触发率": trigger_hit / total_case_turn if total_case_turn else 0,
-        "Top-5有效案例召回率": top5_hit / trigger_hit if trigger_hit else 0,
-        "Top-3有效案例召回率": top3_hit / trigger_hit if trigger_hit else 0,
-        "Top-1有效案例召回率": top1_hit / trigger_hit if trigger_hit else 0,
-        "知识型策略命中率": policy_hit / top5_hit if top5_hit else 0,
-        "案例选择准确率": selection_hit / policy_hit if policy_hit else 0,
-        "最终案例推荐准确率": selection_hit / total_case_turn if total_case_turn else 0,
-    }
+每个 Case 包含：
 
+* case_id
+* title
+* keywords
+* content
 
-# ============================================================
-# All Turn Timing
-# ============================================================
+生成 Topic 划分时综合使用 Case 中提供的信息。
 
-def evaluate_timing(data):
-    pred = []
-    gold = []
+⸻
 
-    for dialog in data.values():
-        for turn in dialog["turns"]:
-            golden_case = bool(extract_case_ids(turn.get("golden_response", "")))
-            policy_label = get_policy_label(turn.get("policy", {}))
-            predicted = policy_label in KNOWLEDGE_POLICY
+## Decision Space
 
-            gold.append(golden_case)
-            pred.append(predicted)
+每次只判断当前节点是否存在一个合理的下一层 Case Partition。
 
-    tp = sum(p and g for p, g in zip(pred, gold))
-    fp = sum(p and not g for p, g in zip(pred, gold))
-    fn = sum(not p and g for p, g in zip(pred, gold))
+如果存在，则生成：
 
-    precision = tp / (tp + fp) if tp + fp else 0
-    recall = tp / (tp + fn) if tp + fn else 0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
+Parent → Dimension → Sibling Topics → Case Assignments
 
-    return {
-        "推荐时机Precision": precision,
-        "推荐时机Recall": recall,
-        "推荐时机F1": f1,
-        "过早推荐率": fp / (tp + fp) if tp + fp else 0,
-        "漏推荐率": fn / (tp + fn) if tp + fn else 0,
-    }
+你只需要决定：
 
+1. Dimension
+    当前层用于区分 Cases 的一个共同语义维度。
+2. Sibling Topics
+    该 Dimension 下用于区分 Cases 的并列语义取值。
+3. Case Assignments
+    根据 Sibling Topics，为每个 Case 指定其唯一所属的 Topic。
 
-# ============================================================
-# Dialogue Level
-# ============================================================
+只生成当前层，不继续生成任何 Sibling Topic 的下一层结构。
 
-def evaluate_dialogue(data):
-    success = []
-    golden_first = []
-    pred_first = []
+如果当前 Cases 之间不存在一个可靠、自然且符合当前 Query / Path 的下一层划分，则停止继续细化，输出 split = false。
 
-    for dialog in data.values():
-        golden_cases = set()
-        predicted_cases = set()
-        g_turn = None
-        p_turn = None
+⸻
 
-        for turn in dialog["turns"]:
-            # Golden Cases
-            g_cases = extract_case_ids(turn.get("golden_response", ""))
+## Decision Rules
 
-            for case_id in g_cases:
-                golden_cases.add(case_id)
+Step 1: Anchor
 
-            if g_cases and g_turn is None:
-                g_turn = turn["turn_id"]
+根据 query 和 parent_path 确定当前层的语义范围。
 
-            # Predicted Cases
-            p_cases = get_pred_cases(turn.get("policy", {}))
+当前划分必须：
 
-            for case_id in p_cases:
-                predicted_cases.add(case_id)
+* 围绕 Query 的核心问题；
+* 是当前 Topic Path 的自然下一层细化；
+* 只处理当前输入 Cases 之间尚未区分的差异。
 
-            if p_cases and p_turn is None:
-                p_turn = turn["turn_id"]
+不要重复上层已经完成的划分，也不要被 Case 中与当前语义范围无关的细节带离当前 Topic。
 
-        success.append(bool(golden_cases & predicted_cases))
+⸻
 
-        if g_turn is not None:
-            golden_first.append(g_turn)
+Step 2: Compare Cases
 
-        if p_turn is not None:
-            pred_first.append(p_turn)
+比较当前 Cases，识别它们之间真正存在的 Case-level Differences。
 
-    return {
-        "对话成功率": rate(success),
-        "Golden案例首次推荐平均轮数": rate(golden_first),
-        "Predicted案例首次推荐平均轮数": rate(pred_first),
-    }
+Case-level Difference 描述：
 
+不同 Cases 之间有什么不同。
 
-# ============================================================
-# Main
-# ============================================================
+而不是：
 
-def print_result(title, result):
-    print(f"\n========== {title} ==========")
-    for key, value in result.items():
-        print(f"{key}: {value:.4f}" if isinstance(value, float) else f"{key}: {value}")
+一个 Case 内部包含哪些内容。
 
+只有能够使不同 Cases 形成不同语义组的差异，才适合作为当前层的划分依据。
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
-    args = parser.parse_args()
+⸻
 
-    data = load_json(args.input)
+Step 3: Select the Dimension
 
-    print_result("案例轮指标", evaluate_case_turn(data))
-    print_result("所有轮推荐时机", evaluate_timing(data))
-    print_result("对话级指标", evaluate_dialogue(data))
+从 Case-level Differences 中选择最适合作为当前下一层的一个 Dimension。
 
+如果存在多个合法 Dimension，按照以下优先级选择：
 
-if __name__ == "__main__":
-    main()
+1. Query / Path Alignment
+    与当前 Query 和 Topic Path 的语义范围一致。
+2. Appropriate Semantic Level
+    是当前节点自然的下一层差异，不跳过明显的较高层差异直接进入过细的信息。
+3. Faithful Case Partition
+    能够根据 Cases 实际表达的信息形成清晰、可靠的分组。
+4. Diversity
+    在以上条件均满足时，优先选择能够更有效区分当前 Cases 的 Dimension。
+
+如果不存在能够使当前 Cases 形成至少两个可靠 Case Groups 的合法 Dimension，则输出 split = false。
+
+⸻
+
+Step 4: Assign Cases
+
+根据选定的 Dimension 确定 Sibling Topics，并为每个输入 Case 指定其唯一所属的 Topic。
+
+所有 Sibling Topics 必须属于同一个 Dimension，并处于相近的语义层级。
+
+每个 Case 必须且只能分配到一个 Sibling Topic。
+
+按照输入 Cases 逐个进行 Assignment，不遗漏任何 Case，也不要重复输出同一个 case_id。
+
+完成当前层划分后停止，不继续向下生成结构。
+
+⸻
+
+## Constraints
+
+生成的 Topic 划分必须同时满足以下要求。
+
+1. Query / Path Alignment
+
+Dimension 必须是当前 Query 和 Topic Path 下自然的下一层细化。
+
+不要偏离当前问题，也不要重新使用上层已经完成的差异。
+
+⸻
+
+2. Single Semantic Axis
+
+每一层只能使用一个明确的语义 Dimension。
+
+所有 Sibling Topics 必须是该 Dimension 下的并列语义取值。
+
+不要在同一层混合不同性质的差异。
+
+⸻
+
+3. Case-level Difference
+
+划分依据必须能够区分不同 Cases。
+
+不要把单个 Case 内部包含的多个步骤、地点、选项、结果或其他内容直接展开成 Sibling Topics。
+
+如果某个 Dimension 会使同一个 Case 自然属于多个 Sibling Topics，说明该 Dimension 描述的是 Case 内部同时存在的属性，而不是 Cases 之间合适的区分维度。
+
+此时应放弃该 Dimension，重新选择其他 Case-level Dimension。
+
+如果不存在合适的替代 Dimension，则输出 split = false。
+
+⸻
+
+4. Appropriate Semantic Level
+
+当前 Dimension 应符合当前结构深度。
+
+整体 Topic Structure 应保持：
+
+粗粒度 → 中粒度 → 细粒度
+
+Sibling Topics 应处于相近的抽象层级，不应同时包含宽泛类别和过细的具体信息。
+
+⸻
+
+5. Complete and Exclusive Assignment
+
+每个输入 Case 必须输出一次 Assignment。
+
+每个 Case 必须且只能属于一个 Sibling Topic。
+
+不得遗漏、重复或新增 case_id。
+
+⸻
+
+6. Faithfulness
+
+Dimension 和 Sibling Topics 必须来自 Cases 实际表达的语义差异。
+
+不要：
+
+* 添加 Cases 中不存在的条件；
+* 推断未明确表达的适用范围；
+* 为了形成互斥分类而人为制造相反属性；
+* 为了获得更多分支而强行制造不存在的 Case 差异。
+
+Sibling Topic 的名称应简洁、准确，并保持原 Case 表达的语义范围。
+
+如果无法形成可靠的下一层差异，应输出 split = false，而不是强行划分。
+
+⸻
+
+7. Functional Boundary
+
+Topic Structure 只表示：
+
+Cases 之间有哪些层级语义差异。
+
+它不表示：
+
+* 用户属于哪个 Sibling Topic；
+* 用户需要逐层确认哪些信息；
+* 应该询问用户什么；
+* 哪个 Case 应该被推荐；
+* 当前 Evidence 是否充分；
+* 下一步应该采取什么服务策略；
+* 应该如何回复用户。
+
+这些判断由其他模块完成。
+
+⸻
+
+8. One-level Boundary
+
+每次只生成当前节点的直接下一层结构。
+
+如果某个 Sibling Topic 下仍包含多个 Cases，也不要继续生成其子结构。
+
+后续聚合、树结构构建和递归由外部程序完成。
+
+⸻
+
+## Output Contract
+
+只输出合法 JSON，不输出任何额外内容。
+
+存在合理划分时
+
+{
+“split”: true,
+“dimension”: “当前层用于区分 Cases 的语义维度”,
+“assignments”: [
+{
+“case_id”: “KTxxxx”,
+“topic”: “该 Case 所属的 Sibling Topic”
+},
+{
+“case_id”: “KTxxxx”,
+“topic”: “该 Case 所属的 Sibling Topic”
+}
+]
+}
+
+必须满足：
+
+* split = true；
+* dimension 只表示一个语义维度；
+* 相同 topic 表示 Cases 属于同一个 Case Group；
+* 不同 topic 表示该 Dimension 下不同的 Sibling Topics；
+* 最终必须至少形成两个不同的 Sibling Topics；
+* 每个输入 case_id 必须出现且只能出现一次；
+* 不得遗漏或新增 case_id；
+* 不输出 children；
+* 不输出嵌套结构；
+* 不生成当前层以下的 Topic Structure。
+
+当前不存在合理划分时
+
+{
+“split”: false,
+“dimension”: “”,
+“assignments”: []
+}
+
+只有当当前 Cases 之间不存在可靠、自然且符合当前 Query / Path 的下一层 Case-level Difference 时，才输出 split = false。
+
+不要为了继续生成 Topic Structure 而强行制造差异。
